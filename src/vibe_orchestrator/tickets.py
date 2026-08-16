@@ -28,20 +28,31 @@ class Ticket:
     description: str = ""
     parent: str | None = None
     blocked_by: list[str] = field(default_factory=list)
+    mandatory: bool = True
     wip_exempt: bool = False
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     active_run: str | None = None
     last_outcome: str | None = None
     last_summary: str | None = None
+    run_history: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Ticket":
+        payload = dict(data)
+        history = payload.get("run_history")
+        if isinstance(history, list):
+            payload["run_history"] = [dict(item) for item in history if isinstance(item, dict)]
+        else:
+            payload["run_history"] = []
         allowed = {name for name in cls.__dataclass_fields__}
-        return cls(**{key: value for key, value in data.items() if key in allowed})
+        return cls(**{key: value for key, value in payload.items() if key in allowed})
 
     def to_dict(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        payload = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        if not payload["run_history"]:
+            payload.pop("run_history")
+        return payload
 
 
 class TicketStore:
@@ -58,7 +69,11 @@ class TicketStore:
             (self.tickets_root / process).mkdir(parents=True, exist_ok=True)
         readme = self.root / "README.md"
         if not readme.exists():
-            readme.write_text("# .vibe\n\nСостояние тикетов для vibe-orchestrator. Коммитьте `tickets/`; `runs/` содержит локальные метаданные выполнения.\n", encoding="utf-8")
+            readme.write_text(
+                "# .vibe\n\n"
+                "Состояние тикетов для vibe-orchestrator. Коммитьте `tickets/`; `runs/` содержит локальные артефакты запусков (`run.json`, `events.jsonl`, `result.json`).\n",
+                encoding="utf-8",
+            )
         gitignore = self.root / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text("runs/\n", encoding="utf-8")
@@ -83,6 +98,28 @@ class TicketStore:
     def load_path(self, path: Path) -> Ticket:
         return Ticket.from_dict(yaml.safe_load(path.read_text(encoding="utf-8")))
 
+    def run_path(self, run_id: str) -> Path:
+        return self.runs_root / run_id
+
+    def record_run_event(
+        self,
+        ticket: Ticket,
+        *,
+        run_id: str,
+        stage_id: str,
+        event: str,
+        **extra: Any,
+    ) -> None:
+        entry = {
+            "run_id": run_id,
+            "stage": stage_id,
+            "event": event,
+            "timestamp": now_iso(),
+            "artifacts_path": f".vibe/runs/{run_id}",
+        }
+        entry.update({key: value for key, value in extra.items() if value is not None})
+        ticket.run_history.append(entry)
+
     def get(self, ticket_id: str) -> Ticket:
         matches = list(self.tickets_root.glob(f"*/{ticket_id}.yaml"))
         if not matches:
@@ -94,12 +131,22 @@ class TicketStore:
         pattern = "*.yaml" if process else "*/*.yaml"
         return [self.load_path(path) for path in sorted(base.glob(pattern))]
 
-    def create(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None) -> Ticket:
+    def children_of(self, parent_id: str, *, process: str | None = None) -> list[Ticket]:
+        tickets = [ticket for ticket in self.list(process) if ticket.parent == parent_id]
+        tickets.sort(key=lambda ticket: (ticket.created_at, ticket.priority, ticket.title, ticket.id))
+        return tickets
+
+    def is_done(self, ticket: Ticket) -> bool:
+        workflow = load_workflow(ticket.process)
+        stage = workflow.by_id[ticket.status]
+        return stage.kind == "done"
+
+    def create(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None, mandatory: bool = True) -> Ticket:
         workflow = load_workflow(process)
         prefix = {"discovery": "DISC", "delivery": "DEL", "process_management": "PM"}[process]
         ticket_id = f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
         if wip_exempt is None:
             wip_exempt = ticket_type in {"rework", "correction"}
-        ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, wip_exempt=wip_exempt)
+        ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, mandatory=mandatory, wip_exempt=wip_exempt)
         self.save(ticket)
         return ticket

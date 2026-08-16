@@ -8,7 +8,7 @@
 
 В комплект входят три процесса:
 
-- **Discovery** — Идея → анализ → Investment Decision → ожидание реализации → валидация.
+- **Discovery** — Идея → анализ → Technical Analysis → Investment Decision → ожидание реализации → валидация, плюс дочерние Correction без учета в WIP.
 - **Delivery** — Story / Task / Bug плюс дочерние Rework без учета в WIP.
 - **Process Management** — Audit / Planning / Estimation.
 
@@ -17,7 +17,8 @@
 - Сначала выбирается **самая правая доступная очередь**, затем корректирующая работа, приоритет и возраст.
 - Для активных стадий действуют лимиты WIP.
 - Оркестратор забирает тикет, перемещая его в активную стадию **до** запуска Codex.
-- Дочерние тикеты Rework/Correction не учитываются в WIP; родитель остается заблокированным на своей текущей стадии и продолжает занимать WIP.
+- Outcomes `needs_rework` и `needs_correction` автоматически создают дочерние тикеты Rework/Correction, не учитываемые в WIP; родитель остается на своей текущей стадии, заблокирован дочерними тикетами и продолжает занимать WIP.
+- Discovery `technical_analysis` может автоматически создать связанные Delivery-тикеты `story` / `task` / `bug`; Discovery-идея на стадии `implementation` ждет завершения только обязательных (`mandatory: true`) связанных Delivery-тикетов и только затем переходит в `ready_for_validation`.
 - Агенты возвращают `outcome`; сами статусы workflow они не меняют.
 
 ## Требования
@@ -40,7 +41,9 @@ brew install python@3.11
 python3.11 --version
 ```
 
-Codex вызывается как `codex exec --sandbox workspace-write --json --output-schema ... -o ... -`, используя уже настроенную аутентификацию CLI.
+Codex вызывается как `codex exec --sandbox workspace-write --json --model ... -c 'model_reasoning_effort="..."' --output-schema ... -o ... -`, используя уже настроенную аутентификацию CLI.
+
+Execution profile задается явно на уровне каждого `kind: agent` stage в `workflows/*.yaml`; `load_workflow()` валидирует наличие `prompt`, `model` и `reasoning_effort`. Итоговые `model`, `reasoning_effort`, `prompt_path` и `prompt_version` попадают в prompt, `ticket.run_history` и `.vibe/runs/<run_id>/run.json`.
 
 ## Быстрый старт в VS Code
 
@@ -93,7 +96,13 @@ vibe run /path/to/your-project
 ```text
 .vibe/
 ├── README.md
-├── .gitignore        # локальные логи запусков агентов игнорируются
+├── .gitignore        # локальные артефакты запусков игнорируются
+├── runs/
+│   └── <run_id>/
+│       ├── prompt.contract.txt
+│       ├── run.json
+│       ├── events.jsonl
+│       └── result.json
 └── tickets/
     ├── discovery/
     ├── delivery/
@@ -113,9 +122,43 @@ parent: null
 blocked_by: []
 description: ...
 wip_exempt: false
+active_run: 8f2d6d9f10b1493c80d4a9dfcb0d9f2f
+run_history:
+  - run_id: 8f2d6d9f10b1493c80d4a9dfcb0d9f2f
+    stage: technical_analysis
+    event: started
+    timestamp: 2026-08-16T09:00:00+00:00
+    artifacts_path: .vibe/runs/8f2d6d9f10b1493c80d4a9dfcb0d9f2f
+    prompt_path: discovery/technical_analysis.md
+    prompt_version: sha256:...
+    model: gpt-5.4
+    reasoning_effort: medium
+    ticket_title: Add family graph import
+    ticket_priority: "100"
+    ticket_parent: none
+    ticket_description: ...
 ```
 
 Прототип намеренно **не** реализует базу данных, интеграцию с Jira, пользователей, права доступа и полный журнал событий.
+
+## Traceability и аудит
+
+Source of truth для аудита разделен на два слоя:
+
+- `.vibe/tickets/**` — коммитируемое долговечное состояние. Поля `status`, `active_run`, `last_outcome`, `last_summary` и `run_history` определяют, что произошло с тикетом.
+- `.vibe/runs/<run_id>/` — локальные артефакты конкретного запуска. Здесь лежат `run.json` с execution profile и идентичностью запуска, `events.jsonl` с сырым выводом `codex exec` и `result.json` со структурированным ответом агента.
+
+Как интерпретировать поля:
+
+- `active_run` — только указатель на текущий незавершенный запуск. После завершения или ошибки поле очищается.
+- `run_history[].run_id` — единый идентификатор запуска, одинаковый для тикета, prompt и каталога `.vibe/runs/<run_id>`.
+- `run_history[].event` — durable timeline (`started`, `completed`, `failed`) для тикета; именно она нужна для ретроспективы после очистки `active_run`.
+- `run_history[].artifacts_path` — относительный путь к локальным артефактам этого запуска.
+- `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
+- `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.
+- `ticket_title`, `ticket_priority`, `ticket_parent`, `ticket_description` в `run_history`/`run.json` — durable snapshot mutable ticket-полей, которые реально были встроены в prompt этого запуска.
+
+Практическое правило для расследований: сначала смотрите `run_history` в тикете как индекс запусков, затем открывайте `.vibe/runs/<run_id>/run.json` и `result.json`, и только после этого при необходимости углубляйтесь в `events.jsonl`.
 
 ## Конфигурация процессов
 
@@ -130,7 +173,8 @@ wip_exempt: false
 ## Известные ограничения прототипа
 
 - Переходы, выполняемые человеком, намеренно упрощены: кнопки UI следуют только настроенному переходу `next`.
-- Investment Decision сейчас моделирует только путь approve; кнопки reject/correction будут следующей итерацией.
-- Автоматическое создание дочерних тикетов Discovery-to-Delivery и завершение Implementation по связанным тикетам Delivery пока не автоматизированы.
+- Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.
+- `technical_analysis` создает Delivery-тикеты только из YAML-блока `delivery_tickets` в `details`; поле `mandatory` управляет блокировкой Discovery `implementation`, дедупликация похожих тикетов пока не реализована.
+- Traceability MVP хранит `run_history` в самом тикете и локальные артефакты в `.vibe/runs/`; централизованного аудиторского хранилища, retention policy и защиты от ручного редактирования YAML пока нет.
 - Если процесс Codex завершается с ошибкой, родительский тикет остается на активной стадии, чтобы сбой оставался видимым в WIP.
 - UI намеренно минималистичен и не имеет зависимостей.

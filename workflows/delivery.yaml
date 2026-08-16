@@ -9,6 +9,8 @@ stages:
     kind: agent
     wip: 3
     prompt: delivery/system_analysis.md
+    model: gpt-5.4
+    reasoning_effort: medium
     outcomes: {completed: ready_for_development}
   - {id: ready_for_development, title: Готово к разработке, kind: queue, pull_to: development}
   - id: development
@@ -16,6 +18,8 @@ stages:
     kind: agent
     wip: 3
     prompt: delivery/development.md
+    model: gpt-5.4
+    reasoning_effort: medium
     outcomes: {completed: ready_for_review}
   - {id: ready_for_review, title: Готово к ревью, kind: queue, pull_to: review}
   - id: review
@@ -23,14 +27,18 @@ stages:
     kind: agent
     wip: 2
     prompt: delivery/review.md
-    outcomes: {completed: ready_for_acceptance}
+    model: gpt-5.4
+    reasoning_effort: low
+    outcomes: {completed: ready_for_acceptance, needs_rework: review}
   - {id: ready_for_acceptance, title: Готово к приемке, kind: queue, pull_to: acceptance}
   - id: acceptance
     title: Приемка
     kind: agent
     wip: 2
     prompt: delivery/acceptance.md
-    outcomes: {completed: ready_for_release}
+    model: gpt-5.4
+    reasoning_effort: low
+    outcomes: {completed: ready_for_release, needs_rework: acceptance}
   - {id: ready_for_release, title: Готово к релизу, kind: human, next: release}
   - {id: release, title: Релиз, kind: human, next: done}
   - {id: done, title: Готово, kind: done}

@@ -9,6 +9,8 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/generation.md
+    model: gpt-5.4
+    reasoning_effort: medium
     outcomes: {completed: human}
   - {id: human, title: Человек, kind: human, next: ready_for_analysis}
   - {id: ready_for_analysis, title: Готово к анализу, kind: queue, pull_to: analysis}
@@ -17,14 +19,18 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/analysis.md
-    outcomes: {completed: ready_for_technical_analysis}
+    model: gpt-5.4
+    reasoning_effort: medium
+    outcomes: {completed: ready_for_technical_analysis, needs_correction: analysis}
   - {id: ready_for_technical_analysis, title: Готово к техническому анализу, kind: queue, pull_to: technical_analysis}
   - id: technical_analysis
     title: Технический анализ
     kind: agent
     wip: 2
     prompt: discovery/technical_analysis.md
-    outcomes: {completed: investment_decision}
+    model: gpt-5.4
+    reasoning_effort: medium
+    outcomes: {completed: investment_decision, needs_correction: technical_analysis}
   - {id: investment_decision, title: Инвестиционное решение, kind: human, next: implementation}
   - {id: implementation, title: Реализация, kind: wait, next: ready_for_validation}
   - {id: ready_for_validation, title: Готово к валидации, kind: queue, pull_to: validation}
@@ -33,5 +39,7 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/validation.md
-    outcomes: {completed: done}
+    model: gpt-5.4
+    reasoning_effort: low
+    outcomes: {completed: done, needs_correction: validation}
   - {id: done, title: Готово, kind: done}

@@ -30,12 +30,17 @@ def select_candidates(workflow: Workflow, tickets: list[Ticket], running_ids: se
         if ticket.id in running_ids or ticket.active_run or ticket.blocked_by:
             continue
         source = by_id.get(ticket.status)
-        if not source or source.kind != "queue" or not source.pull_to:
+        if not source:
             continue
-        target = by_id[source.pull_to]
+        if source.kind == "queue" and source.pull_to:
+            target = by_id[source.pull_to]
+        elif source.kind == "agent" and ticket.last_outcome and (source.outcomes or {}).get(ticket.last_outcome) == source.id:
+            target = source
+        else:
+            continue
         if target.kind != "agent":
             continue
-        if not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id) >= target.wip:
+        if source.kind == "queue" and not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id) >= target.wip:
             continue
         candidates.append(Candidate(ticket=ticket, source_status=source.id, target_status=target.id, stage_position=workflow.position(source.id)))
     candidates.sort(key=lambda c: (-c.stage_position, 0 if c.ticket.wip_exempt else 1, c.ticket.priority, _age_key(c.ticket), c.ticket.id))

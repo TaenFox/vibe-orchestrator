@@ -9,6 +9,8 @@ stages:
     kind: agent
     wip: 2
     prompt: process_management/work.md
+    model: gpt-5.4
+    reasoning_effort: medium
     outcomes: {completed: ready_for_auto_acceptance}
   - {id: ready_for_auto_acceptance, title: Готово к авто-приемке, kind: queue, pull_to: auto_acceptance}
   - id: auto_acceptance
@@ -16,6 +18,8 @@ stages:
     kind: agent
     wip: 2
     prompt: process_management/auto_acceptance.md
+    model: gpt-5.4
+    reasoning_effort: low
     outcomes: {completed: human_acceptance}
   - {id: human_acceptance, title: Приемка человеком, kind: human, next: done}
   - {id: done, title: Готово, kind: done}

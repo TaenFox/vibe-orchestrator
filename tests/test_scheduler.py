@@ -17,3 +17,11 @@ def test_wip_blocks_normal_ticket():
 
 def test_rework_is_wip_exempt_and_preferred():
     workflow=load_workflow("delivery"); tickets=[ticket("NORMAL","selected_for_session",priority=10),ticket("REWORK","selected_for_session",priority=100,wip_exempt=True),ticket("D1","system_analysis"),ticket("D2","system_analysis"),ticket("D3","system_analysis")]; assert select_candidates(workflow,tickets,set())[0].ticket.id=="REWORK"
+
+
+def test_parent_retries_same_agent_stage_after_rework():
+    workflow=load_workflow("delivery"); parent=ticket("PARENT","review"); parent.last_outcome="needs_rework"; assert select_candidates(workflow,[parent],set())[0].target_status=="review"
+
+
+def test_parent_retries_same_agent_stage_after_correction():
+    workflow=load_workflow("discovery"); parent=Ticket(id="DISC-1",process="discovery",type="idea",title="Idea",status="analysis",last_outcome="needs_correction",created_at="2026-01-01T00:00:00+00:00"); assert select_candidates(workflow,[parent],set())[0].target_status=="analysis"

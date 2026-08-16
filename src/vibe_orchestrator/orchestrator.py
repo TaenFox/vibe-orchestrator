@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from pathlib import Path
 
-from .codex import CodexRunner
-from .config import Workflow, load_all_workflows
+import yaml
+
+from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
+from .config import Stage, Workflow, load_all_workflows
 from .scheduler import select_candidates
-from .tickets import TicketStore
+from .tickets import Ticket, TicketStore
 
 log = logging.getLogger("vibe")
 
@@ -29,6 +32,7 @@ class Orchestrator:
         log.info("наблюдение за %s", self.store.project)
         while True:
             self._reap_finished()
+            self._reconcile_tickets()
             await self._schedule_once()
             await asyncio.sleep(self.poll_interval)
 
@@ -46,35 +50,232 @@ class Orchestrator:
             ticket = self.store.get(candidate.ticket.id)
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
-            run_id = uuid.uuid4().hex
+            stage = workflow.by_id[candidate.target_status]
+            contract = self.runner.prepare_execution_contract(stage, uuid.uuid4().hex)
             ticket.status = candidate.target_status
-            ticket.active_run = run_id
+            ticket.active_run = contract.run_id
+            self.store.record_run_event(
+                ticket,
+                run_id=contract.run_id,
+                stage_id=candidate.target_status,
+                event="started",
+                from_status=candidate.source_status,
+                to_status=candidate.target_status,
+                **contract.history_metadata(),
+                **ticket_prompt_metadata(ticket),
+            )
             self.store.save(ticket)
-            task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status), name=ticket.id)
+            task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract), name=ticket.id)
             self.running[ticket.id] = task
             log.info("запущено %s -> %s", ticket.id, candidate.target_status)
 
-    async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str) -> None:
+    async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str, contract: ExecutionContract | str) -> None:
         ticket = self.store.get(ticket_id)
         stage = workflow.by_id[stage_id]
+        metadata: dict[str, str] | None = None
         try:
-            result = await self.runner.run(ticket, stage)
-            if result.outcome not in (stage.outcomes or {}):
-                raise ValueError(f"Outcome {result.outcome!r} is not allowed for {workflow.id}/{stage.id}")
-            ticket = self.store.get(ticket_id)
-            ticket.last_outcome = result.outcome
-            ticket.last_summary = result.summary
-            ticket.status = (stage.outcomes or {})[result.outcome]
-            ticket.active_run = None
-            self.store.save(ticket)
-            log.info("завершено %s: %s -> %s", ticket.id, result.outcome, ticket.status)
+            if isinstance(contract, str):
+                metadata = self._run_traceability_metadata(ticket, contract, stage)
+                contract = self.runner.prepare_execution_contract(stage, contract)
+            else:
+                metadata = contract.history_metadata()
+            result = await self.runner.run(ticket, stage, contract.run_id, contract=contract)
+            self._apply_result(workflow, ticket_id, stage, result, contract=contract)
+            log.info("завершено %s: %s -> %s", ticket_id, result.outcome, self.store.get(ticket_id).status)
         except Exception as exc:
             ticket = self.store.get(ticket_id)
+            if isinstance(contract, str):
+                run_id = contract
+                metadata = metadata or self._run_traceability_metadata(ticket, run_id, stage, suppress_prompt_errors=True)
+            else:
+                run_id = contract.run_id
+                metadata = metadata or self._run_traceability_metadata(ticket, run_id, stage, fallback=contract.history_metadata())
+            self.store.record_run_event(
+                ticket,
+                run_id=run_id,
+                stage_id=stage_id,
+                event="failed",
+                outcome="failed",
+                summary=str(exc),
+                **metadata,
+            )
             ticket.active_run = None
             ticket.last_outcome = "failed"
             ticket.last_summary = str(exc)
             self.store.save(ticket)
             log.exception("сбой воркера для %s", ticket_id)
+
+    def _apply_result(
+        self,
+        workflow: Workflow,
+        ticket_id: str,
+        stage: Stage,
+        result: AgentResult,
+        *,
+        run_id: str | None = None,
+        contract: ExecutionContract | None = None,
+    ) -> None:
+        if result.outcome not in (stage.outcomes or {}):
+            raise ValueError(f"Outcome {result.outcome!r} is not allowed for {workflow.id}/{stage.id}")
+        ticket = self.store.get(ticket_id)
+        active_run = contract.run_id if contract else run_id or ticket.active_run
+        metadata = self._run_traceability_metadata(
+            ticket,
+            active_run,
+            stage,
+            fallback=contract.history_metadata() if contract else None,
+        )
+        ticket.last_outcome = result.outcome
+        ticket.last_summary = result.summary
+        ticket.status = (stage.outcomes or {})[result.outcome]
+        if active_run:
+            self.store.record_run_event(
+                ticket,
+                run_id=active_run,
+                stage_id=stage.id,
+                event="completed",
+                outcome=result.outcome,
+                summary=result.summary,
+                to_status=ticket.status,
+                **metadata,
+            )
+        ticket.active_run = None
+        self._handle_follow_up(ticket, workflow, stage, result)
+        self.store.save(ticket)
+        self._release_parent_if_done(ticket)
+        self._reconcile_tickets()
+
+    def _handle_follow_up(self, ticket: Ticket, workflow: Workflow, stage: Stage, result: AgentResult) -> None:
+        if workflow.id == "delivery" and result.outcome == "needs_rework":
+            child = self._create_corrective_child(ticket, child_type="rework", status="selected_for_session", stage=stage, summary=result.summary, details=result.details)
+            ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
+            return
+        if workflow.id == "discovery" and result.outcome == "needs_correction":
+            child = self._create_corrective_child(ticket, child_type="correction", status="ready", stage=stage, summary=result.summary, details=result.details)
+            ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
+            return
+        if workflow.id == "discovery" and stage.id == "technical_analysis" and result.outcome == "completed":
+            self._create_delivery_children(ticket, result.details)
+
+    def _create_corrective_child(self, parent: Ticket, *, child_type: str, status: str, stage: Stage, summary: str, details: str) -> Ticket:
+        title = f"{child_type.capitalize()} for {parent.id}: {parent.title}"
+        description = (
+            f"Автоматически создано из {parent.id} на стадии {stage.title}.\n\n"
+            f"Summary:\n{summary or '(пусто)'}\n\n"
+            f"Details:\n{details or '(пусто)'}"
+        )
+        return self.store.create(
+            parent.process,
+            child_type,
+            title,
+            description=description,
+            priority=parent.priority,
+            parent=parent.id,
+            status=status,
+            wip_exempt=True,
+        )
+
+    def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
+        spec = _extract_structured_payload(details).get("delivery_tickets", [])
+        existing_children = {
+            (child.type, child.title.strip()): child
+            for child in self.store.children_of(parent.id, process="delivery")
+            if child.type in {"story", "task", "bug"}
+        }
+        active_keys: set[tuple[str, str]] = set()
+        synced: list[Ticket] = []
+        for item in spec:
+            if not isinstance(item, dict):
+                continue
+            ticket_type = str(item.get("type", "")).lower()
+            if ticket_type not in {"story", "task", "bug"}:
+                continue
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            description = str(item.get("description", "")).strip()
+            priority = int(item.get("priority", parent.priority))
+            mandatory = bool(item.get("mandatory", True))
+            key = (ticket_type, title)
+            active_keys.add(key)
+            existing = existing_children.get(key)
+            if existing:
+                if existing.description != description or existing.priority != priority or existing.mandatory != mandatory:
+                    existing.description = description
+                    existing.priority = priority
+                    existing.mandatory = mandatory
+                    self.store.save(existing)
+                synced.append(existing)
+                continue
+            child = self.store.create(
+                "delivery",
+                ticket_type,
+                title,
+                description=description,
+                priority=priority,
+                parent=parent.id,
+                status="selected_for_session",
+                mandatory=mandatory,
+            )
+            existing_children[key] = child
+            synced.append(child)
+        for key, child in existing_children.items():
+            if key in active_keys:
+                continue
+            self._deactivate_delivery_child(child)
+        return synced
+
+    def _deactivate_delivery_child(self, child: Ticket) -> None:
+        child.parent = None
+        child.blocked_by = []
+        child.active_run = None
+        child.status = "done"
+        self.store.save(child)
+
+    def _release_parent_if_done(self, ticket: Ticket) -> None:
+        if ticket.type not in {"rework", "correction"} or not ticket.parent or not self._is_resolved_blocker(ticket):
+            return
+        parent = self.store.get(ticket.parent)
+        if ticket.id in parent.blocked_by:
+            parent.blocked_by = [blocked for blocked in parent.blocked_by if blocked != ticket.id]
+            self.store.save(parent)
+
+    def _reconcile_tickets(self) -> None:
+        self._reconcile_blockers()
+        self._reconcile_discovery_implementation()
+
+    def _reconcile_blockers(self) -> None:
+        for ticket in self.store.list():
+            if not ticket.blocked_by:
+                continue
+            remaining = []
+            changed = False
+            for blocked_id in ticket.blocked_by:
+                try:
+                    blocked = self.store.get(blocked_id)
+                except KeyError:
+                    changed = True
+                    continue
+                if self._is_resolved_blocker(blocked):
+                    changed = True
+                    continue
+                remaining.append(blocked_id)
+            if changed:
+                ticket.blocked_by = remaining
+                self.store.save(ticket)
+
+    def _reconcile_discovery_implementation(self) -> None:
+        workflow = self.workflows["discovery"]
+        next_status = workflow.by_id["implementation"].next
+        for ticket in self.store.list("discovery"):
+            if ticket.status != "implementation" or ticket.active_run or ticket.blocked_by:
+                continue
+            linked = self.store.children_of(ticket.id, process="delivery")
+            if any(child.mandatory and not self.store.is_done(child) for child in linked):
+                continue
+            if next_status and ticket.status != next_status:
+                ticket.status = next_status
+                self.store.save(ticket)
 
     def _reap_finished(self) -> None:
         for ticket_id, task in list(self.running.items()):
@@ -84,3 +285,72 @@ class Orchestrator:
                 except Exception:
                     pass
                 del self.running[ticket_id]
+
+    def _is_resolved_blocker(self, ticket: Ticket) -> bool:
+        if ticket.type == "rework":
+            return self.store.is_done(ticket)
+        if ticket.type == "correction":
+            return self.store.is_done(ticket)
+        return self.store.is_done(ticket)
+
+    def _prompt_metadata(self, stage: Stage) -> dict[str, str]:
+        if not stage.prompt:
+            return {}
+        return self.runner.prepare_execution_contract(stage, "metadata-only").history_metadata()
+
+    def _run_traceability_metadata(
+        self,
+        ticket: Ticket,
+        run_id: str | None,
+        stage: Stage,
+        *,
+        fallback: dict[str, str] | None = None,
+        suppress_prompt_errors: bool = False,
+    ) -> dict[str, str]:
+        metadata: dict[str, str] = {}
+        if run_id:
+            for entry in ticket.run_history:
+                if entry.get("run_id") != run_id or entry.get("event") != "started":
+                    continue
+                metadata.update({key: value for key in _TRACEABILITY_KEYS if (value := entry.get(key)) is not None})
+                break
+        if len(metadata) < len(_TRACEABILITY_KEYS):
+            if fallback:
+                metadata.update({key: value for key, value in fallback.items() if key not in metadata})
+            try:
+                fallback = self._prompt_metadata(stage)
+            except Exception:
+                if not suppress_prompt_errors:
+                    raise
+                fallback = self.runner.execution_profile(stage)
+            metadata.update({key: value for key, value in fallback.items() if key not in metadata})
+        if len(metadata) < len(_TRACEABILITY_KEYS):
+            metadata.update({key: value for key, value in ticket_prompt_metadata(ticket).items() if key not in metadata})
+        return metadata
+
+
+_TRACEABILITY_KEYS = (
+    "model",
+    "reasoning_effort",
+    "prompt_path",
+    "prompt_version",
+    "ticket_title",
+    "ticket_priority",
+    "ticket_parent",
+    "ticket_description",
+)
+
+
+def _extract_structured_payload(details: str) -> dict[str, object]:
+    if not details.strip():
+        return {}
+    candidates = [details]
+    candidates.extend(match.group(1) for match in re.finditer(r"```(?:ya?ml|json)?\n(.*?)```", details, flags=re.DOTALL))
+    for candidate in candidates:
+        try:
+            payload = yaml.safe_load(candidate)
+        except yaml.YAMLError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
