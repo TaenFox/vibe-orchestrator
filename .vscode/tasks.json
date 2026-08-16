@@ -1,7 +1,13 @@
 {
   "version": "2.0.0",
   "tasks": [
-    {"label":"vibe: setup","type":"shell","command":"python3 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'","problemMatcher":[]},
+    {
+      "label":"vibe: setup",
+      "type":"shell",
+      "command":"set -euo pipefail; for bin in python3.13 python3.12 python3.11 python3; do if command -v \"$bin\" >/dev/null 2>&1 && \"$bin\" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then \"$bin\" -m venv .venv; .venv/bin/python -m pip install -e \".[dev]\"; exit 0; fi; done; echo \"Python 3.11+ not found. Install python@3.11 or newer (for example with Homebrew).\" >&2; exit 1",
+      "options":{"shell":{"executable":"/bin/bash","args":["-lc"]}},
+      "problemMatcher":[]
+    },
     {"label":"vibe: test","type":"shell","command":".venv/bin/python -m pytest","group":"test","problemMatcher":[]},
     {"label":"vibe: UI (current workspace)","type":"shell","command":".venv/bin/vibe ui ${workspaceFolder}","isBackground":true,"problemMatcher":[]},
     {"label":"vibe: orchestrator (current workspace)","type":"shell","command":".venv/bin/vibe run ${workspaceFolder}","isBackground":true,"problemMatcher":[]}

@@ -27,6 +27,19 @@ Core rules:
 - Codex CLI installed and authenticated (`codex --version`)
 - VS Code recommended
 
+On macOS, `/usr/bin/python3` or `python3` can still point to an older system Python that does not satisfy the `3.11+` requirement. Check your interpreter first:
+
+```bash
+python3 --version
+```
+
+If that prints a version older than `3.11`, install a newer Python and use that executable explicitly. Example with Homebrew:
+
+```bash
+brew install python@3.11
+python3.11 --version
+```
+
 Codex is invoked with `codex exec --sandbox workspace-write --json --output-schema ... -o ... -`, using the CLI's existing authentication.
 
 ## Quick start in VS Code
@@ -34,7 +47,9 @@ Codex is invoked with `codex exec --sandbox workspace-write --json --output-sche
 ```bash
 git clone https://github.com/TaenFox/vibe-orchestrator.git
 cd vibe-orchestrator
-python3 -m venv .venv
+PYTHON_BIN="$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"
+$PYTHON_BIN -c 'import sys; raise SystemExit("Python 3.11+ is required" if sys.version_info < (3, 11) else 0)'
+$PYTHON_BIN -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 pytest
