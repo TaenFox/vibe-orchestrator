@@ -27,16 +27,19 @@ def test_generated_vibe_readme_is_localized(tmp_path: Path):
 
     readme = (tmp_path / ".vibe" / "README.md").read_text(encoding="utf-8")
     assert "Состояние тикетов для vibe-orchestrator" in readme
-    assert "`runs/` содержит локальные метаданные выполнения" in readme
+    assert "`runs/` содержит локальные артефакты запусков" in readme
+    assert "`run.json`, `events.jsonl`, `result.json`" in readme
 
 
 def test_ui_board_uses_russian_labels(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()
-    ticket = store.create("delivery", "task", "Локализация интерфейса", status="ready_for_review")
+    ticket = store.create("delivery", "task", "Локализация интерфейса", description="Показать детали тикета", status="ready_for_review")
     ticket.wip_exempt = True
     ticket.blocked_by = ["DEL-LOCK"]
     ticket.active_run = "run-1"
+    ticket.parent = "DEL-PARENT"
+    ticket.last_outcome = "failed"
     ticket.last_summary = "Проверка перевода"
     store.save(ticket)
 
@@ -46,3 +49,14 @@ def test_ui_board_uses_russian_labels(tmp_path: Path):
     assert "агент выполняется" in html
     assert "без учета WIP" in html
     assert "приоритет 100" in html
+    assert "setInterval(() => {" in html
+    assert "document.querySelector('details[open]')" in html
+    assert "автообновление 5с, пауза при открытых деталях" in html
+    assert "Подробнее" in html
+    assert "Показать детали тикета" in html
+    assert "Родитель" in html
+    assert "DEL-PARENT" in html
+    assert "Блокирует" in html
+    assert "DEL-LOCK" in html
+    assert "Последний outcome" in html
+    assert "failed" in html

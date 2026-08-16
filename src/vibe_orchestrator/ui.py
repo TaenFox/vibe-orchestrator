@@ -10,7 +10,15 @@ from pathlib import Path
 from .config import load_all_workflows
 from .tickets import TicketStore
 
-CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}body{margin:0}header{display:flex;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}a{color:#58a6ff;text-decoration:none}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}"""
+CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}body{margin:0}header{display:flex;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}a{color:#58a6ff;text-decoration:none}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap}.details-row .meta{display:block;margin-bottom:2px}"""
+AUTO_REFRESH_SECONDS = 5
+AUTO_REFRESH_SCRIPT = f"""<script>
+setInterval(() => {{
+  if (document.hidden) return;
+  if (document.querySelector('details[open]')) return;
+  window.location.reload();
+}}, {AUTO_REFRESH_SECONDS * 1000});
+</script>"""
 
 
 def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
@@ -51,7 +59,25 @@ def render_board(store, workflows, process: str) -> str:
             action=""
             if stage.next:
                 action=f'<form method="post" action="/move"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><input type="hidden" name="target" value="{html.escape(stage.next)}"><button>Переместить → {html.escape(workflow.by_id[stage.next].title)}</button></form>'
-            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">агент выполняется</span>' if ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""
-            cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{corrective}{blocked}{run}<div class="meta">приоритет {ticket.priority}</div>{summary}{action}</div>')
+            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">агент выполняется</span>' if ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; details=_ticket_details_html(ticket)
+            cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{corrective}{blocked}{run}<div class="meta">приоритет {ticket.priority}</div>{summary}{details}{action}</div>')
         wip=f" · WIP {stage.wip}" if stage.wip is not None else ""; columns.append(f'<section class="column"><h3>{html.escape(stage.title)}{wip}</h3>{"".join(cards)}</section>')
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style></head><body><header><strong>vibe-orchestrator</strong>{nav}<span class="meta">{html.escape(str(store.project))}</span></header><main class="board">{"".join(columns)}</main></body></html>'
+    refresh_hint = f"автообновление {AUTO_REFRESH_SECONDS}с, пауза при открытых деталях"
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header><main class="board">{"".join(columns)}</main></body></html>'
+
+
+def _ticket_details_html(ticket) -> str:
+    parent = ticket.parent or "нет"
+    blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
+    outcome = ticket.last_outcome or "нет"
+    description = ticket.description or "(пусто)"
+    return (
+        '<details class="details"><summary>Подробнее</summary><div class="details-body">'
+        f'<div class="details-row"><span class="meta">Описание</span>{html.escape(description)}</div>'
+        f'<div class="details-row"><span class="meta">Родитель</span>{html.escape(parent)}</div>'
+        f'<div class="details-row"><span class="meta">Блокирует</span>{html.escape(blockers)}</div>'
+        f'<div class="details-row"><span class="meta">Последний outcome</span>{html.escape(outcome)}</div>'
+        f'<div class="details-row"><span class="meta">Создан</span>{html.escape(ticket.created_at)}</div>'
+        f'<div class="details-row"><span class="meta">Обновлен</span>{html.escape(ticket.updated_at)}</div>'
+        "</div></details>"
+    )
