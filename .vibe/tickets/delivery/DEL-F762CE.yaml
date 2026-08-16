@@ -2,7 +2,7 @@ id: DEL-F762CE
 process: delivery
 type: task
 title: Localize human-facing texts to Russian
-status: ready_for_release
+status: done
 priority: 100
 description: Translate all human-facing project texts to Russian while preserving
   technical identifiers and machine-readable contracts. This includes agent role prompts,
@@ -14,7 +14,7 @@ parent: null
 blocked_by: []
 wip_exempt: false
 created_at: '2026-08-16T18:12:27.500851+00:00'
-updated_at: '2026-08-16T18:22:45.171258+00:00'
+updated_at: '2026-08-16T18:38:38.177111+00:00'
 active_run: null
 last_outcome: completed
 last_summary: 'Приемка не пройдена полностью: локализация покрыта частично, но в пользовательских

@@ -1,0 +1,72 @@
+id: DEL-629B0D
+process: delivery
+type: rework
+title: 'Rework for DEL-C136BE: Rework for DEL-9A45B2: Stabilize delivery child ordering
+  in orchestrator tests'
+status: done
+priority: 140
+description: 'Автоматически создано из DEL-C136BE на стадии Приемка.
+
+
+  Summary:
+
+  Фикс для пустого `children_of(..., process="delivery")` выглядит внедренным и покрыт
+  регрессионным тестом, но приемка не пройдена: в текущем состоянии успешное завершение
+  agent-stage падает в `_apply_result()`, поэтому оркестратор не может стабильно завершать
+  review/acceptance/analysis/technical_analysis.
+
+
+  Details:
+
+  Доказательство: `pytest -q tests/test_orchestrator.py` падает с `4 failed, 3 passed`.
+
+
+  Блокирующее расхождение:
+
+  - [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:112)
+  вызывает `self.runner.execution_profile()` без аргумента `stage` при записи `completed`
+  event в `_apply_result()`.
+
+  - [src/vibe_orchestrator/codex.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/codex.py:40)
+  определяет `execution_profile(self, stage: Stage)`, то есть аргумент обязателен.
+
+  - Результат: `TypeError: CodexRunner.execution_profile() missing 1 required positional
+  argument: ''stage''` при любом успешном завершении стадии с `active_run`.
+
+
+  Это воспроизводится минимум в тестах:
+
+  - [tests/test_orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/tests/test_orchestrator.py:36)
+  `test_review_needs_rework_creates_blocking_child`
+
+  - [tests/test_orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/tests/test_orchestrator.py:104)
+  `test_completed_rework_unblocks_parent`
+
+  - [tests/test_orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/tests/test_orchestrator.py:130)
+  `test_technical_analysis_creates_delivery_children_and_waits_for_completion`
+
+  - [tests/test_orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/tests/test_orchestrator.py:191)
+  `test_analysis_needs_correction_creates_blocking_child`
+
+
+  По исходному замечанию rework:
+
+  - Защита от ложного автоперехода без delivery-детей есть: [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:216)
+  делает `if not linked: continue`.
+
+  - Регрессия покрыта тестом: [tests/test_orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/tests/test_orchestrator.py:182)
+  `test_implementation_without_delivery_children_stays_in_progress`.
+
+
+  Нужна доработка: починить вызов `execution_profile(...)` в `_apply_result()` и заново
+  прогнать orchestrator tests.'
+parent: DEL-C136BE
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T20:45:42.322956+00:00'
+updated_at: '2026-08-16T21:46:31.763011+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Приемка пройдена: блокирующий вызов `execution_profile(...)` в `_apply_result()`
+  исправлен, регрессия на отсутствие delivery-детей сохранена, релевантные orchestrator/codex
+  тесты проходят.'

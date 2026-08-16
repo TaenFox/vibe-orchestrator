@@ -1,0 +1,42 @@
+id: DEL-C136BE
+process: delivery
+type: rework
+title: 'Rework for DEL-9A45B2: Stabilize delivery child ordering in orchestrator tests'
+status: done
+priority: 140
+description: 'Автоматически создано из DEL-9A45B2 на стадии Ревью.
+
+
+  Summary:
+
+  Нужна доработка перед продолжением: вместе с фиксом порядка `children_of` в ветку
+  попала новая логика автоперехода discovery-тикета из `implementation`, и она делает
+  тикет готовым к валидации даже без единого дочернего delivery-тикета.
+
+
+  Details:
+
+  Блокирующее замечание: [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:202)
+  в `_reconcile_discovery_implementation()` переводит discovery-тикет из `implementation`
+  в `ready_for_validation`, если `children_of(..., process="delivery")` вернул пустой
+  список. Причина: проверка `if any(not self.store.is_done(child) for child in linked):
+  continue` на пустом списке дает `False`, после чего выполняется переход статуса.
+  Это регрессия: отсутствие delivery-потомков трактуется как "все завершены". Для
+  тикетов, где technical analysis не создал delivery-детей или парсинг payload не
+  сработал, discovery-задача будет ложно считаться реализованной. В текущих тестах
+  это не покрыто: `tests/test_orchestrator.py` проверяет только happy path с двумя
+  дочерними тикетами и не проверяет сценарий `implementation` без детей. Сам фикс
+  порядка в [src/vibe_orchestrator/tickets.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/tickets.py:129)
+  выглядит разумно, но перед продолжением нужно либо требовать наличие хотя бы одного
+  delivery-ребенка перед автопереходом, либо явно зафиксировать и обосновать противоположную
+  бизнес-логику, плюс добавить регрессионный тест на пустой список детей. Проверка:
+  `pytest -q` сейчас проходит (`17 passed`), поэтому дефект скрыт недостаточным покрытием.'
+parent: DEL-9A45B2
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T20:42:00.011322+00:00'
+updated_at: '2026-08-16T21:46:30.661128+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Приемка пройдена: регрессия с автопереходом discovery-тикета без delivery-детей
+  устранена, а порядок `children_of()` стабилизирован и покрыт тестами.'

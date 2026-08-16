@@ -1,0 +1,710 @@
+id: DEL-8A4F27
+process: delivery
+type: rework
+title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь Discovery
+  → Delivery'
+status: done
+priority: 100
+description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+  Summary:
+
+  Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+  с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+  к актуальной спецификации из последнего анализа.
+
+
+  Details:
+
+  Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+  `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+  по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+  которых больше нет в новом `delivery_tickets`.
+
+
+  Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+  процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+  старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+  [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+  `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+  `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+  Analysis.
+
+
+  Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+  создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+  `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+  "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+  Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+  tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+  Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+  тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+  Что доработать:
+
+  - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+  как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+  - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+  `completed` после correction оставил только A, и Discovery `implementation` больше
+  не ждет B.'
+parent: DEL-1F285E
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T21:58:37.168493+00:00'
+updated_at: '2026-08-16T22:08:37.604649+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Повторный `technical_analysis` теперь авторитативно синхронизирует
+  связанные Delivery-тикеты: устаревшие дочерние тикеты отвязываются от Discovery
+  и больше не блокируют стадию `implementation`. Добавлен приемочный тест на сценарий
+  A+B -> A.'
+run_history:
+- run_id: 9f6db8566a824410a711442ef045f7cd
+  stage: system_analysis
+  event: started
+  timestamp: '2026-08-16T21:58:37.471469+00:00'
+  artifacts_path: .vibe/runs/9f6db8566a824410a711442ef045f7cd
+  from_status: selected_for_session
+  to_status: system_analysis
+  prompt_path: delivery/system_analysis.md
+  prompt_version: sha256:44c646dd8258718bfeee596fb94a9d644b2dd3a2d12b4262cc903b6c158c2e12
+  model: gpt-5.4
+  reasoning_effort: medium
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 9f6db8566a824410a711442ef045f7cd
+  stage: system_analysis
+  event: completed
+  timestamp: '2026-08-16T22:00:10.075076+00:00'
+  artifacts_path: .vibe/runs/9f6db8566a824410a711442ef045f7cd
+  outcome: completed
+  summary: '`technical_analysis` должен стать авторитативным источником полного набора
+    связанных Delivery-тикетов для конкретной Discovery-идеи. При повторном `completed`
+    оркестратор обязан синхронизировать набор `story/task/bug`: существующие совпадения
+    по `(type, title.strip())` обновлять in-place, новые создавать, а тикеты, исчезнувшие
+    из нового `delivery_tickets`, выводить из связи с идеей так, чтобы `implementation`
+    больше их не ждала. Рекомендуемая реализация в рамках текущей модели данных: у
+    устаревших Delivery-тикетов очищать `parent`, не удаляя сам тикет и не трогая
+    его статус/историю.'
+  to_status: ready_for_development
+  model: gpt-5.4
+  reasoning_effort: medium
+  prompt_path: delivery/system_analysis.md
+  prompt_version: sha256:44c646dd8258718bfeee596fb94a9d644b2dd3a2d12b4262cc903b6c158c2e12
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 64747eb0942d4da88b53fef5f2e7e337
+  stage: development
+  event: started
+  timestamp: '2026-08-16T22:00:11.672066+00:00'
+  artifacts_path: .vibe/runs/64747eb0942d4da88b53fef5f2e7e337
+  from_status: ready_for_development
+  to_status: development
+  prompt_path: delivery/development.md
+  prompt_version: sha256:0e9cb4110f7d4573c9160138dcc0c0a9f5740d236d149c976f87653f2c04475f
+  model: gpt-5.4
+  reasoning_effort: medium
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 64747eb0942d4da88b53fef5f2e7e337
+  stage: development
+  event: completed
+  timestamp: '2026-08-16T22:01:41.049571+00:00'
+  artifacts_path: .vibe/runs/64747eb0942d4da88b53fef5f2e7e337
+  outcome: completed
+  summary: 'Синхронизировал Discovery → Delivery после повторного `technical_analysis`:
+    `_create_delivery_children()` теперь считает последнюю спецификацию авторитативной
+    и отвязывает устаревшие Delivery-тикеты, чтобы `implementation` не ждала больше
+    неактуальные mandatory-зависимости. Добавлен приемочный тест на сценарий A+B →
+    только A с последующим переходом Discovery после завершения актуального story.'
+  to_status: ready_for_review
+  model: gpt-5.4
+  reasoning_effort: medium
+  prompt_path: delivery/development.md
+  prompt_version: sha256:0e9cb4110f7d4573c9160138dcc0c0a9f5740d236d149c976f87653f2c04475f
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 6257369450e44a638de7d01424b81c5b
+  stage: review
+  event: started
+  timestamp: '2026-08-16T22:01:41.785730+00:00'
+  artifacts_path: .vibe/runs/6257369450e44a638de7d01424b81c5b
+  from_status: ready_for_review
+  to_status: review
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 6257369450e44a638de7d01424b81c5b
+  stage: review
+  event: completed
+  timestamp: '2026-08-16T22:02:18.701036+00:00'
+  artifacts_path: .vibe/runs/6257369450e44a638de7d01424b81c5b
+  outcome: needs_rework
+  summary: Повторный `technical_analysis` больше не блокирует Discovery устаревшими
+    child-тикетами, но реализация все еще оставляет удаленные Delivery-тикеты активными
+    в delivery-потоке, поэтому декомпозиция не стала авторитативной целиком.
+  to_status: review
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: fe1926c8a9204a6da4a2f233e999f6b0
+  stage: review
+  event: started
+  timestamp: '2026-08-16T22:06:45.645112+00:00'
+  artifacts_path: .vibe/runs/fe1926c8a9204a6da4a2f233e999f6b0
+  from_status: review
+  to_status: review
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: fe1926c8a9204a6da4a2f233e999f6b0
+  stage: review
+  event: completed
+  timestamp: '2026-08-16T22:07:19.891662+00:00'
+  artifacts_path: .vibe/runs/fe1926c8a9204a6da4a2f233e999f6b0
+  outcome: completed
+  summary: 'Блокирующих замечаний не найдено: повторный `technical_analysis` теперь
+    авторитативно синхронизирует набор связанных Delivery-тикетов и исключает устаревшие
+    дочерние элементы из ожидания стадии `implementation`. Добавлен приемочный тест
+    на регрессионный сценарий.'
+  to_status: ready_for_acceptance
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 92abc46391ff46a3aaf9abe206044113
+  stage: acceptance
+  event: started
+  timestamp: '2026-08-16T22:07:20.398787+00:00'
+  artifacts_path: .vibe/runs/92abc46391ff46a3aaf9abe206044113
+  from_status: ready_for_acceptance
+  to_status: acceptance
+  prompt_path: delivery/acceptance.md
+  prompt_version: sha256:ed1572cca455f6821e009730b6cf4433f3fe48c3049302053f8036d63139b295
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'
+- run_id: 92abc46391ff46a3aaf9abe206044113
+  stage: acceptance
+  event: completed
+  timestamp: '2026-08-16T22:07:58.209248+00:00'
+  artifacts_path: .vibe/runs/92abc46391ff46a3aaf9abe206044113
+  outcome: completed
+  summary: 'Повторный `technical_analysis` теперь авторитативно синхронизирует связанные
+    Delivery-тикеты: устаревшие дочерние тикеты отвязываются от Discovery и больше
+    не блокируют стадию `implementation`. Добавлен приемочный тест на сценарий A+B
+    -> A.'
+  to_status: ready_for_release
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/acceptance.md
+  prompt_version: sha256:ed1572cca455f6821e009730b6cf4433f3fe48c3049302053f8036d63139b295
+  ticket_title: 'Rework for DEL-1F285E: Реализовать корректирующие тикеты и связь
+    Discovery → Delivery'
+  ticket_priority: '100'
+  ticket_parent: DEL-1F285E
+  ticket_description: 'Автоматически создано из DEL-1F285E на стадии Приемка.
+
+
+    Summary:
+
+    Повторный `technical_analysis` не синхронизирует уже созданные связанные Delivery-тикеты
+    с новым результатом. Перед повторной приемкой нужно привести набор дочерних тикетов
+    к актуальной спецификации из последнего анализа.
+
+
+    Details:
+
+    Расхождение: в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:178)
+    `_create_delivery_children()` только создает новые тикеты и обновляет совпавшие
+    по `(type, title)`, но никогда не удаляет и не деактивирует ранее созданные Delivery-тикеты,
+    которых больше нет в новом `delivery_tickets`.
+
+
+    Почему это ломает приемку: по тикету Discovery -> Delivery должна реально управлять
+    процессом. Если после `needs_correction` технический анализ пересобрал декомпозицию,
+    старые обязательные дочерние тикеты остаются привязанными к Discovery-идее. Затем
+    [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:254)
+    `_reconcile_discovery_implementation()` продолжает ждать завершения этих устаревших
+    `mandatory`-тикетов, и идея не отражает актуальный результат последнего Technical
+    Analysis.
+
+
+    Точечная проверка: выполнил сценарий вручную в временном каталоге. Первый `technical_analysis`
+    создал `story A` и `task B`, второй повторный `technical_analysis` вернул только
+    `story A`, но `task B` остался связанным дочерним тикетом: `[("story", "A", True,
+    "selected_for_session"), ("task", "B", True, "selected_for_session")]`.
+
+
+    Тесты: `pytest -q tests/test_orchestrator.py tests/test_scheduler.py tests/test_store.py
+    tests/test_config.py tests/test_codex.py tests/test_localization.py` -> `42 passed`.
+    Но покрытие не ловит описанный сценарий: есть тест на переиспользование существующих
+    тикетов, нет теста на удаление/деактивацию тикетов, исчезнувших из нового `delivery_tickets`.
+
+
+    Что доработать:
+
+    - Сделать повторный `technical_analysis` авторитативным для набора связанных Delivery-тикетов:
+    как минимум убрать из блокирующего набора тикеты, которых больше нет в новой спецификации.
+
+    - Добавить приемочный тест на сценарий: `completed` создал A+B, затем повторный
+    `completed` после correction оставил только A, и Discovery `implementation` больше
+    не ждет B.'

@@ -1,0 +1,188 @@
+id: DEL-459BE8
+process: delivery
+type: rework
+title: 'Rework for DEL-F62D4B: Explicit Codex execution profile per stage'
+status: done
+priority: 110
+description: 'Автоматически создано из DEL-F62D4B на стадии Ревью.
+
+
+  Summary:
+
+  Traceability added, but `prompt_version` does not actually identify the full execution
+  contract, so reproducibility is not guaranteed.
+
+
+  Details:
+
+  Blocking issue: `prompt_version` is computed only from the prompt file body in `src/vibe_orchestrator/config.py:98-102`,
+  while the actual prompt sent to Codex is assembled later in `src/vibe_orchestrator/codex.py:119-155`
+  by appending the execution-contract wrapper (`Run ID`, ticket metadata, allowed
+  outcomes, instructions, etc.). If that wrapper changes in code, two runs can produce
+  different effective prompts while keeping the same `prompt_path` and `prompt_version`
+  in durable history. That violates the ticket requirement to preserve reproducible
+  execution contract metadata. The fix should version the full prompt template/contract
+  that is actually executed, not just the prompt markdown file. Evidence: current
+  tests pass (`pytest -q`, 34 passed), but there is no coverage for prompt-wrapper
+  drift causing unchanged `prompt_version` with changed executed prompt.'
+parent: DEL-F62D4B
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T21:00:59.004464+00:00'
+updated_at: '2026-08-16T21:32:12.307404+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Исправление по DEL-F62D4B проходит приемку: `prompt_version` теперь
+  зависит от полного шаблона исполняемого execution contract, включая обертку prompt
+  и stage execution profile, а traceability в run history/manifest сохраняется консистентно.'
+run_history:
+- run_id: f9ae455a556c45109b7f690b123aefb8
+  stage: review
+  event: started
+  timestamp: '2026-08-16T21:30:17.136809+00:00'
+  artifacts_path: .vibe/runs/f9ae455a556c45109b7f690b123aefb8
+  from_status: review
+  to_status: review
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: 'Rework for DEL-F62D4B: Explicit Codex execution profile per stage'
+  ticket_priority: '110'
+  ticket_parent: DEL-F62D4B
+  ticket_description: 'Автоматически создано из DEL-F62D4B на стадии Ревью.
+
+
+    Summary:
+
+    Traceability added, but `prompt_version` does not actually identify the full execution
+    contract, so reproducibility is not guaranteed.
+
+
+    Details:
+
+    Blocking issue: `prompt_version` is computed only from the prompt file body in
+    `src/vibe_orchestrator/config.py:98-102`, while the actual prompt sent to Codex
+    is assembled later in `src/vibe_orchestrator/codex.py:119-155` by appending the
+    execution-contract wrapper (`Run ID`, ticket metadata, allowed outcomes, instructions,
+    etc.). If that wrapper changes in code, two runs can produce different effective
+    prompts while keeping the same `prompt_path` and `prompt_version` in durable history.
+    That violates the ticket requirement to preserve reproducible execution contract
+    metadata. The fix should version the full prompt template/contract that is actually
+    executed, not just the prompt markdown file. Evidence: current tests pass (`pytest
+    -q`, 34 passed), but there is no coverage for prompt-wrapper drift causing unchanged
+    `prompt_version` with changed executed prompt.'
+- run_id: f9ae455a556c45109b7f690b123aefb8
+  stage: review
+  event: completed
+  timestamp: '2026-08-16T21:31:13.291586+00:00'
+  artifacts_path: .vibe/runs/f9ae455a556c45109b7f690b123aefb8
+  outcome: completed
+  summary: 'Проверка пройдена: блокирующих замечаний по DEL-459BE8 не найдено. Реализация
+    теперь фиксирует версию именно шаблона исполняемого prompt-контракта, а не только
+    markdown-файла prompt.'
+  to_status: ready_for_acceptance
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  ticket_title: 'Rework for DEL-F62D4B: Explicit Codex execution profile per stage'
+  ticket_priority: '110'
+  ticket_parent: DEL-F62D4B
+  ticket_description: 'Автоматически создано из DEL-F62D4B на стадии Ревью.
+
+
+    Summary:
+
+    Traceability added, but `prompt_version` does not actually identify the full execution
+    contract, so reproducibility is not guaranteed.
+
+
+    Details:
+
+    Blocking issue: `prompt_version` is computed only from the prompt file body in
+    `src/vibe_orchestrator/config.py:98-102`, while the actual prompt sent to Codex
+    is assembled later in `src/vibe_orchestrator/codex.py:119-155` by appending the
+    execution-contract wrapper (`Run ID`, ticket metadata, allowed outcomes, instructions,
+    etc.). If that wrapper changes in code, two runs can produce different effective
+    prompts while keeping the same `prompt_path` and `prompt_version` in durable history.
+    That violates the ticket requirement to preserve reproducible execution contract
+    metadata. The fix should version the full prompt template/contract that is actually
+    executed, not just the prompt markdown file. Evidence: current tests pass (`pytest
+    -q`, 34 passed), but there is no coverage for prompt-wrapper drift causing unchanged
+    `prompt_version` with changed executed prompt.'
+- run_id: 768b2d405843479faa6f16eb51b1cd69
+  stage: acceptance
+  event: started
+  timestamp: '2026-08-16T21:31:15.241521+00:00'
+  artifacts_path: .vibe/runs/768b2d405843479faa6f16eb51b1cd69
+  from_status: ready_for_acceptance
+  to_status: acceptance
+  prompt_path: delivery/acceptance.md
+  prompt_version: sha256:ed1572cca455f6821e009730b6cf4433f3fe48c3049302053f8036d63139b295
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: 'Rework for DEL-F62D4B: Explicit Codex execution profile per stage'
+  ticket_priority: '110'
+  ticket_parent: DEL-F62D4B
+  ticket_description: 'Автоматически создано из DEL-F62D4B на стадии Ревью.
+
+
+    Summary:
+
+    Traceability added, but `prompt_version` does not actually identify the full execution
+    contract, so reproducibility is not guaranteed.
+
+
+    Details:
+
+    Blocking issue: `prompt_version` is computed only from the prompt file body in
+    `src/vibe_orchestrator/config.py:98-102`, while the actual prompt sent to Codex
+    is assembled later in `src/vibe_orchestrator/codex.py:119-155` by appending the
+    execution-contract wrapper (`Run ID`, ticket metadata, allowed outcomes, instructions,
+    etc.). If that wrapper changes in code, two runs can produce different effective
+    prompts while keeping the same `prompt_path` and `prompt_version` in durable history.
+    That violates the ticket requirement to preserve reproducible execution contract
+    metadata. The fix should version the full prompt template/contract that is actually
+    executed, not just the prompt markdown file. Evidence: current tests pass (`pytest
+    -q`, 34 passed), but there is no coverage for prompt-wrapper drift causing unchanged
+    `prompt_version` with changed executed prompt.'
+- run_id: 768b2d405843479faa6f16eb51b1cd69
+  stage: acceptance
+  event: completed
+  timestamp: '2026-08-16T21:31:47.893067+00:00'
+  artifacts_path: .vibe/runs/768b2d405843479faa6f16eb51b1cd69
+  outcome: completed
+  summary: 'Исправление по DEL-F62D4B проходит приемку: `prompt_version` теперь зависит
+    от полного шаблона исполняемого execution contract, включая обертку prompt и stage
+    execution profile, а traceability в run history/manifest сохраняется консистентно.'
+  to_status: ready_for_release
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/acceptance.md
+  prompt_version: sha256:ed1572cca455f6821e009730b6cf4433f3fe48c3049302053f8036d63139b295
+  ticket_title: 'Rework for DEL-F62D4B: Explicit Codex execution profile per stage'
+  ticket_priority: '110'
+  ticket_parent: DEL-F62D4B
+  ticket_description: 'Автоматически создано из DEL-F62D4B на стадии Ревью.
+
+
+    Summary:
+
+    Traceability added, but `prompt_version` does not actually identify the full execution
+    contract, so reproducibility is not guaranteed.
+
+
+    Details:
+
+    Blocking issue: `prompt_version` is computed only from the prompt file body in
+    `src/vibe_orchestrator/config.py:98-102`, while the actual prompt sent to Codex
+    is assembled later in `src/vibe_orchestrator/codex.py:119-155` by appending the
+    execution-contract wrapper (`Run ID`, ticket metadata, allowed outcomes, instructions,
+    etc.). If that wrapper changes in code, two runs can produce different effective
+    prompts while keeping the same `prompt_path` and `prompt_version` in durable history.
+    That violates the ticket requirement to preserve reproducible execution contract
+    metadata. The fix should version the full prompt template/contract that is actually
+    executed, not just the prompt markdown file. Evidence: current tests pass (`pytest
+    -q`, 34 passed), but there is no coverage for prompt-wrapper drift causing unchanged
+    `prompt_version` with changed executed prompt.'

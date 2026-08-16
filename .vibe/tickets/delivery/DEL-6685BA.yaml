@@ -1,0 +1,46 @@
+id: DEL-6685BA
+process: delivery
+type: rework
+title: 'Rework for DEL-F62D4B: Explicit Codex execution profile per stage'
+status: done
+priority: 110
+description: 'Автоматически создано из DEL-F62D4B на стадии Ревью.
+
+
+  Summary:
+
+  Нужна доработка traceability: durable history сейчас не гарантирует сохранение фактического
+  execution contract конкретного запуска.
+
+
+  Details:
+
+  Блокирующее замечание: `prompt_path`/`prompt_version` для `run_history` записываются
+  не из фактического запуска, а повторно вычисляются из текущего состояния workflow/prompt
+  во время `started`, `completed` и `failed` событий. Это видно в [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:55),
+  [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:79)
+  и [src/vibe_orchestrator/orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:109),
+  где используется `self._prompt_metadata(stage)`. При этом фактический prompt-spec
+  для запуска отдельно вычисляется внутри `CodexRunner.run()` и сохраняется в `.vibe/runs/<run_id>/run.json`
+  на [src/vibe_orchestrator/codex.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/codex.py:59)
+  и [src/vibe_orchestrator/codex.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/codex.py:63).
+  Если prompt-файл изменится между стартом и завершением долгого `codex exec`, `run_history`
+  сможет содержать `prompt_version`, отличный от реально использованного в `run.json`,
+  что нарушает критерий приемки про durable history и воспроизводимость execution
+  contract. Нужно сохранять в history именно immutable metadata конкретного run''а:
+  например, один раз вычислять его перед запуском и передавать дальше неизменным,
+  либо читать его из `run.json`/возвращать из runner вместе с результатом. Также отсутствует
+  регрессионный тест на этот сценарий; текущие тесты покрывают только happy path и
+  stub-версии metadata, см. [tests/test_orchestrator.py](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/tests/test_orchestrator.py:70).
+  Проверка: `pytest -q tests/test_codex.py tests/test_orchestrator.py tests/test_scheduler.py
+  tests/test_store.py`.'
+parent: DEL-F62D4B
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T20:51:21.749513+00:00'
+updated_at: '2026-08-16T21:46:27.063284+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Acceptance passed: run history now records immutable execution metadata
+  from the actual prepared contract/start event, so prompt/profile drift during a
+  long run no longer changes durable history.'

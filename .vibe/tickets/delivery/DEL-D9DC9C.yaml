@@ -1,0 +1,48 @@
+id: DEL-D9DC9C
+process: delivery
+type: rework
+title: 'Rework for DEL-1340F8: Durable run history for tickets'
+status: done
+priority: 100
+description: 'Автоматически создано из DEL-1340F8 на стадии Ревью.
+
+
+  Summary:
+
+  Нужна доработка обработки старта/ошибок run history: сейчас есть незакрытый failure-path
+  и нарушена projection-семантика `last_outcome`.
+
+
+  Details:
+
+  1. Блокирующая ошибка в failure path: в [`src/vibe_orchestrator/orchestrator.py`](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:76)
+  `metadata = {..., **self._prompt_metadata(stage)}` вычисляется до `try`. Если `prompt_spec`/чтение
+  prompt-файла падает после записи `started` (например, prompt недоступен в момент
+  `_execute`), исключение выходит мимо обработчика, `failed` не пишется в `run_history`,
+  `active_run` не очищается, тикет зависает. Это противоречит AC про отражение failure
+  path в истории. Локально воспроизвел одноразовым скриптом: `FileNotFoundError` оставляет
+  `active_run=run-broken`, а в `run_history` остается только `started`.
+
+
+  2. Нарушена projection-семантика `last_outcome`: в [`src/vibe_orchestrator/orchestrator.py`](/Users/pmokeev/Desktop/Projects/vibe-orchestrator/src/vibe_orchestrator/orchestrator.py:59)
+  при старте нового запуска код делает `ticket.last_outcome = None`. Для append-only
+  истории это неверно: событие `started` не является новым terminal outcome, значит
+  projection последнего завершенного запуска должна сохраняться до `completed`/`failed`.
+  Сейчас повторный запуск стирает последнее outcome еще до результата; при сбое из
+  п.1 тикет остается и без актуального outcome, и без нового failure event. Тестов
+  на это нет.
+
+
+  Проверки: `pytest -q tests/test_store.py tests/test_orchestrator.py tests/test_scheduler.py
+  tests/test_codex.py` — 23 passed. Но существующие тесты покрывают только happy path
+  и исключение внутри `runner.run`; сценарий сбоя до входа в `try` не покрыт.'
+parent: DEL-1340F8
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T20:51:56.851065+00:00'
+updated_at: '2026-08-16T21:46:25.387697+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Приемка пройдена: failure-path для run history закрыт, `last_outcome`
+  сохраняет последнее terminal outcome до завершения запуска, покрытие дополнили регрессионными
+  тестами.'

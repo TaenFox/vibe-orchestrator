@@ -1,0 +1,44 @@
+id: DEL-466BDC
+process: delivery
+type: rework
+title: 'Rework for DEL-94E699: Document run traceability contract'
+status: done
+priority: 130
+description: 'Автоматически создано из DEL-94E699 на стадии Ревью.
+
+
+  Summary:
+
+  Нужна доработка двух блокирующих сценариев вокруг новых lifecycle-правил: `implementation`
+  без Delivery-детей и момент разблокировки родителя после Rework.
+
+
+  Details:
+
+  1. `src/vibe_orchestrator/orchestrator.py:231-244` держит Discovery-тикет на `implementation`,
+  если у него нет ни одного связанного Delivery-тикета (`if not linked: continue`).
+  Это противоречит задокументированному wait-барьеру в `README.md:20-21` и `ARCHITECTURE.md:71-74`:
+  при отсутствии незавершенных связанных Delivery-тикетов идея должна быть переведена
+  в `ready_for_validation`, а не зависать навсегда. Сейчас это еще и закреплено неверным
+  тестом `tests/test_orchestrator.py:417-423`.
+
+  2. `src/vibe_orchestrator/orchestrator.py:255-260` считает Delivery `rework` resolved
+  уже на `ready_for_release`, поэтому `_release_parent_if_done()` и `_reconcile_blockers()`
+  снимают `parent.blocked_by` до фактического завершения дочернего тикета. Это расходится
+  с `README.md:20` и `ARCHITECTURE.md:62-65`, где родитель должен оставаться заблокированным,
+  пока дочерний Rework/Correction не завершен. В результате родитель может повторно
+  попасть в агентную стадию раньше, чем corrective flow дошел до terminal stage. Неверное
+  поведение подтверждается тестом `tests/test_orchestrator.py:339-360`.
+
+  Проверка: `pytest -q tests/test_codex.py tests/test_orchestrator.py tests/test_scheduler.py
+  tests/test_store.py` проходит, но текущие тесты закрепляют оба описанных расхождения,
+  поэтому перед продолжением процесса их нужно исправить вместе с реализацией.'
+parent: DEL-94E699
+blocked_by: []
+wip_exempt: true
+created_at: '2026-08-16T21:02:06.302904+00:00'
+updated_at: '2026-08-16T21:46:30.103046+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Приемка пройдена: оба блокирующих сценария из DEL-94E699 закрыты в
+  текущем состоянии репозитория, поведение соответствует контракту lifecycle/wait-barrier.'

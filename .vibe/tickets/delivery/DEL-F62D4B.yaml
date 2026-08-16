@@ -1,0 +1,166 @@
+id: DEL-F62D4B
+process: delivery
+type: story
+title: Explicit Codex execution profile per stage
+status: done
+priority: 110
+description: 'Расширить workflow/config полями `model` и `reasoning_effort`, прокинуть
+  их в `CodexRunner` и использовать при вызове `codex exec`.
+
+  Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+  запуска, чтобы обеспечить воспроизводимость execution contract.
+
+  Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+  формирует CLI command с ним; metadata сохраняется в durable history.'
+parent: DISC-C782FE
+blocked_by: []
+wip_exempt: false
+created_at: '2026-08-16T20:38:45.297608+00:00'
+updated_at: '2026-08-16T21:46:33.365923+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Приемка пройдена: execution profile задан явно на agent-stage, прокинут
+  в `CodexRunner`/`codex exec`, а traceability metadata (`prompt_path`, `prompt_version`,
+  `model`, `reasoning_effort`) сохраняется в durable history и run artifacts.'
+run_history:
+- run_id: c2859ba88d4741818165999c5d334c77
+  stage: review
+  event: started
+  timestamp: '2026-08-16T21:36:34.620956+00:00'
+  artifacts_path: .vibe/runs/c2859ba88d4741818165999c5d334c77
+  from_status: review
+  to_status: review
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: Explicit Codex execution profile per stage
+  ticket_priority: '110'
+  ticket_parent: DISC-C782FE
+  ticket_description: 'Расширить workflow/config полями `model` и `reasoning_effort`,
+    прокинуть их в `CodexRunner` и использовать при вызове `codex exec`.
+
+    Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+    запуска, чтобы обеспечить воспроизводимость execution contract.
+
+    Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+    формирует CLI command с ним; metadata сохраняется в durable history.'
+- run_id: c2859ba88d4741818165999c5d334c77
+  stage: review
+  event: completed
+  timestamp: '2026-08-16T21:37:54.577583+00:00'
+  artifacts_path: .vibe/runs/c2859ba88d4741818165999c5d334c77
+  outcome: needs_rework
+  summary: 'Нужна доработка execution-contract traceability: `prompt_version` сейчас
+    нельзя надежно воспроизвести или проверить по сохраненным артефактам запуска.'
+  to_status: review
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  ticket_title: Explicit Codex execution profile per stage
+  ticket_priority: '110'
+  ticket_parent: DISC-C782FE
+  ticket_description: 'Расширить workflow/config полями `model` и `reasoning_effort`,
+    прокинуть их в `CodexRunner` и использовать при вызове `codex exec`.
+
+    Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+    запуска, чтобы обеспечить воспроизводимость execution contract.
+
+    Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+    формирует CLI command с ним; metadata сохраняется в durable history.'
+- run_id: a569e10e7ee94176978362f93234e52e
+  stage: review
+  event: started
+  timestamp: '2026-08-16T21:44:05.329438+00:00'
+  artifacts_path: .vibe/runs/a569e10e7ee94176978362f93234e52e
+  from_status: review
+  to_status: review
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: Explicit Codex execution profile per stage
+  ticket_priority: '110'
+  ticket_parent: DISC-C782FE
+  ticket_description: 'Расширить workflow/config полями `model` и `reasoning_effort`,
+    прокинуть их в `CodexRunner` и использовать при вызове `codex exec`.
+
+    Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+    запуска, чтобы обеспечить воспроизводимость execution contract.
+
+    Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+    формирует CLI command с ним; metadata сохраняется в durable history.'
+- run_id: a569e10e7ee94176978362f93234e52e
+  stage: review
+  event: completed
+  timestamp: '2026-08-16T21:44:56.212967+00:00'
+  artifacts_path: .vibe/runs/a569e10e7ee94176978362f93234e52e
+  outcome: completed
+  summary: Блокирующих замечаний по тикету DEL-F62D4B не найдено. Execution profile
+    теперь задается явно в workflow, прокидывается в `CodexRunner`, включается в команду
+    `codex exec`, а `prompt_path`/`prompt_version` и execution metadata сохраняются
+    в durable history и run artifacts.
+  to_status: ready_for_acceptance
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/review.md
+  prompt_version: sha256:d5a6c60904f00779a59dd208186e7564d65ceab5bd6144757618b76612db6e9e
+  ticket_title: Explicit Codex execution profile per stage
+  ticket_priority: '110'
+  ticket_parent: DISC-C782FE
+  ticket_description: 'Расширить workflow/config полями `model` и `reasoning_effort`,
+    прокинуть их в `CodexRunner` и использовать при вызове `codex exec`.
+
+    Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+    запуска, чтобы обеспечить воспроизводимость execution contract.
+
+    Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+    формирует CLI command с ним; metadata сохраняется в durable history.'
+- run_id: 11808e9d6b7e494488b06f3084c3e8f2
+  stage: acceptance
+  event: started
+  timestamp: '2026-08-16T21:44:58.396036+00:00'
+  artifacts_path: .vibe/runs/11808e9d6b7e494488b06f3084c3e8f2
+  from_status: ready_for_acceptance
+  to_status: acceptance
+  prompt_path: delivery/acceptance.md
+  prompt_version: sha256:ed1572cca455f6821e009730b6cf4433f3fe48c3049302053f8036d63139b295
+  model: gpt-5.4
+  reasoning_effort: low
+  ticket_title: Explicit Codex execution profile per stage
+  ticket_priority: '110'
+  ticket_parent: DISC-C782FE
+  ticket_description: 'Расширить workflow/config полями `model` и `reasoning_effort`,
+    прокинуть их в `CodexRunner` и использовать при вызове `codex exec`.
+
+    Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+    запуска, чтобы обеспечить воспроизводимость execution contract.
+
+    Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+    формирует CLI command с ним; metadata сохраняется в durable history.'
+- run_id: 11808e9d6b7e494488b06f3084c3e8f2
+  stage: acceptance
+  event: completed
+  timestamp: '2026-08-16T21:45:59.113643+00:00'
+  artifacts_path: .vibe/runs/11808e9d6b7e494488b06f3084c3e8f2
+  outcome: completed
+  summary: 'Приемка пройдена: execution profile задан явно на agent-stage, прокинут
+    в `CodexRunner`/`codex exec`, а traceability metadata (`prompt_path`, `prompt_version`,
+    `model`, `reasoning_effort`) сохраняется в durable history и run artifacts.'
+  to_status: ready_for_release
+  model: gpt-5.4
+  reasoning_effort: low
+  prompt_path: delivery/acceptance.md
+  prompt_version: sha256:ed1572cca455f6821e009730b6cf4433f3fe48c3049302053f8036d63139b295
+  ticket_title: Explicit Codex execution profile per stage
+  ticket_priority: '110'
+  ticket_parent: DISC-C782FE
+  ticket_description: 'Расширить workflow/config полями `model` и `reasoning_effort`,
+    прокинуть их в `CodexRunner` и использовать при вызове `codex exec`.
+
+    Одновременно сохранять `prompt_path` и вычисляемый `prompt_version` для каждого
+    запуска, чтобы обеспечить воспроизводимость execution contract.
+
+    Критерии приемки: agent stages в workflow имеют явный execution profile; runner
+    формирует CLI command с ним; metadata сохраняется в durable history.'
