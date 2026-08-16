@@ -1,36 +1,36 @@
-# Architecture
+# Архитектура
 
-## Responsibility split
+## Разделение ответственности
 
-**Orchestrator repository**
-- workflow definitions
-- WIP/pull scheduling
-- prompt provider (files for prototype)
-- Codex worker launcher
-- minimal UI
+**Репозиторий оркестратора**
+- определения workflow
+- планирование WIP/pull
+- провайдер промптов (файлы в прототипе)
+- запуск воркеров Codex
+- минимальный UI
 
-**Target project repository**
+**Репозиторий целевого проекта**
 - `.vibe/tickets/**`
-- source code
-- project knowledge/docs
-- implementation artifacts
+- исходный код
+- знания/документация проекта
+- артефакты реализации
 
-**Future KMS**
-- versioned prompts and policies exposed via API
-- replace file prompt provider without changing scheduler/tickets
+**Будущий KMS**
+- версионируемые промпты и политики, доступные по API
+- замена файлового провайдера промптов без изменений scheduler/tickets
 
-## Agent lifecycle
+## Жизненный цикл агента
 
-1. Human moves a ticket from backlog to an eligible queue (for example Discovery `ready`).
-2. Scheduler scans all tickets and checks target-stage WIP.
-3. The orchestrator changes the ticket to the active agent stage and sets `active_run`.
-4. It starts an independent `codex exec` subprocess in the target repository.
-5. Codex returns structured `{outcome, summary, details}`.
-6. The orchestrator validates the outcome against workflow YAML and applies the configured transition.
-7. The next queue can be pulled when its WIP allows.
+1. Человек перемещает тикет из backlog в допустимую очередь (например, Discovery `ready`).
+2. Планировщик сканирует все тикеты и проверяет WIP целевой стадии.
+3. Оркестратор переводит тикет в активную агентную стадию и устанавливает `active_run`.
+4. Он запускает независимый подпроцесс `codex exec` в целевом репозитории.
+5. Codex возвращает структурированный `{outcome, summary, details}`.
+6. Оркестратор валидирует outcome по workflow YAML и применяет настроенный переход.
+7. Следующая очередь может быть выбрана, когда ее WIP это позволяет.
 
-The main orchestrator loop never waits synchronously for an agent: each Codex invocation is an asyncio subprocess task.
+Основной цикл оркестратора никогда не ждет агента синхронно: каждый вызов Codex работает как отдельная задача asyncio subprocess.
 
-## Corrective work
+## Корректирующая работа
 
-`rework` and `correction` are tickets with `wip_exempt: true`. They may have a `parent`. The intended model is that the parent remains on the failed/control stage and continues consuming WIP while the corrective child is processed. Full automatic parent block/unblock wiring is intentionally deferred from v0.1.
+`rework` и `correction` — это тикеты с `wip_exempt: true`. У них может быть `parent`. Предполагаемая модель такова: родитель остается на неуспешной/контрольной стадии и продолжает занимать WIP, пока обрабатывается корректирующий дочерний тикет. Полная автоматическая связка блокировки/разблокировки родителя намеренно отложена после v0.1.

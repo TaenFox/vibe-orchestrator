@@ -1,0 +1,28 @@
+id: DISC-879090
+process: discovery
+type: idea
+title: Improve agent execution traceability
+status: implementation
+priority: 100
+description: Improve the orchestrator so that agent runs are reproducible and auditable.
+  Add durable ticket history/handoffs instead of overwriting only last_summary; keep
+  last_summary as a convenience field. Record per-run metadata including model, reasoning
+  effort, prompt identifier/version, outcome and summary. Make Codex model and reasoning
+  effort explicit in workflow configuration and pass them to codex exec. Update README/documentation
+  accordingly.
+parent: null
+blocked_by: []
+wip_exempt: false
+created_at: '2026-08-16T17:54:43.055116+00:00'
+updated_at: '2026-08-16T18:14:48.774053+00:00'
+active_run: null
+last_outcome: completed
+last_summary: 'Current architecture is close to supporting auditability, but today
+  each run only overwrites `last_summary`/`last_outcome` on the ticket and stores
+  unlinked local artifacts under `.vibe/runs/`; model and reasoning effort are implicit
+  in the operator’s Codex config. Smallest coherent approach: make agent-stage execution
+  settings explicit in workflow YAML, use one durable `run_id` end-to-end, append
+  immutable run-history entries to ticket YAML while keeping `last_summary` as a convenience
+  mirror, and write a per-run manifest beside existing run artifacts. No new external
+  dependencies are required; cost is moderate and contained to config parsing, runner/orchestrator
+  plumbing, ticket schema evolution, tests, and docs.'

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vibe-orchestrator"
 version = "0.1.0"
-description = "Pull-based local orchestration for Codex CLI agents"
+description = "Локальная pull-оркестрация для Codex CLI-агентов"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0"]
 

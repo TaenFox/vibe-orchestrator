@@ -27,7 +27,7 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
             length = int(self.headers.get("content-length", "0")); data = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
             if self.path == "/move":
                 ticket = store.get(data["id"][0]); workflow = workflows[ticket.process]; stage = workflow.by_id[ticket.status]; target = data.get("target", [stage.next])[0]
-                if not target or target not in workflow.by_id: return self.send_error(400, "Transition not allowed")
+                if not target or target not in workflow.by_id: return self.send_error(400, "Переход недоступен")
                 ticket.status = target; store.save(ticket); return self._redirect(f"/?process={ticket.process}")
             self.send_error(404)
         def log_message(self, fmt, *args): return
@@ -36,7 +36,7 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
         def _json(self,obj):
             payload=json.dumps(obj,ensure_ascii=False,indent=2).encode("utf-8"); self.send_response(200); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload)
         def _redirect(self,location): self.send_response(303); self.send_header("Location",location); self.end_headers()
-    server=ThreadingHTTPServer((host,port),Handler); url=f"http://{host}:{port}"; print(f"UI: {url}")
+    server=ThreadingHTTPServer((host,port),Handler); url=f"http://{host}:{port}"; print(f"Интерфейс: {url}")
     if open_browser: webbrowser.open(url)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
@@ -50,8 +50,8 @@ def render_board(store, workflows, process: str) -> str:
         for ticket in stage_tickets:
             action=""
             if stage.next:
-                action=f'<form method="post" action="/move"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><input type="hidden" name="target" value="{html.escape(stage.next)}"><button>Move → {html.escape(workflow.by_id[stage.next].title)}</button></form>'
-            blocked=f'<span class="badge">blocked {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">agent running</span>' if ticket.active_run else ""; corrective='<span class="badge">WIP free</span>' if ticket.wip_exempt else ""; summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""
-            cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{corrective}{blocked}{run}<div class="meta">priority {ticket.priority}</div>{summary}{action}</div>')
+                action=f'<form method="post" action="/move"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><input type="hidden" name="target" value="{html.escape(stage.next)}"><button>Переместить → {html.escape(workflow.by_id[stage.next].title)}</button></form>'
+            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">агент выполняется</span>' if ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""
+            cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{corrective}{blocked}{run}<div class="meta">приоритет {ticket.priority}</div>{summary}{action}</div>')
         wip=f" · WIP {stage.wip}" if stage.wip is not None else ""; columns.append(f'<section class="column"><h3>{html.escape(stage.title)}{wip}</h3>{"".join(cards)}</section>')
     return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style></head><body><header><strong>vibe-orchestrator</strong>{nav}<span class="meta">{html.escape(str(store.project))}</span></header><main class="board">{"".join(columns)}</main></body></html>'

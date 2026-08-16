@@ -25,8 +25,8 @@ class Orchestrator:
 
     async def run_forever(self) -> None:
         if not self.runner.available():
-            raise RuntimeError("Codex CLI not found on PATH. Install/login to Codex before running the orchestrator.")
-        log.info("watching %s", self.store.project)
+            raise RuntimeError("Codex CLI не найден в PATH. Установите Codex и выполните вход перед запуском оркестратора.")
+        log.info("наблюдение за %s", self.store.project)
         while True:
             self._reap_finished()
             await self._schedule_once()
@@ -52,7 +52,7 @@ class Orchestrator:
             self.store.save(ticket)
             task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status), name=ticket.id)
             self.running[ticket.id] = task
-            log.info("started %s -> %s", ticket.id, candidate.target_status)
+            log.info("запущено %s -> %s", ticket.id, candidate.target_status)
 
     async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str) -> None:
         ticket = self.store.get(ticket_id)
@@ -67,14 +67,14 @@ class Orchestrator:
             ticket.status = (stage.outcomes or {})[result.outcome]
             ticket.active_run = None
             self.store.save(ticket)
-            log.info("finished %s: %s -> %s", ticket.id, result.outcome, ticket.status)
+            log.info("завершено %s: %s -> %s", ticket.id, result.outcome, ticket.status)
         except Exception as exc:
             ticket = self.store.get(ticket_id)
             ticket.active_run = None
             ticket.last_outcome = "failed"
             ticket.last_summary = str(exc)
             self.store.save(ticket)
-            log.exception("worker failed for %s", ticket_id)
+            log.exception("сбой воркера для %s", ticket_id)
 
     def _reap_finished(self) -> None:
         for ticket_id, task in list(self.running.items()):

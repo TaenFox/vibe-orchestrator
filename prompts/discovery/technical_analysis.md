@@ -1,3 +1,3 @@
-# Role: technical analyst / tech lead for discovery
+# Роль: технический аналитик / техлид discovery
 
-Define an implementation strategy for the idea. Inspect current architecture. Propose the smallest coherent technical approach, major changes, dependencies, risks, and a Delivery decomposition into Stories/Tasks. Include enough information to support cost estimation and an Investment Decision. Do not implement the feature.
+Определите стратегию реализации идеи. Изучите текущую архитектуру. Предложите минимальный целостный технический подход, основные изменения, зависимости, риски и декомпозицию Delivery на Stories/Tasks. Включите достаточно информации для оценки стоимости и Investment Decision. Не реализуйте саму функциональность.

@@ -1,37 +1,37 @@
 id: discovery
-title: Discovery
+title: Исследование
 initial_status: todo
 stages:
-  - {id: todo, title: Todo, kind: human, next: ready}
-  - {id: ready, title: Ready, kind: queue, pull_to: generation}
+  - {id: todo, title: К выполнению, kind: human, next: ready}
+  - {id: ready, title: Готово, kind: queue, pull_to: generation}
   - id: generation
-    title: Generation
+    title: Формирование
     kind: agent
     wip: 2
     prompt: discovery/generation.md
     outcomes: {completed: human}
-  - {id: human, title: Human, kind: human, next: ready_for_analysis}
-  - {id: ready_for_analysis, title: Ready for Analysis, kind: queue, pull_to: analysis}
+  - {id: human, title: Человек, kind: human, next: ready_for_analysis}
+  - {id: ready_for_analysis, title: Готово к анализу, kind: queue, pull_to: analysis}
   - id: analysis
-    title: Analysis
+    title: Анализ
     kind: agent
     wip: 2
     prompt: discovery/analysis.md
     outcomes: {completed: ready_for_technical_analysis}
-  - {id: ready_for_technical_analysis, title: Ready for Technical Analysis, kind: queue, pull_to: technical_analysis}
+  - {id: ready_for_technical_analysis, title: Готово к техническому анализу, kind: queue, pull_to: technical_analysis}
   - id: technical_analysis
-    title: Technical Analysis
+    title: Технический анализ
     kind: agent
     wip: 2
     prompt: discovery/technical_analysis.md
     outcomes: {completed: investment_decision}
-  - {id: investment_decision, title: Investment Decision, kind: human, next: implementation}
-  - {id: implementation, title: Implementation, kind: wait, next: ready_for_validation}
-  - {id: ready_for_validation, title: Ready for Validation, kind: queue, pull_to: validation}
+  - {id: investment_decision, title: Инвестиционное решение, kind: human, next: implementation}
+  - {id: implementation, title: Реализация, kind: wait, next: ready_for_validation}
+  - {id: ready_for_validation, title: Готово к валидации, kind: queue, pull_to: validation}
   - id: validation
-    title: Validation
+    title: Валидация
     kind: agent
     wip: 2
     prompt: discovery/validation.md
     outcomes: {completed: done}
-  - {id: done, title: Done, kind: done}
+  - {id: done, title: Готово, kind: done}

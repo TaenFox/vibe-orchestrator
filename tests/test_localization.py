@@ -1,0 +1,48 @@
+from pathlib import Path
+
+from vibe_orchestrator.cli import build_parser
+from vibe_orchestrator.config import load_all_workflows
+from vibe_orchestrator.tickets import TicketStore
+from vibe_orchestrator.ui import render_board
+
+
+def test_cli_help_is_localized():
+    help_text = build_parser().format_help()
+    assert "Pull-оркестратор тикетов Codex" in help_text
+    assert "Создать тикет" in help_text
+    assert "Запустить оркестратор" in help_text
+
+
+def test_workflow_titles_are_localized():
+    workflows = load_all_workflows()
+
+    assert workflows["delivery"].title == "Доставка"
+    assert workflows["delivery"].by_id["ready_for_review"].title == "Готово к ревью"
+    assert workflows["process_management"].by_id["auto_acceptance"].title == "Авто-приемка"
+
+
+def test_generated_vibe_readme_is_localized(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+
+    readme = (tmp_path / ".vibe" / "README.md").read_text(encoding="utf-8")
+    assert "Состояние тикетов для vibe-orchestrator" in readme
+    assert "`runs/` содержит локальные метаданные выполнения" in readme
+
+
+def test_ui_board_uses_russian_labels(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Локализация интерфейса", status="ready_for_review")
+    ticket.wip_exempt = True
+    ticket.blocked_by = ["DEL-LOCK"]
+    ticket.active_run = "run-1"
+    ticket.last_summary = "Проверка перевода"
+    store.save(ticket)
+
+    html = render_board(store, load_all_workflows(), "delivery")
+    assert "Готово к ревью" in html
+    assert "заблокирован: 1" in html
+    assert "агент выполняется" in html
+    assert "без учета WIP" in html
+    assert "приоритет 100" in html

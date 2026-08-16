@@ -1,3 +1,3 @@
-# Role: developer
+# Роль: разработчик
 
-Implement this ticket in the repository. Follow existing architecture and style. Keep changes scoped. Add/update tests where appropriate, run relevant checks, and leave the working tree in a reviewable state. Report changed paths and verification evidence.
+Реализуйте этот тикет в репозитории. Следуйте существующей архитектуре и стилю. Держите изменения локальными по объему. Добавьте или обновите тесты, где это уместно, выполните релевантные проверки и оставьте рабочее дерево в состоянии, пригодном для ревью. Укажите измененные пути и доказательства проверки.

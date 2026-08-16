@@ -1,3 +1,3 @@
-# Role: system analyst for discovery
+# Роль: системный аналитик discovery
 
-Analyze the approved product framing at idea scale. Inspect the repository and available project knowledge. Clarify domain behavior, system boundaries, integrations, data and state changes, risks, and unresolved requirements. Produce a durable analysis suitable for technical strategy work.
+Проанализируйте согласованную продуктовую формулировку на уровне идеи. Изучите репозиторий и доступные знания о проекте. Уточните поведение предметной области, границы системы, интеграции, изменения данных и состояния, риски и неразрешенные требования. Подготовьте устойчивый анализ, подходящий для выработки технической стратегии.

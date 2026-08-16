@@ -58,7 +58,7 @@ class TicketStore:
             (self.tickets_root / process).mkdir(parents=True, exist_ok=True)
         readme = self.root / "README.md"
         if not readme.exists():
-            readme.write_text("# .vibe\n\nTicket state for vibe-orchestrator. Commit `tickets/`; `runs/` is local execution metadata.\n", encoding="utf-8")
+            readme.write_text("# .vibe\n\nСостояние тикетов для vibe-orchestrator. Коммитьте `tickets/`; `runs/` содержит локальные метаданные выполнения.\n", encoding="utf-8")
         gitignore = self.root / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text("runs/\n", encoding="utf-8")

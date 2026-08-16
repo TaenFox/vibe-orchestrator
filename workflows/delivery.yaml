@@ -1,36 +1,36 @@
 id: delivery
-title: Delivery
+title: Доставка
 initial_status: todo
 stages:
-  - {id: todo, title: Todo, kind: human, next: selected_for_session}
-  - {id: selected_for_session, title: Selected for Session, kind: queue, pull_to: system_analysis}
+  - {id: todo, title: К выполнению, kind: human, next: selected_for_session}
+  - {id: selected_for_session, title: Выбрано на сессию, kind: queue, pull_to: system_analysis}
   - id: system_analysis
-    title: System Analysis
+    title: Системный анализ
     kind: agent
     wip: 3
     prompt: delivery/system_analysis.md
     outcomes: {completed: ready_for_development}
-  - {id: ready_for_development, title: Ready for Development, kind: queue, pull_to: development}
+  - {id: ready_for_development, title: Готово к разработке, kind: queue, pull_to: development}
   - id: development
-    title: Development
+    title: Разработка
     kind: agent
     wip: 3
     prompt: delivery/development.md
     outcomes: {completed: ready_for_review}
-  - {id: ready_for_review, title: Ready for Review, kind: queue, pull_to: review}
+  - {id: ready_for_review, title: Готово к ревью, kind: queue, pull_to: review}
   - id: review
-    title: Review
+    title: Ревью
     kind: agent
     wip: 2
     prompt: delivery/review.md
     outcomes: {completed: ready_for_acceptance}
-  - {id: ready_for_acceptance, title: Ready for Acceptance, kind: queue, pull_to: acceptance}
+  - {id: ready_for_acceptance, title: Готово к приемке, kind: queue, pull_to: acceptance}
   - id: acceptance
-    title: Acceptance
+    title: Приемка
     kind: agent
     wip: 2
     prompt: delivery/acceptance.md
     outcomes: {completed: ready_for_release}
-  - {id: ready_for_release, title: Ready for Release, kind: human, next: release}
-  - {id: release, title: Release, kind: human, next: done}
-  - {id: done, title: Done, kind: done}
+  - {id: ready_for_release, title: Готово к релизу, kind: human, next: release}
+  - {id: release, title: Релиз, kind: human, next: done}
+  - {id: done, title: Готово, kind: done}

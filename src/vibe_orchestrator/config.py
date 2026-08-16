@@ -34,7 +34,7 @@ class Workflow:
         for index, stage in enumerate(self.stages):
             if stage.id == status:
                 return index
-        raise KeyError(f"Unknown status {status!r} in workflow {self.id!r}")
+        raise KeyError(f"Неизвестный статус {status!r} в workflow {self.id!r}")
 
 
 def package_root() -> Path:
@@ -52,7 +52,7 @@ def prompt_dir() -> Path:
 def load_workflow(process: str) -> Workflow:
     path = workflow_dir() / f"{process}.yaml"
     if not path.exists():
-        raise FileNotFoundError(f"Workflow not found: {path}")
+        raise FileNotFoundError(f"Workflow не найден: {path}")
     data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
     stages = [
         Stage(

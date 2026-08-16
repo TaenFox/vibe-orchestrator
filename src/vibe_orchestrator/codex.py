@@ -49,8 +49,8 @@ class CodexRunner:
         outcomes = ", ".join((stage.outcomes or {}).keys())
         return f"""{stage_prompt}
 
-## Execution contract
-You are working on exactly one ticket at exactly one workflow stage.
+## Контракт выполнения
+Вы работаете ровно с одним тикетом и ровно на одной стадии workflow.
 Repository root: {self.store.project}
 Ticket ID: {ticket.id}
 Process: {ticket.process}
@@ -59,16 +59,16 @@ Stage: {stage.id}
 Title: {ticket.title}
 Priority: {ticket.priority}
 Parent: {ticket.parent or 'none'}
-Description:
-{ticket.description or '(empty)'}
+Описание:
+{ticket.description or '(пусто)'}
 
-Allowed outcomes: {outcomes or 'completed'}.
+Допустимые outcomes: {outcomes or 'completed'}.
 
-Important:
-- Do not edit `.vibe/tickets/**` or change workflow status yourself.
-- You may edit project code/docs when the stage instructions require it.
-- Work from the current repository state; inspect relevant files before acting.
-- Finish by returning only the structured result required by the supplied output schema.
-- `outcome` must be one of the allowed outcomes above.
-- Put a compact durable handoff in `summary`; use `details` for useful evidence, paths, tests, or open concerns.
+Важно:
+- Не редактируйте `.vibe/tickets/**` и не меняйте статус workflow самостоятельно.
+- Вы можете изменять код и документацию проекта, если это требуется инструкциями стадии.
+- Работайте от текущего состояния репозитория; перед действиями изучите релевантные файлы.
+- Завершайте работу, возвращая только структурированный результат, требуемый переданной output schema.
+- `outcome` должен быть одним из допустимых значений выше.
+- Поместите компактный устойчивый handoff в `summary`; в `details` укажите полезные доказательства, пути, тесты или открытые вопросы.
 """

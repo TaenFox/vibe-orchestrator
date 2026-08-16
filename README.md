@@ -1,48 +1,48 @@
 # vibe-orchestrator
 
-Prototype of a pull-based, ticket-driven orchestration system for local Codex CLI agents.
+Прототип pull-оркестратора на основе тикетов для локальных Codex CLI-агентов.
 
-The orchestrator owns **process rules and prompts**. The target project repository owns **tickets, code, knowledge and work artifacts**. Each agent run is a fresh `codex exec` invocation for one ticket at one stage.
+Оркестратор отвечает за **правила процесса и промпты**. Репозиторий целевого проекта отвечает за **тикеты, код, знания и рабочие артефакты**. Каждый запуск агента — это новый вызов `codex exec` для одного тикета на одной стадии.
 
-## Current model
+## Текущая модель
 
-Three processes are included:
+В комплект входят три процесса:
 
-- **Discovery** — Idea → analysis → Investment Decision → implementation wait → validation.
-- **Delivery** — Story / Task / Bug plus WIP-free Rework children.
+- **Discovery** — Идея → анализ → Investment Decision → ожидание реализации → валидация.
+- **Delivery** — Story / Task / Bug плюс дочерние Rework без учета в WIP.
 - **Process Management** — Audit / Planning / Estimation.
 
-Core rules:
+Основные правила:
 
-- Pull from the **rightmost eligible queue** first, then corrective work, priority and age.
-- Active stages have WIP limits.
-- The orchestrator claims a ticket by moving it into the active stage **before** starting Codex.
-- Rework/Correction child tickets are WIP-exempt; the parent remains blocked on its current stage and still occupies WIP.
-- Agents return an `outcome`; they never edit workflow status themselves.
+- Сначала выбирается **самая правая доступная очередь**, затем корректирующая работа, приоритет и возраст.
+- Для активных стадий действуют лимиты WIP.
+- Оркестратор забирает тикет, перемещая его в активную стадию **до** запуска Codex.
+- Дочерние тикеты Rework/Correction не учитываются в WIP; родитель остается заблокированным на своей текущей стадии и продолжает занимать WIP.
+- Агенты возвращают `outcome`; сами статусы workflow они не меняют.
 
-## Requirements
+## Требования
 
 - Python 3.11+
 - Git
-- Codex CLI installed and authenticated (`codex --version`)
-- VS Code recommended
+- Установленный и аутентифицированный Codex CLI (`codex --version`)
+- Рекомендуется VS Code
 
-On macOS, `/usr/bin/python3` or `python3` can still point to an older system Python that does not satisfy the `3.11+` requirement. Check your interpreter first:
+На macOS `python3` или `/usr/bin/python3` могут по-прежнему указывать на более старый системный Python, не подходящий под требование `3.11+`. Сначала проверьте интерпретатор:
 
 ```bash
 python3 --version
 ```
 
-If that prints a version older than `3.11`, install a newer Python and use that executable explicitly. Example with Homebrew:
+Если команда выводит версию ниже `3.11`, установите более новый Python и используйте этот исполняемый файл явно. Пример с Homebrew:
 
 ```bash
 brew install python@3.11
 python3.11 --version
 ```
 
-Codex is invoked with `codex exec --sandbox workspace-write --json --output-schema ... -o ... -`, using the CLI's existing authentication.
+Codex вызывается как `codex exec --sandbox workspace-write --json --output-schema ... -o ... -`, используя уже настроенную аутентификацию CLI.
 
-## Quick start in VS Code
+## Быстрый старт в VS Code
 
 ```bash
 git clone https://github.com/TaenFox/vibe-orchestrator.git
@@ -55,52 +55,52 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Open this repository in VS Code. Included tasks provide setup, tests, orchestrator and UI commands.
+Откройте этот репозиторий в VS Code. Встроенные задачи покрывают настройку, тесты, оркестратор и команды UI.
 
-Initialize a target Git repository:
+Инициализируйте целевой Git-репозиторий:
 
 ```bash
 vibe init /path/to/your-project
 ```
 
-Add an idea:
+Добавьте идею:
 
 ```bash
-vibe add /path/to/your-project discovery idea "My idea" \
-  --description "What I want to explore"
+vibe add /path/to/your-project discovery idea "Моя идея" \
+  --description "Что я хочу исследовать"
 ```
 
-Start the UI:
+Запустите UI:
 
 ```bash
 vibe ui /path/to/your-project
 ```
 
-Open `http://127.0.0.1:8765`. Move a Discovery idea from **Todo** to **Ready**. `Ready` is the human-controlled commitment queue: the agent never pulls directly from Todo.
+Откройте `http://127.0.0.1:8765`. Переместите идею Discovery из **К выполнению** в **Готово**. `ready` — это очередь обязательств под контролем человека: агент никогда не забирает задачи напрямую из `todo`.
 
-In a second VS Code terminal:
+Во втором терминале VS Code:
 
 ```bash
 vibe run /path/to/your-project
 ```
 
-The orchestrator polls tickets, respects WIP, and launches independent Codex subprocesses concurrently.
+Оркестратор опрашивает тикеты, соблюдает WIP и параллельно запускает независимые подпроцессы Codex.
 
-## Ticket storage
+## Хранение тикетов
 
-The target repository gets:
+Целевой репозиторий получает:
 
 ```text
 .vibe/
 ├── README.md
-├── .gitignore        # local agent run logs are ignored
+├── .gitignore        # локальные логи запусков агентов игнорируются
 └── tickets/
     ├── discovery/
     ├── delivery/
     └── process_management/
 ```
 
-A ticket is a single YAML file. Example:
+Тикет — это один YAML-файл. Пример:
 
 ```yaml
 id: DISC-A1B2C3
@@ -115,22 +115,22 @@ description: ...
 wip_exempt: false
 ```
 
-The prototype deliberately does **not** implement a database, Jira integration, users, permissions or a full event log.
+Прототип намеренно **не** реализует базу данных, интеграцию с Jira, пользователей, права доступа и полный журнал событий.
 
-## Process configuration
+## Конфигурация процессов
 
-Processes are declarative YAML files in `workflows/`. Prompts live in `prompts/`. This is intentional for the prototype; later the prompt reader can be replaced with a versioned KMS provider without changing ticket/process mechanics.
+Процессы описываются декларативными YAML-файлами в `workflows/`. Промпты лежат в `prompts/`. Для прототипа это сделано намеренно; позднее файлового провайдера промптов можно будет заменить на версионируемый KMS-провайдер без изменения механики тикетов и процессов.
 
-## Safety
+## Безопасность
 
-The default Codex sandbox is `workspace-write`, not `danger-full-access`. The orchestrator does not commit Codex auth files. Keep `.codex/auth.json` and other credentials outside project repositories.
+Песочница Codex по умолчанию — `workspace-write`, а не `danger-full-access`. Оркестратор не коммитит файлы аутентификации Codex. Храните `.codex/auth.json` и другие учетные данные вне проектных репозиториев.
 
-This is an experimental local automation prototype. Run it only against repositories you can recover with Git.
+Это экспериментальный прототип локальной автоматизации. Запускайте его только на репозиториях, которые можно восстановить через Git.
 
-## Known prototype limitations
+## Известные ограничения прототипа
 
-- Human transitions are intentionally simple: UI buttons only follow the configured `next` transition.
-- Investment Decision currently models the approve path; reject/correction buttons are a next iteration.
-- Discovery-to-Delivery child creation and Implementation completion based on linked Delivery tickets are not automated yet.
-- Failed Codex processes leave the parent ticket in its active stage so the failure remains visible in WIP.
-- The UI is intentionally dependency-free and minimal.
+- Переходы, выполняемые человеком, намеренно упрощены: кнопки UI следуют только настроенному переходу `next`.
+- Investment Decision сейчас моделирует только путь approve; кнопки reject/correction будут следующей итерацией.
+- Автоматическое создание дочерних тикетов Discovery-to-Delivery и завершение Implementation по связанным тикетам Delivery пока не автоматизированы.
+- Если процесс Codex завершается с ошибкой, родительский тикет остается на активной стадии, чтобы сбой оставался видимым в WIP.
+- UI намеренно минималистичен и не имеет зависимостей.
