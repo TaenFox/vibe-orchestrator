@@ -1,0 +1,9 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label":"vibe: setup","type":"shell","command":"python3 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'","problemMatcher":[]},
+    {"label":"vibe: test","type":"shell","command":".venv/bin/python -m pytest","group":"test","problemMatcher":[]},
+    {"label":"vibe: UI (current workspace)","type":"shell","command":".venv/bin/vibe ui ${workspaceFolder}","isBackground":true,"problemMatcher":[]},
+    {"label":"vibe: orchestrator (current workspace)","type":"shell","command":".venv/bin/vibe run ${workspaceFolder}","isBackground":true,"problemMatcher":[]}
+  ]
+}

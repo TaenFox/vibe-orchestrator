@@ -1,0 +1,21 @@
+id: process_management
+title: Process Management
+initial_status: todo
+stages:
+  - {id: todo, title: Todo, kind: human, next: waiting}
+  - {id: waiting, title: Waiting, kind: queue, pull_to: in_progress}
+  - id: in_progress
+    title: In Progress
+    kind: agent
+    wip: 2
+    prompt: process_management/work.md
+    outcomes: {completed: ready_for_auto_acceptance}
+  - {id: ready_for_auto_acceptance, title: Ready for Auto Acceptance, kind: queue, pull_to: auto_acceptance}
+  - id: auto_acceptance
+    title: Auto Acceptance
+    kind: agent
+    wip: 2
+    prompt: process_management/auto_acceptance.md
+    outcomes: {completed: human_acceptance}
+  - {id: human_acceptance, title: Human Acceptance, kind: human, next: done}
+  - {id: done, title: Done, kind: done}

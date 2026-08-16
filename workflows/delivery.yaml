@@ -1,0 +1,36 @@
+id: delivery
+title: Delivery
+initial_status: todo
+stages:
+  - {id: todo, title: Todo, kind: human, next: selected_for_session}
+  - {id: selected_for_session, title: Selected for Session, kind: queue, pull_to: system_analysis}
+  - id: system_analysis
+    title: System Analysis
+    kind: agent
+    wip: 3
+    prompt: delivery/system_analysis.md
+    outcomes: {completed: ready_for_development}
+  - {id: ready_for_development, title: Ready for Development, kind: queue, pull_to: development}
+  - id: development
+    title: Development
+    kind: agent
+    wip: 3
+    prompt: delivery/development.md
+    outcomes: {completed: ready_for_review}
+  - {id: ready_for_review, title: Ready for Review, kind: queue, pull_to: review}
+  - id: review
+    title: Review
+    kind: agent
+    wip: 2
+    prompt: delivery/review.md
+    outcomes: {completed: ready_for_acceptance}
+  - {id: ready_for_acceptance, title: Ready for Acceptance, kind: queue, pull_to: acceptance}
+  - id: acceptance
+    title: Acceptance
+    kind: agent
+    wip: 2
+    prompt: delivery/acceptance.md
+    outcomes: {completed: ready_for_release}
+  - {id: ready_for_release, title: Ready for Release, kind: human, next: release}
+  - {id: release, title: Release, kind: human, next: done}
+  - {id: done, title: Done, kind: done}
