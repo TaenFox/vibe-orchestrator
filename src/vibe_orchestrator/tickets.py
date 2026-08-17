@@ -82,12 +82,17 @@ class TicketStore:
         if not readme.exists():
             readme.write_text(
                 "# .vibe\n\n"
-                "Состояние тикетов для vibe-orchestrator. Коммитьте `tickets/`; `runs/` содержит локальные артефакты запусков (`run.json`, `events.jsonl`, `result.json`).\n",
+                "Состояние тикетов для vibe-orchestrator. Каталог `tickets/` является локальным состоянием control plane и не коммитится; `runs/` содержит локальные артефакты запусков (`run.json`, `events.jsonl`, `result.json`).\n",
                 encoding="utf-8",
             )
         gitignore = self.root / ".gitignore"
         if not gitignore.exists():
-            gitignore.write_text("runs/\ntmp/\n", encoding="utf-8")
+            gitignore.write_text("runs/\ntmp/\ntickets/\n", encoding="utf-8")
+        else:
+            entries = gitignore.read_text(encoding="utf-8").splitlines()
+            missing = [entry for entry in ("runs/", "tmp/", "tickets/") if entry not in entries]
+            if missing:
+                gitignore.write_text("\n".join([*entries, *missing]) + "\n", encoding="utf-8")
 
     def ticket_path(self, ticket: Ticket) -> Path:
         return self.tickets_root / ticket.process / f"{ticket.id}.yaml"

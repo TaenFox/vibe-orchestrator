@@ -108,7 +108,7 @@ vibe workers /path/to/your-project     # показать текущий лим�
 ```text
 .vibe/
 ├── README.md
-├── .gitignore        # локальные артефакты запусков игнорируются
+├── .gitignore        # локальное состояние и артефакты игнорируются
 ├── runs/
 │   └── <run_id>/
 │       ├── prompt.contract.txt
@@ -117,7 +117,7 @@ vibe workers /path/to/your-project     # показать текущий лим�
 │       └── result.json
 ├── tmp/
 │   └── workers.yaml  # локальный runtime-лимит воркеров
-└── tickets/
+└── tickets/          # локальный радар stable, не часть code plane
     ├── discovery/
     ├── delivery/
     └── process_management/
@@ -159,8 +159,8 @@ run_history:
 
 Source of truth для аудита разделен на два слоя:
 
-- `.vibe/tickets/**` — коммитируемое долговечное состояние. Поля `status`, `active_run`, `last_outcome`, `last_summary`, `consecutive_failures`, `retry_after` и `run_history` определяют, что произошло с тикетом.
-- `.vibe/runs/<run_id>/` — локальные артефакты конкретного запуска. Здесь лежат `run.json` с execution profile и идентичностью запуска, `events.jsonl` с сырым выводом `codex exec` и `result.json` со структурированным ответом агента.
+- `.vibe/tickets/**` — локальное долговечное состояние control plane. Оно принадлежит checkout `stable`, не входит в code plane и не переносится merge-операциями между ветками. Поля `status`, `active_run`, `last_outcome`, `last_summary`, `consecutive_failures`, `retry_after` и `run_history` определяют, что произошло с тикетом.
+- `.vibe/runs/<run_id>/` — локальные артефакты конкретного запуска. Здесь лежат `run.json` с execution profile и идентичностью запуска, `events.jsonl` с сырым выводом `codex exec` и `result.json` со структурированным ответом агента. Каталоги `tickets/`, `runs/` и `tmp/` не должны попадать в коммиты code plane.
 
 Как интерпретировать поля:
 

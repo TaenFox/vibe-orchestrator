@@ -41,6 +41,7 @@ def test_generated_vibe_readme_is_localized(tmp_path: Path):
     assert "`runs/` содержит локальные артефакты запусков" in readme
     assert "`run.json`, `events.jsonl`, `result.json`" in readme
     assert "tmp/" in gitignore
+    assert "tickets/" in gitignore
 
 
 def test_ui_board_uses_russian_labels(tmp_path: Path):
