@@ -3,12 +3,18 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - supported deployment targets are POSIX
+    fcntl = None  # type: ignore[assignment]
 
 from .tickets import TicketStore
 
@@ -64,6 +70,7 @@ class SessionStore:
         self.project = project.resolve()
         self.root = self.project / ".vibe"
         self.sessions_root = self.root / "sessions"
+        self.lock_path = self.root / "sessions.lock"
         self.ticket_store = ticket_store or TicketStore(self.project)
 
     def init(self) -> None:
@@ -101,24 +108,24 @@ class SessionStore:
 
     def save(self, session: DeliverySession) -> None:
         path = self.session_path(session)
-        if path.exists():
-            persisted = self.load_path(path)
-            if persisted.status != "draft" and persisted.ticket_ids != session.ticket_ids:
-                raise ValueError("Session membership can only be changed in draft")
-        self._validate_session(session)
-        session.updated_at = now_iso()
-        self.sessions_root.mkdir(parents=True, exist_ok=True)
-        payload = yaml.safe_dump(session.to_dict(), sort_keys=False, allow_unicode=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_name, path)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+        with self._save_lock():
+            persisted = self.load_path(path) if path.exists() else None
+            if persisted is not None:
+                self._validate_transition(persisted, session)
+            self._validate_session(session)
+            session.updated_at = now_iso()
+            self.sessions_root.mkdir(parents=True, exist_ok=True)
+            payload = yaml.safe_dump(session.to_dict(), sort_keys=False, allow_unicode=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_name, path)
+            finally:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
 
     def add_ticket(self, session: DeliverySession, ticket_id: str) -> None:
         self._require_draft(session)
@@ -167,6 +174,7 @@ class SessionStore:
         if session.status not in SESSION_STATUSES:
             raise ValueError(f"Invalid session status: {session.status!r}")
         self._validate_membership(session, session.ticket_ids)
+        self._validate_lifecycle(session)
         if session.status in OPEN_STATUSES:
             for other in self.list():
                 if other.id == session.id or other.status not in OPEN_STATUSES:
@@ -174,6 +182,106 @@ class SessionStore:
                 overlap = set(session.ticket_ids) & set(other.ticket_ids)
                 if overlap:
                     raise ValueError(f"Ticket already belongs to an open session: {sorted(overlap)[0]}")
+
+    def _validate_lifecycle(self, session: DeliverySession) -> None:
+        if session.status == "active" and not session.ticket_ids:
+            raise ValueError("Active sessions cannot be empty")
+        if session.status == "draft":
+            expected = (None, None, None)
+        elif session.status == "active":
+            expected = (session.started_at, None, None)
+        elif session.status == "completed":
+            expected = (session.started_at, session.completed_at, None)
+        else:
+            expected = (session.started_at, None, session.cancelled_at)
+
+        if session.status == "active" and not expected[0]:
+            raise ValueError("Active sessions require started_at")
+        if session.status == "completed" and not expected[0]:
+            raise ValueError("Completed sessions require started_at")
+        if session.status == "completed" and not expected[1]:
+            raise ValueError("Completed sessions require completed_at")
+        if session.status == "cancelled" and not expected[2]:
+            raise ValueError("Cancelled sessions require cancelled_at")
+        if session.status == "completed" and session.cancelled_at:
+            raise ValueError("Completed sessions cannot have cancelled_at")
+        if session.status == "cancelled" and session.completed_at:
+            raise ValueError("Cancelled sessions cannot have completed_at")
+        if session.status in {"draft", "active"} and (session.completed_at or session.cancelled_at):
+            raise ValueError("Open sessions cannot have terminal timestamps")
+        if session.status == "draft" and session.started_at:
+            raise ValueError("Draft sessions cannot have started_at")
+
+        timestamps = {
+            "created_at": session.created_at,
+            "started_at": session.started_at,
+            "completed_at": session.completed_at,
+            "cancelled_at": session.cancelled_at,
+        }
+        parsed_timestamps = {}
+        for name, value in timestamps.items():
+            if value is not None:
+                try:
+                    parsed_timestamps[name] = datetime.fromisoformat(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Session timestamps must be ISO-8601") from exc
+        try:
+            if parsed_timestamps.get("started_at") and parsed_timestamps.get("completed_at") is not None and parsed_timestamps["completed_at"] < parsed_timestamps["started_at"]:
+                raise ValueError("completed_at cannot precede started_at")
+            if parsed_timestamps.get("started_at") and parsed_timestamps.get("cancelled_at") is not None and parsed_timestamps["cancelled_at"] < parsed_timestamps["started_at"]:
+                raise ValueError("cancelled_at cannot precede started_at")
+        except TypeError as exc:
+            raise ValueError("Session timestamps must use compatible ISO-8601 offsets") from exc
+
+    def _validate_transition(self, persisted: DeliverySession, session: DeliverySession) -> None:
+        if persisted.id != session.id:
+            raise ValueError("Session ID cannot be changed")
+        if persisted.schema_version != session.schema_version:
+            raise ValueError("Session schema version cannot be changed")
+        if persisted.created_at != session.created_at:
+            raise ValueError("Session creation time cannot be changed")
+
+        allowed = {
+            "draft": {"draft", "active", "cancelled"},
+            "active": {"active", "completed", "cancelled"},
+            "completed": {"completed"},
+            "cancelled": {"cancelled"},
+        }
+        if session.status not in allowed.get(persisted.status, set()):
+            raise ValueError(f"Invalid session status transition: {persisted.status!r} -> {session.status!r}")
+        if persisted.status != "draft" and persisted.ticket_ids != session.ticket_ids:
+            raise ValueError("Session membership can only be changed in draft")
+        if persisted.status == "active" and session.started_at != persisted.started_at:
+            raise ValueError("Session start time cannot be changed")
+        if persisted.status in {"completed", "cancelled"}:
+            for field_name in ("started_at", "completed_at", "cancelled_at"):
+                if getattr(session, field_name) != getattr(persisted, field_name):
+                    raise ValueError("Terminal session timestamps cannot be changed")
+        if persisted.status == "draft" and session.status == "draft":
+            if any(getattr(session, field_name) for field_name in ("started_at", "completed_at", "cancelled_at")):
+                raise ValueError("Draft sessions cannot have lifecycle timestamps")
+
+        if session.status == "cancelled" and persisted.status == "draft":
+            if session.started_at is not None or session.completed_at is not None:
+                raise ValueError("Cancelled draft sessions cannot have started_at or completed_at")
+        if session.status == "cancelled" and persisted.status == "active" and session.completed_at is not None:
+            raise ValueError("Cancelled active sessions cannot have completed_at")
+
+        if session.status == "cancelled" and persisted.status == "active" and not session.started_at:
+            raise ValueError("Cancelled active sessions require started_at")
+
+    @contextmanager
+    def _save_lock(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        handle = self.lock_path.open("a+", encoding="utf-8")
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
 
     def _validate_membership(self, session: DeliverySession, ticket_ids: list[str]) -> None:
         if not isinstance(ticket_ids, list):
