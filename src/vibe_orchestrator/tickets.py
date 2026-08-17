@@ -87,7 +87,7 @@ class TicketStore:
             )
         gitignore = self.root / ".gitignore"
         if not gitignore.exists():
-            gitignore.write_text("runs/\n", encoding="utf-8")
+            gitignore.write_text("runs/\ntmp/\n", encoding="utf-8")
 
     def ticket_path(self, ticket: Ticket) -> Path:
         return self.tickets_root / ticket.process / f"{ticket.id}.yaml"

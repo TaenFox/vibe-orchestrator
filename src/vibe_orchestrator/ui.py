@@ -8,27 +8,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .config import load_all_workflows
+from .control import WorkerControl
 from .tickets import TicketStore, automatic_retry_available, next_status_for_ticket, reset_failed_retry, retry_exhausted
 
-CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}body{margin:0}header{display:flex;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}a{color:#58a6ff;text-decoration:none}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap}.details-row .meta{display:block;margin-bottom:2px}"""
+CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}body{margin:0}header{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center}header button{margin-top:0}input[type=number]{width:52px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:5px}a{color:#58a6ff;text-decoration:none}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap}.details-row .meta{display:block;margin-bottom:2px}"""
 AUTO_REFRESH_SECONDS = 5
 AUTO_REFRESH_SCRIPT = f"""<script>
 setInterval(() => {{
   if (document.hidden) return;
   if (document.querySelector('details[open]')) return;
+  if (document.activeElement && document.activeElement.matches('input, select, textarea')) return;
   window.location.reload();
 }}, {AUTO_REFRESH_SECONDS * 1000});
 </script>"""
 
 
 def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows()
+    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/":
                 query = urllib.parse.parse_qs(parsed.query); process = query.get("process", ["discovery"])[0]
-                return self._html(render_board(store, workflows, process))
+                return self._html(render_board(store, workflows, process, worker_control))
             if parsed.path == "/api/tickets": return self._json([ticket.to_dict() for ticket in store.list()])
             self.send_error(404)
         def do_POST(self):
@@ -41,6 +43,14 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
                 ticket = store.get(data["id"][0])
                 if not reset_failed_retry(ticket): return self.send_error(400, "Повтор недоступен")
                 store.save(ticket); return self._redirect(f"/?process={ticket.process}")
+            if self.path == "/workers":
+                try:
+                    limit = int(data["count"][0])
+                    worker_control.set_limit(limit)
+                except (KeyError, ValueError):
+                    return self.send_error(400, "Некорректное количество воркеров")
+                process = data.get("process", ["discovery"])[0]
+                return self._redirect(f"/?process={urllib.parse.quote(process)}")
             self.send_error(404)
         def log_message(self, fmt, *args): return
         def _html(self, text):
@@ -54,7 +64,7 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
     except KeyboardInterrupt: pass
 
 
-def render_board(store, workflows, process: str) -> str:
+def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None) -> str:
     workflow=workflows.get(process) or workflows["discovery"]; tickets=store.list(workflow.id)
     nav=" ".join(f'<a href="/?process={p.id}">{html.escape(p.title)}</a>' for p in workflows.values()); columns=[]
     for stage in workflow.stages:
@@ -70,7 +80,11 @@ def render_board(store, workflows, process: str) -> str:
             cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{summary}{details}{action}</div>')
         wip=f" · WIP {stage.wip}" if stage.wip is not None else ""; columns.append(f'<section class="column"><h3>{html.escape(stage.title)}{wip}</h3>{"".join(cards)}</section>')
     refresh_hint = f"автообновление {AUTO_REFRESH_SECONDS}с, пауза при открытых деталях"
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header><main class="board">{"".join(columns)}</main></body></html>'
+    worker_control = worker_control or WorkerControl(store.project)
+    worker_limit = worker_control.get_limit()
+    active_workers = sum(1 for ticket in store.list() if ticket.active_run)
+    worker_form = f'<form method="post" action="/workers"><input type="hidden" name="process" value="{html.escape(workflow.id)}"><label class="meta">воркеры <input type="number" name="count" min="0" value="{worker_limit}"></label><button>Применить</button><span class="meta">активно {active_workers}</span></form>'
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header><main class="board">{"".join(columns)}</main></body></html>'
 
 
 def _ticket_details_html(ticket) -> str:

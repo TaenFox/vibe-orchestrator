@@ -2,6 +2,7 @@ from pathlib import Path
 
 from vibe_orchestrator.cli import build_parser
 from vibe_orchestrator.config import load_all_workflows
+from vibe_orchestrator.control import WorkerControl
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.ui import render_board
 
@@ -11,6 +12,15 @@ def test_cli_help_is_localized():
     assert "Pull-оркестратор тикетов Codex" in help_text
     assert "Создать тикет" in help_text
     assert "Запустить оркестратор" in help_text
+    assert "изменить лимит воркеров" in help_text
+
+
+def test_cli_accepts_zero_worker_limit(tmp_path: Path):
+    run_args = build_parser().parse_args(["run", str(tmp_path), "--max-agents", "0"])
+    workers_args = build_parser().parse_args(["workers", str(tmp_path), "0"])
+
+    assert run_args.max_agents == 0
+    assert workers_args.count == 0
 
 
 def test_workflow_titles_are_localized():
@@ -26,9 +36,11 @@ def test_generated_vibe_readme_is_localized(tmp_path: Path):
     store.init()
 
     readme = (tmp_path / ".vibe" / "README.md").read_text(encoding="utf-8")
+    gitignore = (tmp_path / ".vibe" / ".gitignore").read_text(encoding="utf-8")
     assert "Состояние тикетов для vibe-orchestrator" in readme
     assert "`runs/` содержит локальные артефакты запусков" in readme
     assert "`run.json`, `events.jsonl`, `result.json`" in readme
+    assert "tmp/" in gitignore
 
 
 def test_ui_board_uses_russian_labels(tmp_path: Path):
@@ -51,6 +63,7 @@ def test_ui_board_uses_russian_labels(tmp_path: Path):
     assert "приоритет 100" in html
     assert "setInterval(() => {" in html
     assert "document.querySelector('details[open]')" in html
+    assert "document.activeElement.matches('input, select, textarea')" in html
     assert "автообновление 5с, пауза при открытых деталях" in html
     assert "Подробнее" in html
     assert "Показать детали тикета" in html
@@ -106,3 +119,19 @@ def test_ui_shows_retry_state_and_manual_retry_action(tmp_path: Path):
     assert "2026-01-01T00:00:05+00:00" in html
     assert '<form method="post" action="/retry">' in html
     assert "Повторить" in html
+
+
+def test_ui_controls_worker_limit_including_zero(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Running", status="review")
+    ticket.active_run = "run-1"
+    store.save(ticket)
+    control = WorkerControl(tmp_path)
+    control.set_limit(0)
+
+    html = render_board(store, load_all_workflows(), "delivery", control)
+
+    assert '<form method="post" action="/workers">' in html
+    assert 'name="count" min="0" value="0"' in html
+    assert "активно 1" in html

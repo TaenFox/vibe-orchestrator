@@ -11,6 +11,7 @@ import yaml
 
 from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
 from .config import Stage, Workflow, load_all_workflows
+from .control import WorkerControl
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 
@@ -18,13 +19,17 @@ log = logging.getLogger("vibe")
 
 
 class Orchestrator:
-    def __init__(self, project: Path, poll_interval: float = 2.0, max_agents: int = 8):
+    def __init__(self, project: Path, poll_interval: float = 2.0, max_agents: int | None = None):
         self.store = TicketStore(project)
         self.store.init()
         self.workflows = load_all_workflows()
         self.runner = CodexRunner(self.store)
         self.poll_interval = poll_interval
-        self.max_agents = max_agents
+        self.worker_control = WorkerControl(project)
+        initial_worker_limit = self.worker_control.get_limit() if max_agents is None else max_agents
+        self.worker_control.set_limit(initial_worker_limit)
+        self.max_agents = initial_worker_limit
+        self._last_worker_limit = initial_worker_limit
         self.running: dict[str, asyncio.Task[None]] = {}
 
     async def run_forever(self) -> None:
@@ -38,7 +43,8 @@ class Orchestrator:
             await asyncio.sleep(self.poll_interval)
 
     async def _schedule_once(self) -> None:
-        slots = self.max_agents - len(self.running)
+        worker_limit = self._read_worker_limit()
+        slots = worker_limit - len(self.running)
         if slots <= 0:
             return
         global_candidates = []
@@ -48,6 +54,8 @@ class Orchestrator:
             global_candidates.extend((workflow, c) for c in select_candidates(workflow, tickets, running_ids))
         global_candidates.sort(key=lambda item: (0 if item[1].ticket.wip_exempt else 1, item[1].ticket.priority, item[1].ticket.created_at))
         for workflow, candidate in global_candidates[:slots]:
+            if len(self.running) >= self._read_worker_limit():
+                break
             ticket = self.store.get(candidate.ticket.id)
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
@@ -96,6 +104,13 @@ class Orchestrator:
             task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract), name=ticket.id)
             self.running[ticket.id] = task
             log.info("запущено %s -> %s", ticket.id, candidate.target_status)
+
+    def _read_worker_limit(self) -> int:
+        worker_limit = self.worker_control.get_limit(self._last_worker_limit)
+        if worker_limit != self._last_worker_limit:
+            log.info("лимит воркеров изменен: %s -> %s", self._last_worker_limit, worker_limit)
+            self._last_worker_limit = worker_limit
+        return worker_limit
 
     async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str, contract: ExecutionContract | str) -> None:
         ticket = self.store.get(ticket_id)
