@@ -48,3 +48,27 @@ def test_failed_agent_stops_after_retry_budget_is_exhausted():
     failed.consecutive_failures = 3
 
     assert select_candidates(workflow, [failed], set()) == []
+
+
+def test_active_delivery_session_allows_only_participants_into_system_analysis():
+    workflow = load_workflow("delivery")
+    participant = ticket("PARTICIPANT", "selected_for_session")
+    outside = ticket("OUTSIDE", "selected_for_session")
+
+    candidates = select_candidates(workflow, [participant, outside], set(), session_participants={"PARTICIPANT"})
+
+    assert [candidate.ticket.id for candidate in candidates] == ["PARTICIPANT"]
+
+
+def test_no_active_session_keeps_legacy_selected_tickets_schedulable():
+    workflow = load_workflow("delivery")
+    legacy = ticket("LEGACY", "selected_for_session")
+
+    assert select_candidates(workflow, [legacy], set())[0].ticket.id == "LEGACY"
+
+
+def test_active_session_keeps_rework_wip_exemption_behavior():
+    workflow = load_workflow("delivery")
+    rework = ticket("REWORK", "selected_for_session", wip_exempt=True)
+
+    assert select_candidates(workflow, [rework], set(), session_participants=set())[0].ticket.id == "REWORK"
