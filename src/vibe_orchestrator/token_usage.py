@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -18,10 +17,10 @@ def unknown_token_usage() -> dict[str, Any]:
     }
 
 
-def _captured_at(value: Any, fallback: str | None) -> str:
+def _captured_at(value: Any, fallback: str | None) -> str | None:
     if isinstance(value, str) and value.strip():
         return value
-    return fallback or datetime.now(timezone.utc).isoformat()
+    return fallback
 
 
 def _non_negative_int(value: Any) -> bool:
@@ -70,4 +69,3 @@ def is_confirmed_token_usage(usage: Any) -> bool:
         and _non_negative_int(usage.get("total_tokens"))
         and isinstance(usage.get("captured_at"), str)
     )
-

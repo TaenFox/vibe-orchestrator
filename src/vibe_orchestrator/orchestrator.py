@@ -215,6 +215,7 @@ class Orchestrator:
                     outcome="needs_correction",
                     summary="Технический анализ вернул некорректный план реализации",
                     details=str(exc),
+                    token_usage=result.token_usage,
                 )
         ticket = self.store.get(ticket_id)
         active_run = contract.run_id if contract else run_id or ticket.active_run
