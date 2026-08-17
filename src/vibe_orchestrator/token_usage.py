@@ -36,6 +36,10 @@ def parse_codex_usage(events: str | bytes, *, captured_at: str | None = None) ->
     """
     if isinstance(events, bytes):
         events = events.decode("utf-8", errors="replace")
+    input_tokens_total = 0
+    output_tokens_total = 0
+    latest_captured_at = None
+    found_supported_event = False
     for line in events.splitlines():
         try:
             event = json.loads(line)
@@ -50,12 +54,19 @@ def parse_codex_usage(events: str | bytes, *, captured_at: str | None = None) ->
         output_tokens = usage.get("output_tokens")
         if not (_non_negative_int(input_tokens) and _non_negative_int(output_tokens)):
             continue
+        found_supported_event = True
+        input_tokens_total += input_tokens
+        output_tokens_total += output_tokens
+        event_captured_at = _captured_at(event.get("timestamp"), None)
+        if event_captured_at is not None:
+            latest_captured_at = event_captured_at
+    if found_supported_event:
         return {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
+            "input_tokens": input_tokens_total,
+            "output_tokens": output_tokens_total,
+            "total_tokens": input_tokens_total + output_tokens_total,
             "source": TOKEN_USAGE_SOURCE,
-            "captured_at": _captured_at(event.get("timestamp"), captured_at),
+            "captured_at": latest_captured_at or captured_at,
         }
     return unknown_token_usage()
 
