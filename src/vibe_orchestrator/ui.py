@@ -14,7 +14,7 @@ from .git_trees import GitTreeManager
 from .tickets import TicketStore, automatic_retry_available, next_status_for_ticket, reset_failed_retry, retry_exhausted
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 
-CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}header button{margin-top:0}input,select,textarea{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px;max-width:100%;font:inherit}input[type=number]{width:52px}.create-form{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:12px 14px;border-bottom:1px solid #30363d}.create-form input[name=title],.create-form textarea[name=description]{min-width:220px}.create-form textarea{min-height:34px;resize:vertical}a{color:#58a6ff;text-decoration:none}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #f0c674;outline-offset:2px}.board-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid #30363d}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 120px)}.compact-group{display:flex;flex-direction:column;gap:8px;width:260px;min-width:260px}.compact-group>.column{width:100%;min-width:0}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0;overflow-wrap:anywhere}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap;overflow-wrap:anywhere}.details-row .meta{display:block;margin-bottom:2px}.flat-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-items:start;overflow-x:hidden}.flat-list .column{width:auto;min-width:0}.board-empty{padding:24px;color:#8b949e}@media (max-width:700px){header{gap:10px;padding:10px}header form,.create-form,.board-toolbar{width:100%}.create-form input,.create-form select,.create-form textarea{flex:1 1 100%;min-width:0}.board{padding:10px;gap:8px}.compact-group{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}.column{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}}"""
+CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}body.drawer-open{overflow:hidden}header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}header button{margin-top:0}input,select,textarea{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px;max-width:100%;font:inherit}input[type=number]{width:52px}.create-form{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:12px 14px;border-bottom:1px solid #30363d}.create-form input[name=title],.create-form textarea[name=description]{min-width:220px}.create-form textarea{min-height:34px;resize:vertical}a{color:#58a6ff;text-decoration:none}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #f0c674;outline-offset:2px}.board-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid #30363d}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 120px)}.compact-group{display:flex;flex-direction:column;gap:8px;width:260px;min-width:260px}.compact-group>.column{width:100%;min-width:0}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0;overflow-wrap:anywhere}.card.active-run{border-color:#f0c674;box-shadow:0 0 0 1px #f0c67444}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}.active-badge{color:#f0c674;border-color:#f0c674}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap;overflow-wrap:anywhere}.details-row .meta{display:block;margin-bottom:2px}.flat-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-items:start;overflow-x:hidden}.flat-list .column{width:auto;min-width:0}.board-empty{padding:24px;color:#8b949e}.drawer-backdrop{position:fixed;inset:0;background:#0008;z-index:10}.ticket-drawer{position:fixed;top:0;right:0;width:min(560px,100vw);height:100vh;overflow-y:auto;background:#161b22;border-left:1px solid #30363d;padding:20px;z-index:11;box-shadow:-12px 0 30px #0008}.drawer-header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.drawer-header h2{margin:0;overflow-wrap:anywhere}.drawer-close{background:#30363d;margin:0}.drawer-section{border-top:1px solid #30363d;margin-top:16px;padding-top:12px}.drawer-section h3{font-size:12px;text-transform:uppercase;color:#8b949e;margin:0 0 8px}.drawer-description{white-space:pre-wrap;overflow-wrap:anywhere}.drawer-actions{display:flex;flex-wrap:wrap;gap:7px}.drawer-actions form{display:inline}.drawer-actions button{margin:0}.run-history{display:grid;gap:8px}.run-entry{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px}.run-entry.active-run{border-color:#f0c674}.run-entry a{display:inline-block;margin-top:4px}@media (max-width:700px){header{gap:10px;padding:10px}header form,.create-form,.board-toolbar{width:100%}.create-form input,.create-form select,.create-form textarea{flex:1 1 100%;min-width:0}.board{padding:10px;gap:8px}.compact-group{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}.column{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}}"""
 AUTO_REFRESH_SECONDS = 5
 AUTO_REFRESH_SCRIPT = f"""<script>
 (() => {{
@@ -42,7 +42,7 @@ AUTO_REFRESH_SCRIPT = f"""<script>
   const refresh = async (force = false) => {{
     if (document.hidden || document.querySelector('details[open]') || (!force && document.activeElement?.matches('input, select, textarea'))) return;
     remember(); const current = state();
-    const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || ''}});
+    const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || '', active: current.active ? '1' : ''}});
     try {{ const response = await fetch('/fragment?' + params); if (!response.ok) return; const fragment = await response.text();
       const board = document.querySelector('.board'); if (!board) return; board.outerHTML = fragment;
       const restored = state(); restore();
@@ -51,10 +51,13 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     }} catch (_) {{ /* transient server/network failure: keep the current board */ }}
   }};
   document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) remember(); }});
-  document.addEventListener('change', event => {{ if (event.target.matches('[data-board-mode], [data-board-search], [data-board-status]')) {{ const value = event.target.value; save(event.target.matches('[data-board-mode]') ? {{mode:value}} : event.target.matches('[data-board-search]') ? {{search:value}} : {{status:value}}); refresh(true); }} }});
+  document.addEventListener('change', event => {{ if (event.target.matches('[data-board-mode], [data-board-search], [data-board-status], [data-board-active]')) {{ const value = event.target.value; save(event.target.matches('[data-board-mode]') ? {{mode:value}} : event.target.matches('[data-board-search]') ? {{search:value}} : event.target.matches('[data-board-status]') ? {{status:value}} : {{active:value === '1'}}); refresh(true); }} }});
   document.addEventListener('toggle', event => {{ if (event.target.matches('details[data-ticket-details]')) remember(); }}, true);
-  document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }} const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
-  const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; restore(); if (current.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
+  const closeDrawer = () => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (!drawer) return; drawer.hidden = true; if (backdrop) backdrop.hidden = true; drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.hidden = true); drawer.setAttribute('aria-hidden', 'true'); document.body.classList.remove('drawer-open'); if (drawer.dataset.previousFocus) document.getElementById(drawer.dataset.previousFocus)?.focus(); }};
+  const openDrawer = (ticketId, trigger) => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`); if (!drawer || !panel) return; drawer.querySelectorAll('[data-drawer-ticket]').forEach(item => item.hidden = item !== panel); panel.hidden = false; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.dataset.previousFocus = trigger?.id || ''; document.body.classList.add('drawer-open'); panel.focus(); save({{ticket: ticketId}}); }};
+  document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }} const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); openDrawer(open.dataset.openTicket, open); return; }} if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) closeDrawer(); const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
+  document.addEventListener('keydown', event => {{ if (event.key === 'Escape') closeDrawer(); }});
+  const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); const activeControl = document.querySelector('[data-board-active]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; if (activeControl && current.active) activeControl.value = '1'; restore(); if (current.ticket) {{ document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); openDrawer(current.ticket); }} const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
 }})();
 </script>"""
 
@@ -66,11 +69,22 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/":
                 query = urllib.parse.parse_qs(parsed.query); process = query.get("process", ["discovery"])[0]
-                mode = query.get("mode", ["compact"])[0]; search = query.get("search", [""])[0]; status = query.get("status", [""])[0]
-                return self._html(render_board(store, workflows, process, worker_control, tree_manager, session_store, mode=mode, search=search, status=status))
+                mode = query.get("mode", ["compact"])[0]; search = query.get("search", [""])[0]; status = query.get("status", [""])[0]; active = query.get("active", [""])[0]
+                return self._html(render_board(store, workflows, process, worker_control, tree_manager, session_store, mode=mode, search=search, status=status, active=active))
             if parsed.path == "/fragment":
                 query = urllib.parse.parse_qs(parsed.query)
-                return self._html(render_board_fragment(store, workflows, query.get("process", ["discovery"])[0], worker_control, tree_manager, session_store, mode=query.get("mode", ["compact"])[0], search=query.get("search", [""])[0], status=query.get("status", [""])[0]))
+                return self._html(render_board_fragment(store, workflows, query.get("process", ["discovery"])[0], worker_control, tree_manager, session_store, mode=query.get("mode", ["compact"])[0], search=query.get("search", [""])[0], status=query.get("status", [""])[0], active=query.get("active", [""])[0]))
+            if parsed.path.startswith("/artifacts/"):
+                relative = urllib.parse.unquote(parsed.path.removeprefix("/artifacts/")).strip("/")
+                candidate = (store.runs_root / relative).resolve()
+                if store.runs_root.resolve() not in candidate.parents and candidate != store.runs_root.resolve():
+                    return self.send_error(404)
+                if candidate.is_dir():
+                    files = [path.name for path in sorted(candidate.iterdir()) if path.is_file()]
+                    return self._json({"run_id": candidate.name, "artifacts": [f"/artifacts/{urllib.parse.quote(relative + '/' + name)}" for name in files]})
+                if candidate.is_file():
+                    payload = candidate.read_bytes(); self.send_response(200); self.send_header("Content-Type", "application/octet-stream"); self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload); return
+                return self.send_error(404)
             if parsed.path == "/api/tickets": return self._json([_ticket_payload(ticket) for ticket in store.list()])
             if parsed.path == "/api/sessions": return self._json([_session_payload(item, store) for item in session_store.list()])
             if parsed.path.startswith("/api/sessions/"):
@@ -165,7 +179,7 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
     finally: server.server_close()
 
 
-def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None, session_store: DeliverySessionStore | None = None, *, mode: str = "compact", search: str = "", status: str = "") -> str:
+def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None, session_store: DeliverySessionStore | None = None, *, mode: str = "compact", search: str = "", status: str = "", active: str | bool = "") -> str:
     workflow=workflows.get(process) or workflows["discovery"]; tickets=store.list(workflow.id)
     mode = mode if mode in {"compact", "flat"} else "compact"
     search = search.strip()
@@ -173,6 +187,9 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
         needle = search.casefold(); tickets = [t for t in tickets if needle in f"{t.id} {t.title} {t.description}".casefold()]
     if status and status in workflow.by_id:
         tickets = [t for t in tickets if t.status == status]
+    active = active in {True, "1", "true", "yes", "on"}
+    if active:
+        tickets = [t for t in tickets if t.active_run]
     nav=" ".join(f'<a href="/?process={p.id}">{html.escape(p.title)}</a>' for p in workflows.values())
     columns=[]
     rendered = set()
@@ -190,7 +207,7 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
     if mode == "flat":
         columns = [_stage_column(store, workflow, stage, tickets, tree_manager, session_store) for stage in workflow.stages]
     board_class = "board flat-list" if mode == "flat" else "board"
-    toolbar = _board_toolbar(workflow, mode, search, status)
+    toolbar = _board_toolbar(workflow, mode, search, status, active)
     board = f'<main class="{board_class}">{"".join(columns) or "<div class=board-empty>Нет тикетов по текущему фильтру</div>"}</main>'
     refresh_hint = f"частичное автообновление {AUTO_REFRESH_SECONDS}с"
     worker_control = worker_control or WorkerControl(store.project)
@@ -210,10 +227,11 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
         '<button>Создать</button></form>'
     )
     sessions_html = _sessions_html(store, session_store) if process == "delivery" else ""
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}{toolbar}{board}</body></html>'
+    drawer = _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store)
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}{toolbar}{board}{drawer}</body></html>'
 
 
-def render_board_fragment(store, workflows, process: str, worker_control=None, tree_manager=None, session_store=None, *, mode="compact", search="", status="") -> str:
+def render_board_fragment(store, workflows, process: str, worker_control=None, tree_manager=None, session_store=None, *, mode="compact", search="", status="", active="") -> str:
     workflow = workflows.get(process) or workflows["discovery"]
     tickets = store.list(workflow.id)
     mode = mode if mode in {"compact", "flat"} else "compact"
@@ -222,6 +240,8 @@ def render_board_fragment(store, workflows, process: str, worker_control=None, t
         tickets = [t for t in tickets if needle in f"{t.id} {t.title} {t.description}".casefold()]
     if status and status in workflow.by_id:
         tickets = [t for t in tickets if t.status == status]
+    if active in {True, "1", "true", "yes", "on"}:
+        tickets = [t for t in tickets if t.active_run]
     stages = workflow.stages
     if mode == "compact":
         columns=[]; rendered=set()
@@ -236,9 +256,10 @@ def render_board_fragment(store, workflows, process: str, worker_control=None, t
     return f'<main class="{"board flat-list" if mode == "flat" else "board"}">{"".join(columns) or "<div class=board-empty>Нет тикетов по текущему фильтру</div>"}</main>'
 
 
-def _board_toolbar(workflow, mode, search, status):
+def _board_toolbar(workflow, mode, search, status, active=False):
     options = '<option value="">Все стадии</option>' + ''.join(f'<option value="{html.escape(stage.id)}"{(" selected" if stage.id == status else "")}>{html.escape(stage.title)}</option>' for stage in workflow.stages)
-    return f'<section class="board-toolbar"><label>Режим <select data-board-mode><option value="compact"{(" selected" if mode == "compact" else "")}>Компактный</option><option value="flat"{(" selected" if mode == "flat" else "")}>Плоский список</option></select></label><label>Поиск <input data-board-search type="search" value="{html.escape(search)}" placeholder="ID, заголовок или описание"></label><label>Фильтр <select data-board-status>{options}</select></label></section>'
+    active_options = '<option value="">Все тикеты</option><option value="1" selected>В работе</option>' if active else '<option value="">Все тикеты</option><option value="1">В работе</option>'
+    return f'<section class="board-toolbar"><label>Режим <select data-board-mode><option value="compact"{(" selected" if mode == "compact" else "")}>Компактный</option><option value="flat"{(" selected" if mode == "flat" else "")}>Плоский список</option></select></label><label>Поиск <input data-board-search type="search" value="{html.escape(search)}" placeholder="ID, заголовок или описание"></label><label>Фильтр <select data-board-status>{options}</select></label><label>Активность <select data-board-active>{active_options}</select></label></section>'
 
 
 def _stage_column(store, workflow, stage, tickets, tree_manager, session_store):
@@ -252,8 +273,9 @@ def _stage_column(store, workflow, stage, tickets, tree_manager, session_store):
                 action=f'<form method="post" action="/retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить</button></form>'
             if ticket.status == "ready_for_release" and ticket.last_outcome == "integration_conflict":
                 action=f'<form method="post" action="/release-retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить интеграцию</button></form>'
-            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree)
-            cards.append(f'<div class="card" data-ticket="{html.escape(ticket.id)}"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{session_badge}{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{summary}{details}{action}</div>')
+            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge active-badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree); drawer_button=f'<button type="button" id="open-ticket-{html.escape(ticket.id)}" class="drawer-trigger" data-open-ticket="{html.escape(ticket.id)}" aria-label="Открыть тикет {html.escape(ticket.id)}">Открыть</button>'
+            card_class = "card active-run" if ticket.active_run else "card"
+            cards.append(f'<div class="{card_class}" data-ticket="{html.escape(ticket.id)}"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{session_badge}{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{summary}{drawer_button}{details}{action}</div>')
         wip=f" · WIP {stage.wip}" if stage.wip is not None else ""; return f'<section class="column" data-stage="{html.escape(stage.id)}"><h3>{html.escape(stage.title)}{wip}</h3>{"".join(cards)}</section>'
 
 
@@ -372,3 +394,54 @@ def _ticket_details_html(ticket, tree=None) -> str:
         f'<div class="details-row"><span class="meta">Обновлен</span>{html.escape(ticket.updated_at)}</div>'
         "</div></details>"
     )
+
+
+def _ticket_action_html(store, workflow, ticket) -> str:
+    target = next_status_for_ticket(store, ticket)
+    if target:
+        return f'<form method="post" action="/move"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><input type="hidden" name="target" value="{html.escape(target)}"><button>Переместить → {html.escape(workflow.by_id[target].title)}</button></form>'
+    if workflow.by_id.get(ticket.status) and workflow.by_id[ticket.status].kind == "agent" and retry_exhausted(ticket) and not ticket.blocked_by:
+        return f'<form method="post" action="/retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить</button></form>'
+    if ticket.status == "ready_for_release" and ticket.last_outcome == "integration_conflict":
+        return f'<form method="post" action="/release-retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить интеграцию</button></form>'
+    return ""
+
+
+def _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store) -> str:
+    panels = []
+    for ticket in tickets:
+        workflow = workflows.get(ticket.process) or workflows[process]
+        tree = tree_manager.trees.get(ticket.id) if tree_manager else None
+        session = next((item for item in session_store.list() if ticket.id in item.participants), None) if session_store and ticket.process == "delivery" else None
+        parent = ticket.parent or "нет"
+        blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
+        run_links = []
+        for entry in reversed(ticket.run_history):
+            run_id = entry.get("run_id")
+            if not run_id:
+                continue
+            artifact_path = entry.get("artifacts_path") or f".vibe/runs/{run_id}"
+            run_links.append(
+                f'<div class="run-entry{" active-run" if run_id == ticket.active_run else ""}"><span class="badge">{html.escape(str(entry.get("event", "run")))}</span> '
+                f'<span class="meta">{html.escape(str(entry.get("stage", "")))} · {html.escape(str(entry.get("timestamp", "")))}</span>'
+                f'<div>{html.escape(str(entry.get("summary", "")))}</div><a href="/artifacts/{urllib.parse.quote(str(run_id), safe="")}" target="_blank" rel="noopener">Артефакты: {html.escape(str(artifact_path))}</a></div>'
+            )
+        tree_html = ""
+        if tree:
+            tree_html = f'<div class="details-row"><span class="meta">Ветка</span>{html.escape(tree.branch)}</div><div class="details-row"><span class="meta">Worktree</span>{html.escape(tree.worktree)}</div><div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
+        session_html = f'<div class="details-row"><span class="meta">Сессия</span>{html.escape(session.id)} · {html.escape(session.status)}</div>' if session else '<div class="details-row"><span class="meta">Сессия</span>нет</div>'
+        action = _ticket_action_html(store, workflow, ticket)
+        panels.append(
+            f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
+            f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
+            f'<div class="drawer-actions">{action}</div><div class="drawer-section"><h3>Контекст тикета</h3>'
+            f'<div class="details-row"><span class="meta">Тип · статус · приоритет</span>{html.escape(ticket.type)} · {html.escape(ticket.status)} · {ticket.priority}</div>'
+            f'<div class="details-row"><span class="meta">Описание</span><div class="drawer-description">{html.escape(ticket.description or "(пусто)")}</div></div>'
+            f'<div class="details-row"><span class="meta">Summary</span>{html.escape(ticket.last_summary or "нет")}</div>'
+            f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
+            f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
+            f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
+            f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
+            f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
+        )
+    return f'<div class="drawer-backdrop" data-drawer-backdrop hidden></div><aside class="ticket-drawer" data-ticket-drawer role="dialog" aria-modal="true" aria-label="Контекст тикета" aria-hidden="true" hidden>{"".join(panels)}</aside>'

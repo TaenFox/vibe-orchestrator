@@ -310,6 +310,44 @@ def test_board_compact_groups_queue_and_agent_and_flat_filters(project):
     assert queued.title not in flat and hidden.title not in flat
 
 
+def test_ticket_drawer_contains_context_history_artifacts_and_accessibility(project):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Полный контекст", description="Подробное описание", status="development", priority=7, parent="DEL-PARENT")
+    ticket.last_summary = "Итог запуска"
+    ticket.last_outcome = "completed"
+    ticket.active_run = "run-active"
+    ticket.blocked_by = ["DEL-BLOCKED"]
+    ticket.retry_after = "2026-08-17T12:00:00+00:00"
+    store.record_run_event(ticket, run_id="run-active", stage_id="development", event="started")
+    store.save(ticket)
+
+    page = render_board(store, load_all_workflows(), "delivery")
+
+    assert 'class="card active-run"' in page
+    assert 'data-open-ticket="' + ticket.id + '"' in page
+    assert 'data-ticket-drawer' in page and 'data-drawer-ticket="' + ticket.id + '"' in page
+    assert "Подробное описание" in page and "Итог запуска" in page
+    assert "DEL-PARENT" in page and "DEL-BLOCKED" in page
+    assert "/artifacts/run-active" in page
+    assert "aria-label=\"Контекст тикета\"" in page
+    assert "Escape" in page and "data-drawer-close" in page
+
+
+def test_active_ticket_filter_keeps_only_running_tickets(project):
+    store = TicketStore(project)
+    active = store.create("delivery", "task", "В работе", status="development")
+    active.active_run = "run-active"
+    store.save(active)
+    store.create("delivery", "task", "Ожидает", status="development")
+
+    page = render_board(store, load_all_workflows(), "delivery", active="1")
+
+    assert active.title in page
+    assert "Ожидает" not in page
+    assert 'data-board-active' in page
+    assert 'value="1" selected>В работе' in page
+
+
 def test_ui_fragment_endpoint_returns_only_board(http_server, project):
     store = TicketStore(project)
     ticket = store.create("discovery", "idea", "Найти меня", status="ready")
