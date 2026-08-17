@@ -53,6 +53,23 @@ def test_session_rejects_invalid_membership_and_lifecycle(tmp_path: Path):
         sessions.cancel(session.id, tickets)
 
 
+def test_session_activation_does_not_partially_select_tickets_on_invalid_membership(tmp_path: Path):
+    tickets = TicketStore(tmp_path)
+    tickets.init()
+    first = tickets.create("delivery", "task", "First")
+    sessions = DeliverySessionStore(tmp_path)
+    session = sessions.create("Release")
+    session.participants = [first.id, "DEL-MISSING"]
+    sessions._replace(session)
+
+    with pytest.raises(SessionError, match="Участник не найден"):
+        sessions.activate(session.id, tickets)
+
+    assert tickets.get(first.id).status == "todo"
+    assert sessions.get(session.id).status == "draft"
+    assert not (tmp_path / ".vibe/tmp/delivery-session.yaml").exists()
+
+
 def test_session_parser_keeps_existing_ticket_commands_and_supports_alias():
     from vibe_orchestrator.cli import build_parser
 

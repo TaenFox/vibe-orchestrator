@@ -203,6 +203,7 @@ class DeliverySessionStore:
         active = self._active()
         if active:
             raise SessionError(f"Уже есть активная сессия: {active.id}")
+        participants = []
         for ticket_id in session.participants:
             try:
                 ticket = ticket_store.get(ticket_id)
@@ -210,6 +211,9 @@ class DeliverySessionStore:
                 raise SessionError(f"Участник не найден: {ticket_id}") from exc
             if ticket.process != "delivery" or ticket_store.is_done(ticket):
                 raise SessionError(f"Некорректный состав сессии: {ticket_id}")
+            participants.append(ticket)
+
+        for ticket in participants:
             if ticket.status == "todo":
                 ticket.status = "selected_for_session"
                 ticket_store.save(ticket)
