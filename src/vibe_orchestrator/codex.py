@@ -143,7 +143,7 @@ class CodexRunner:
         contract: ExecutionContract,
         workspace: Path | None = None,
     ) -> str:
-        return self._render_prompt(
+        prompt = self._render_prompt(
             stage=stage,
             prompt_body=contract.prompt_body,
             repository_root=str(workspace or self.store.project),
@@ -159,6 +159,23 @@ class CodexRunner:
             model=contract.model,
             reasoning_effort=contract.reasoning_effort,
             description=ticket.description or "(пусто)",
+        )
+        correction_context = self._correction_context(ticket)
+        if correction_context:
+            prompt += f"\n\n## Контекст завершённых Correction\n{correction_context}\n"
+        return prompt
+
+    def _correction_context(self, ticket: Ticket) -> str:
+        corrections = [
+            child
+            for child in self.store.children_of(ticket.id, process=ticket.process)
+            if child.type == "correction" and self.store.is_done(child)
+        ]
+        if not corrections:
+            return ""
+        return "\n\n".join(
+            f"Correction {child.id}:\nОписание: {child.description or '(пусто)'}\nИтог: {child.last_summary or '(пусто)'}"
+            for child in corrections
         )
 
     def _prompt_contract(self, stage: Stage, prompt_spec: PromptSpec, profile: dict[str, str]) -> str:

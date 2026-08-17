@@ -79,7 +79,7 @@ class Orchestrator:
             run_id = uuid.uuid4().hex
             workspace = None
             try:
-                workspace = self.tree_manager.workspace_for(ticket)
+                workspace = self.tree_manager.workspace_for(ticket, stage_id=stage.id)
                 contract = self.runner.prepare_execution_contract(stage, run_id)
             except Exception as exc:
                 try:
@@ -218,7 +218,12 @@ class Orchestrator:
         ticket.last_summary = result.summary
         ticket.consecutive_failures = 0
         ticket.retry_after = None
-        ticket.status = (stage.outcomes or {})[result.outcome]
+        target_status = (stage.outcomes or {})[result.outcome]
+        if ticket.type == "correction" and workflow.id == "discovery" and result.outcome == "completed":
+            target_status = "done"
+        if ticket.type == "rework" and workflow.id == "delivery" and stage.id == ticket.rework_stage and result.outcome == "completed":
+            target_status = "ready_for_release" if self.tree_manager.enabled() else "done"
+        ticket.status = target_status
         if active_run:
             self.store.record_run_event(
                 ticket,
@@ -238,16 +243,28 @@ class Orchestrator:
 
     def _handle_follow_up(self, ticket: Ticket, workflow: Workflow, stage: Stage, result: AgentResult) -> None:
         if workflow.id == "delivery" and result.outcome == "needs_rework":
+            if ticket.type == "rework":
+                # Rework remains on the same Delivery route instead of nesting another rework.
+                return
             child = self._create_corrective_child(ticket, child_type="rework", status="selected_for_session", stage=stage, summary=result.summary, details=result.details)
             ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
             return
         if workflow.id == "discovery" and result.outcome == "needs_correction":
+            if ticket.type == "correction":
+                # A correction retries its originating stage instead of creating a correction chain.
+                return
             if stage.id == "technical_analysis":
                 ticket.implementation_required = None
             child = self._create_corrective_child(ticket, child_type="correction", status="ready", stage=stage, summary=result.summary, details=result.details)
-            ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
+            if not self._is_resolved_blocker(child):
+                ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
             return
-        if workflow.id == "discovery" and stage.id == "technical_analysis" and result.outcome == "completed":
+        if (
+            workflow.id == "discovery"
+            and ticket.type != "correction"
+            and stage.id == "technical_analysis"
+            and result.outcome == "completed"
+        ):
             implementation_required, _ = _technical_analysis_plan(result.details)
             ticket.implementation_required = implementation_required
             self._create_delivery_children(ticket, result.details)
@@ -259,6 +276,13 @@ class Orchestrator:
             f"Summary:\n{summary or '(пусто)'}\n\n"
             f"Details:\n{details or '(пусто)'}"
         )
+        for existing in self.store.children_of(parent.id, process=parent.process):
+            if existing.type == child_type and existing.description == description:
+                return existing
+        correction_status = next(
+            (candidate.id for candidate in self.workflows[parent.process].stages if candidate.kind == "queue" and candidate.pull_to == stage.id),
+            stage.id,
+        )
         return self.store.create(
             parent.process,
             child_type,
@@ -266,8 +290,10 @@ class Orchestrator:
             description=description,
             priority=parent.priority,
             parent=parent.id,
-            status=status,
+            status=correction_status if child_type == "correction" else status,
             wip_exempt=True,
+            correction_stage=stage.id if child_type == "correction" else None,
+            rework_stage=stage.id if child_type == "rework" else None,
         )
 
     def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
@@ -309,7 +335,8 @@ class Orchestrator:
                 description=description,
                 priority=priority,
                 parent=parent.id,
-                status="selected_for_session",
+                # Новая декомпозиция ждёт явного отбора человеком в Delivery-сессию.
+                status="todo",
                 mandatory=mandatory,
             )
             existing_children[key] = child
@@ -369,6 +396,7 @@ class Orchestrator:
                 summary=ticket.last_summary,
             )
             self.store.save(ticket)
+            self._release_parent_if_resolved(ticket)
 
     def _reconcile_blockers(self) -> None:
         for ticket in self.store.list():
@@ -414,9 +442,6 @@ class Orchestrator:
                 del self.running[ticket_id]
 
     def _is_resolved_blocker(self, ticket: Ticket) -> bool:
-        if ticket.process == "delivery" and ticket.type == "rework":
-            workflow = self.workflows[ticket.process]
-            return workflow.position(ticket.status) >= workflow.position("ready_for_release")
         return self.store.is_done(ticket)
 
     def _prompt_metadata(self, stage: Stage) -> dict[str, str]:
