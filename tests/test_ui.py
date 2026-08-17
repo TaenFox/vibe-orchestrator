@@ -11,7 +11,7 @@ import pytest
 
 from vibe_orchestrator.control import DeliverySessionStore
 from vibe_orchestrator.tickets import TicketStore
-from vibe_orchestrator.ui import AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, render_board
+from vibe_orchestrator.ui import AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, render_board, render_board_fragment
 from vibe_orchestrator.config import load_all_workflows
 
 
@@ -357,9 +357,13 @@ def test_board_compact_groups_queue_and_agent_and_flat_filters(project):
 
     compact = render_board(store, load_all_workflows(), "delivery")
     assert 'data-stage-group="selected_for_session"' in compact
-    assert compact.index('data-stage="selected_for_session"') < compact.index('data-stage="system_analysis"')
-    assert compact.index('data-stage="ready_for_development"') < compact.index('data-stage="development"')
+    assert compact.index('data-stage="system_analysis"') < compact.index('data-stage="selected_for_session"')
+    assert compact.index('data-stage="development"') < compact.index('data-stage="ready_for_development"')
     assert queued.title in compact and active.title in compact
+
+    fragment = render_board_fragment(store, load_all_workflows(), "delivery")
+    assert fragment.index('data-stage="system_analysis"') < fragment.index('data-stage="selected_for_session"')
+    assert fragment.index('data-stage="development"') < fragment.index('data-stage="ready_for_development"')
 
     flat = render_board(store, load_all_workflows(), "delivery", mode="flat", search="разработке")
     assert 'class="board flat-list"' in flat
