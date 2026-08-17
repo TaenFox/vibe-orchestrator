@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Thread
 
 from .config import load_all_workflows
-from .control import WorkerControl
+from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
 from .tickets import TicketStore, automatic_retry_available, next_status_for_ticket, reset_failed_retry, retry_exhausted
 
@@ -26,17 +26,41 @@ setInterval(() => {{
 
 
 def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store)
+    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/":
                 query = urllib.parse.parse_qs(parsed.query); process = query.get("process", ["discovery"])[0]
-                return self._html(render_board(store, workflows, process, worker_control, tree_manager))
+                return self._html(render_board(store, workflows, process, worker_control, tree_manager, session_store))
             if parsed.path == "/api/tickets": return self._json([ticket.to_dict() for ticket in store.list()])
+            if parsed.path == "/api/sessions": return self._json([_session_payload(item, store) for item in session_store.list()])
+            if parsed.path.startswith("/api/sessions/"):
+                try:
+                    return self._json(_session_payload(session_store.get(parsed.path.rsplit("/", 1)[-1]), store))
+                except SessionError as exc:
+                    return self.send_error(404, str(exc))
             self.send_error(404)
         def do_POST(self):
             length = int(self.headers.get("content-length", "0")); data = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+            try:
+                if self.path == "/session/create":
+                    session_store.create(data.get("title", [""])[0]); return self._redirect("/?process=delivery")
+                if self.path == "/session/add":
+                    session_store.add(data["session"][0], data["ticket"][0], store); return self._redirect("/?process=delivery")
+                if self.path == "/session/remove":
+                    session_store.remove(data["session"][0], data["ticket"][0]); return self._redirect("/?process=delivery")
+                if self.path == "/session/activate":
+                    session_store.activate(data["session"][0], store); return self._redirect("/?process=delivery")
+                if self.path in {"/session/complete", "/session/cancel"}:
+                    session_id = data["session"][0]; reason = data.get("override", [None])[0]
+                    if self.path.endswith("complete"):
+                        session_store.complete(session_id, store, reason)
+                    else:
+                        session_store.cancel(session_id, store, reason)
+                    return self._redirect("/?process=delivery")
+            except (KeyError, SessionError):
+                return self.send_error(400, "Некорректная операция сессии")
             if self.path == "/create":
                 try:
                     process = data["process"][0]
@@ -103,7 +127,7 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
     finally: server.server_close()
 
 
-def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None) -> str:
+def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None, session_store: DeliverySessionStore | None = None) -> str:
     workflow=workflows.get(process) or workflows["discovery"]; tickets=store.list(workflow.id)
     nav=" ".join(f'<a href="/?process={p.id}">{html.escape(p.title)}</a>' for p in workflows.values()); columns=[]
     for stage in workflow.stages:
@@ -117,8 +141,8 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
                 action=f'<form method="post" action="/retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить</button></form>'
             if ticket.status == "ready_for_release" and ticket.last_outcome == "integration_conflict":
                 action=f'<form method="post" action="/release-retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить интеграцию</button></form>'
-            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree)
-            cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{summary}{details}{action}</div>')
+            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree)
+            cards.append(f'<div class="card"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{session_badge}{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{summary}{details}{action}</div>')
         wip=f" · WIP {stage.wip}" if stage.wip is not None else ""; columns.append(f'<section class="column"><h3>{html.escape(stage.title)}{wip}</h3>{"".join(cards)}</section>')
     refresh_hint = f"автообновление {AUTO_REFRESH_SECONDS}с, пауза при открытых деталях"
     worker_control = worker_control or WorkerControl(store.project)
@@ -137,7 +161,66 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
         '<input name="parent" placeholder="родительский ID, необязательно">'
         '<button>Создать</button></form>'
     )
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}<main class="board">{"".join(columns)}</main></body></html>'
+    sessions_html = _sessions_html(store, session_store) if process == "delivery" else ""
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}<main class="board">{"".join(columns)}</main></body></html>'
+
+
+def _session_payload(session, store) -> dict:
+    tickets = [store.get(ticket_id) for ticket_id in session.participants if _ticket_exists(store, ticket_id)]
+    aggregate = {
+        "mandatory": sum(ticket.mandatory for ticket in tickets),
+        "optional": sum(not ticket.mandatory for ticket in tickets),
+        "done": sum(store.is_done(ticket) for ticket in tickets),
+        "blocked": sum(bool(ticket.blocked_by) for ticket in tickets),
+        "active_run": sum(bool(ticket.active_run) for ticket in tickets),
+    }
+    return {"session": session.to_dict(), "aggregate": aggregate, "tickets": [ticket.to_dict() for ticket in tickets]}
+
+
+def _ticket_exists(store, ticket_id: str) -> bool:
+    try:
+        store.get(ticket_id)
+    except KeyError:
+        return False
+    return True
+
+
+def _ticket_session_badge(ticket, session_store) -> str:
+    if not session_store or ticket.process != "delivery":
+        return ""
+    session = next((item for item in session_store.list() if ticket.id in item.participants), None)
+    return f'<span class="badge">сессия: {html.escape(session.id)}</span>' if session else ""
+
+
+def _sessions_html(store, session_store) -> str:
+    if not session_store:
+        session_store = DeliverySessionStore(store.project)
+    sessions = session_store.list()
+    cards = []
+    for session in sessions:
+        payload = _session_payload(session, store)
+        aggregate = payload["aggregate"]
+        participants = []
+        for ticket_id in session.participants:
+            ticket = next((item for item in payload["tickets"] if item["id"] == ticket_id), None)
+            title = ticket["title"] if ticket else "тикет не найден"
+            remove = ""
+            if session.status == "draft":
+                remove = f'<form method="post" action="/session/remove"><input type="hidden" name="session" value="{html.escape(session.id)}"><input type="hidden" name="ticket" value="{html.escape(ticket_id)}"><button>Убрать</button></form>'
+            participants.append(f'<div class="details-row"><span class="meta">{html.escape(ticket_id)}</span>{html.escape(title)}{remove}</div>')
+        actions = ""
+        if session.status == "draft":
+            options = "".join(
+                f'<option value="{html.escape(ticket.id)}">{html.escape(ticket.id)} · {html.escape(ticket.title)}</option>'
+                for ticket in store.list("delivery")
+                if not store.is_done(ticket) and ticket.id not in session.participants
+            )
+            actions = f'<form method="post" action="/session/add"><input type="hidden" name="session" value="{html.escape(session.id)}"><select name="ticket">{options}</select><button>Добавить тикет</button></form><form method="post" action="/session/activate"><input type="hidden" name="session" value="{html.escape(session.id)}"><button>Активировать</button></form>'
+        elif session.status == "active":
+            actions = f'<form method="post" action="/session/complete"><input type="hidden" name="session" value="{html.escape(session.id)}"><input name="override" placeholder="Причина override, если неполна"><button>Завершить</button></form><form method="post" action="/session/cancel"><input type="hidden" name="session" value="{html.escape(session.id)}"><input name="override" placeholder="Причина override, если неполна"><button>Отменить</button></form>'
+        cards.append(f'<article class="card"><strong>{html.escape(session.title)}</strong><span class="badge">{html.escape(session.id)}</span><span class="badge">{html.escape(session.status)}</span><div class="meta">mandatory {aggregate["mandatory"]} · optional {aggregate["optional"]} · done {aggregate["done"]} · blocked {aggregate["blocked"]} · active_run {aggregate["active_run"]}</div><div class="details-body">{"".join(participants) or "<span class=meta>Состав пуст</span>"}</div>{actions}</article>')
+    create = '<form class="create-form" method="post" action="/session/create"><strong>Новая Delivery-сессия</strong><input name="title" placeholder="название сессии" required><button>Создать</button></form>'
+    return f'<section class="sessions"><h2>Delivery-сессии</h2>{create}{"".join(cards) or "<div class=meta>Сессий пока нет</div>"}</section>'
 
 
 def _ticket_details_html(ticket, tree=None) -> str:

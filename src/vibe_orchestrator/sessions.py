@@ -52,7 +52,9 @@ class DeliverySession:
         payload.setdefault("status", "draft")
         payload.setdefault("ticket_ids", [])
         payload.setdefault("created_at", now_iso())
-        payload.setdefault("updated_at", payload["created_at"])
+        # ``updated_at`` is part of the persistent contract. Keep a missing
+        # value visible so validation can reject corrupt session documents.
+        payload.setdefault("updated_at", None)
         payload.setdefault("started_at", None)
         payload.setdefault("completed_at", None)
         payload.setdefault("cancelled_at", None)
@@ -109,6 +111,7 @@ class SessionStore:
         self._validate_session_id(session.id)
         if path.stem != session.id:
             raise ValueError(f"Session ID does not match file name: {path}")
+        self._validate_lifecycle(session, check_updated_order=True)
         return session
 
     def list(self) -> list[DeliverySession]:
@@ -192,7 +195,7 @@ class SessionStore:
                 if overlap:
                     raise ValueError(f"Ticket already belongs to an open session: {sorted(overlap)[0]}")
 
-    def _validate_lifecycle(self, session: DeliverySession) -> None:
+    def _validate_lifecycle(self, session: DeliverySession, *, check_updated_order: bool = False) -> None:
         if session.status == "active" and not session.ticket_ids:
             raise ValueError("Active sessions cannot be empty")
         if session.status == "draft":
@@ -223,10 +226,13 @@ class SessionStore:
 
         timestamps = {
             "created_at": session.created_at,
+            "updated_at": session.updated_at,
             "started_at": session.started_at,
             "completed_at": session.completed_at,
             "cancelled_at": session.cancelled_at,
         }
+        if session.updated_at is None:
+            raise ValueError("Session updated_at is required")
         parsed_timestamps = {}
         for name, value in timestamps.items():
             if value is not None:
@@ -235,6 +241,10 @@ class SessionStore:
                 except (TypeError, ValueError) as exc:
                     raise ValueError("Session timestamps must be ISO-8601") from exc
         try:
+            if check_updated_order:
+                for name, timestamp in parsed_timestamps.items():
+                    if name != "updated_at" and timestamp > parsed_timestamps["updated_at"]:
+                        raise ValueError(f"updated_at cannot precede {name}")
             if parsed_timestamps.get("started_at") and parsed_timestamps.get("completed_at") is not None and parsed_timestamps["completed_at"] < parsed_timestamps["started_at"]:
                 raise ValueError("completed_at cannot precede started_at")
             if parsed_timestamps.get("started_at") and parsed_timestamps.get("cancelled_at") is not None and parsed_timestamps["cancelled_at"] < parsed_timestamps["started_at"]:

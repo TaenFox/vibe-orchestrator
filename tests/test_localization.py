@@ -2,7 +2,7 @@ from pathlib import Path
 
 from vibe_orchestrator.cli import build_parser
 from vibe_orchestrator.config import load_all_workflows
-from vibe_orchestrator.control import WorkerControl
+from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.ui import render_board
 
@@ -149,3 +149,29 @@ def test_ui_controls_worker_limit_including_zero(tmp_path: Path):
     assert '<form method="post" action="/workers">' in html
     assert 'name="count" min="0" value="0"' in html
     assert "активно 1" in html
+
+
+def test_ui_shows_delivery_sessions_membership_and_aggregates(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    mandatory = store.create("delivery", "story", "Обязательная")
+    optional = store.create("delivery", "task", "Необязательная", status="review", mandatory=False)
+    optional.blocked_by = ["DEL-BLOCK"]
+    optional.active_run = "run-1"
+    store.save(optional)
+    sessions = DeliverySessionStore(tmp_path)
+    session = sessions.create("Релиз 1")
+    sessions.add(session.id, mandatory.id, store)
+    sessions.add(session.id, optional.id, store)
+    mandatory.status = "done"
+    store.save(mandatory)
+
+    html = render_board(store, load_all_workflows(), "delivery", session_store=sessions)
+
+    assert "Delivery-сессии" in html
+    assert "Релиз 1" in html
+    assert "mandatory 1 · optional 1 · done 1 · blocked 1 · active_run 1" in html
+    assert f"сессия: {session.id}" in html
+    assert "Необязательная" in html
+    assert 'action="/session/activate"' in html
+    assert 'action="/session/remove"' in html

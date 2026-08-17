@@ -108,6 +108,34 @@ async def _schedule_and_wait(orchestrator: Orchestrator, ticket_id: str) -> None
     await orchestrator.running[ticket_id]
 
 
+def test_schedule_prefers_later_workflow_stage_before_priority(tmp_path: Path):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        orchestrator.runner = SuccessfulRunner()
+        earlier = orchestrator.store.create(
+            "delivery",
+            "task",
+            "Earlier stage",
+            priority=1,
+            status="selected_for_session",
+        )
+        later = orchestrator.store.create(
+            "delivery",
+            "task",
+            "Later stage",
+            priority=100,
+            status="ready_for_review",
+        )
+
+        await orchestrator._schedule_once()
+
+        assert orchestrator.store.get(later.id).active_run is not None
+        assert orchestrator.store.get(earlier.id).active_run is None
+        await orchestrator.running[later.id]
+
+    asyncio.run(scenario())
+
+
 def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     parent = orchestrator.store.create("delivery", "task", "Fix API contract", status="review")
@@ -131,6 +159,7 @@ def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     assert children[0].id == parent.blocked_by[0]
     assert children[0].type == "rework"
     assert children[0].status == "selected_for_session"
+    assert children[0].rework_stage == "review"
     assert children[0].wip_exempt is True
     assert [entry["event"] for entry in parent.run_history] == ["completed"]
     assert all(entry["run_id"] == "run-review" for entry in parent.run_history)
@@ -440,33 +469,33 @@ def test_failed_run_history_preserves_execution_contract_when_prompt_changes_dur
 def test_completed_rework_unblocks_parent(tmp_path: Path, parent_stage: str):
     orchestrator = Orchestrator(tmp_path)
     parent = orchestrator.store.create("delivery", "task", "Parent task", status=parent_stage)
-    child = orchestrator.store.create("delivery", "rework", "Child rework", parent=parent.id, status="acceptance")
+    child = orchestrator.store.create("delivery", "rework", "Child rework", parent=parent.id, status=parent_stage, rework_stage=parent_stage)
     parent.blocked_by = [child.id]
     parent.last_outcome = "needs_rework"
     orchestrator.store.save(parent)
-    child.active_run = "run-acceptance"
+    child.active_run = f"run-{parent_stage}"
     orchestrator.store.save(child)
 
     workflow = load_workflow("delivery")
     orchestrator._apply_result(
         workflow,
         child.id,
-        workflow.by_id["acceptance"],
+        workflow.by_id[parent_stage],
         AgentResult(outcome="completed", summary="Исправление принято", details=""),
     )
 
     parent = orchestrator.store.get(parent.id)
     child = orchestrator.store.get(child.id)
 
-    assert child.status == "ready_for_release"
-    assert not orchestrator.store.is_done(child)
+    assert child.status == "done"
+    assert orchestrator.store.is_done(child)
     assert parent.blocked_by == []
     candidates = select_candidates(workflow, orchestrator.store.list("delivery"), set())
     assert [(candidate.ticket.id, candidate.target_status) for candidate in candidates if candidate.ticket.id == parent.id] == [
         (parent.id, parent_stage)
     ]
     assert [entry["event"] for entry in child.run_history] == ["completed"]
-    assert child.run_history[0]["run_id"] == "run-acceptance"
+    assert child.run_history[0]["run_id"] == f"run-{parent_stage}"
 
 
 def test_technical_analysis_creates_delivery_children_and_waits_for_completion(tmp_path: Path):
@@ -507,7 +536,7 @@ delivery_tickets:
 
     assert idea.status == "investment_decision"
     assert [child.type for child in children] == ["story", "task"]
-    assert all(child.status == "selected_for_session" for child in children)
+    assert all(child.status == "todo" for child in children)
     assert all(child.mandatory is True for child in children)
     assert idea.implementation_required is True
     assert next_status_for_ticket(orchestrator.store, idea) == "implementation"
@@ -655,7 +684,7 @@ delivery_tickets:
 
     assert [child.id for child in second_children] == first_child_ids
     assert len(second_children) == 2
-    assert all(child.status == "selected_for_session" for child in second_children)
+    assert all(child.status == "todo" for child in second_children)
     assert [child.mandatory for child in second_children] == [True, False]
 
 
@@ -805,7 +834,9 @@ def test_analysis_needs_correction_creates_blocking_child(tmp_path: Path, parent
     assert idea.status == parent_stage
     assert len(children) == 1
     assert children[0].type == "correction"
-    assert children[0].status == "ready"
+    expected_status = "ready_for_analysis" if parent_stage == "analysis" else "ready_for_technical_analysis"
+    assert children[0].status == expected_status
+    assert children[0].correction_stage == parent_stage
     assert idea.blocked_by == [children[0].id]
     assert [entry["event"] for entry in idea.run_history] == ["completed"]
     assert idea.run_history[0]["run_id"] == f"run-{parent_stage}"
@@ -822,3 +853,112 @@ def test_analysis_needs_correction_creates_blocking_child(tmp_path: Path, parent
     assert [(candidate.ticket.id, candidate.target_status) for candidate in candidates if candidate.ticket.id == idea.id] == [
         (idea.id, parent_stage)
     ]
+
+
+def test_identical_correction_is_not_created_twice(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Clarify scope", status="analysis")
+    workflow = load_workflow("discovery")
+    result = AgentResult(outcome="needs_correction", summary="Не хватает требований", details="Нужны ограничения по ролям.")
+
+    idea.active_run = "run-1"
+    orchestrator.store.save(idea)
+    orchestrator._apply_result(workflow, idea.id, workflow.by_id["analysis"], result)
+    correction = orchestrator.store.children_of(idea.id, process="discovery")[0]
+    correction.status = "done"
+    orchestrator.store.save(correction)
+    orchestrator._reconcile_tickets()
+
+    idea = orchestrator.store.get(idea.id)
+    idea.active_run = "run-2"
+    orchestrator.store.save(idea)
+    orchestrator._apply_result(workflow, idea.id, workflow.by_id["analysis"], result)
+
+    children = orchestrator.store.children_of(idea.id, process="discovery")
+    assert [child.id for child in children] == [correction.id]
+
+
+def test_correction_retries_origin_stage_without_nested_child_and_closes_on_success(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("discovery", "idea", "Clarify scope", status="technical_analysis")
+    parent.active_run = "run-parent"
+    orchestrator.store.save(parent)
+    workflow = load_workflow("discovery")
+    stage = workflow.by_id["technical_analysis"]
+
+    orchestrator._apply_result(
+        workflow,
+        parent.id,
+        stage,
+        AgentResult(outcome="needs_correction", summary="Нужна коррекция", details="Уточнить границы."),
+    )
+    correction = orchestrator.store.children_of(parent.id, process="discovery")[0]
+    assert correction.status == "ready_for_technical_analysis"
+
+    correction.status = "technical_analysis"
+    correction.active_run = "run-correction"
+    orchestrator.store.save(correction)
+    orchestrator._apply_result(
+        workflow,
+        correction.id,
+        stage,
+        AgentResult(outcome="needs_correction", summary="Ещё уточнение", details="Но без дочернего тикета."),
+    )
+    correction = orchestrator.store.get(correction.id)
+    assert correction.status == "technical_analysis"
+    assert orchestrator.store.children_of(correction.id, process="discovery") == []
+
+    correction.active_run = "run-correction-success"
+    orchestrator.store.save(correction)
+    orchestrator._apply_result(
+        workflow,
+        correction.id,
+        stage,
+        AgentResult(
+            outcome="completed",
+            summary="Коррекция принята",
+            details="""```yaml
+implementation_required: false
+delivery_tickets: []
+```""",
+        ),
+    )
+    assert orchestrator.store.get(correction.id).status == "done"
+    assert orchestrator.store.get(parent.id).blocked_by == []
+
+
+def test_correction_technical_analysis_does_not_create_delivery_children(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("discovery", "idea", "Group delivery work", status="analysis")
+    correction = orchestrator.store.create(
+        "discovery",
+        "correction",
+        "Clarify delivery group",
+        parent=parent.id,
+        status="technical_analysis",
+        correction_stage="technical_analysis",
+    )
+    correction.active_run = "run-correction"
+    orchestrator.store.save(correction)
+    workflow = load_workflow("discovery")
+
+    orchestrator._apply_result(
+        workflow,
+        correction.id,
+        workflow.by_id["technical_analysis"],
+        AgentResult(
+            outcome="completed",
+            summary="Коррекция принята",
+            details="""```yaml
+implementation_required: true
+delivery_tickets:
+  - type: task
+    title: "Session model"
+    description: "Define the session model."
+    mandatory: true
+```""",
+        ),
+    )
+
+    assert orchestrator.store.get(correction.id).status == "done"
+    assert orchestrator.store.children_of(correction.id, process="delivery") == []

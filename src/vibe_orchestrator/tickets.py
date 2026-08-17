@@ -29,6 +29,8 @@ class Ticket:
     priority: int = 100
     description: str = ""
     parent: str | None = None
+    correction_stage: str | None = None
+    rework_stage: str | None = None
     blocked_by: list[str] = field(default_factory=list)
     mandatory: bool = True
     implementation_required: bool | None = None
@@ -59,6 +61,10 @@ class Ticket:
             payload.pop("run_history")
         if payload["implementation_required"] is None:
             payload.pop("implementation_required")
+        if payload["correction_stage"] is None:
+            payload.pop("correction_stage")
+        if payload["rework_stage"] is None:
+            payload.pop("rework_stage")
         if payload["consecutive_failures"] == 0:
             payload.pop("consecutive_failures")
         if payload["retry_after"] is None:
@@ -157,13 +163,13 @@ class TicketStore:
         stage = workflow.by_id[ticket.status]
         return stage.kind == "done"
 
-    def create(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None, mandatory: bool = True) -> Ticket:
+    def create(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None, mandatory: bool = True, correction_stage: str | None = None, rework_stage: str | None = None) -> Ticket:
         workflow = load_workflow(process)
         prefix = {"discovery": "DISC", "delivery": "DEL", "process_management": "PM"}[process]
         ticket_id = f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
         if wip_exempt is None:
             wip_exempt = ticket_type in {"rework", "correction"}
-        ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, mandatory=mandatory, wip_exempt=wip_exempt)
+        ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, correction_stage=correction_stage, rework_stage=rework_stage, mandatory=mandatory, wip_exempt=wip_exempt)
         self.save(ticket)
         return ticket
 

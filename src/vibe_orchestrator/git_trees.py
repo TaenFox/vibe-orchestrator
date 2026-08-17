@@ -62,7 +62,8 @@ class GitTreeManager:
         self.trees = TreeStore(self.project)
         self.worktrees_root = self.project / ".vibe" / "tmp" / "worktrees"
         self.main_branch = os.environ.get("VIBE_MAIN_BRANCH", "main")
-        self.main_worktree = Path(os.environ.get("VIBE_MAIN_WORKTREE", str(self.project))).resolve()
+        configured_main_worktree = os.environ.get("VIBE_MAIN_WORKTREE")
+        self.main_worktree = Path(configured_main_worktree).resolve() if configured_main_worktree else None
 
     def enabled(self) -> bool:
         result = subprocess.run(
@@ -72,10 +73,48 @@ class GitTreeManager:
         )
         return result.returncode == 0 and result.stdout.strip() == "true"
 
-    def workspace_for(self, ticket: Ticket) -> Path | None:
+    def workspace_for(self, ticket: Ticket, *, stage_id: str | None = None) -> Path | None:
         if ticket.process != "delivery" or not self.enabled():
             return None
-        return self.ensure_tree(ticket).worktree_path
+        handle = self.ensure_tree(ticket)
+        if stage_id == "development":
+            self.sync_with_main(handle)
+        return handle.worktree_path
+
+    def sync_with_main(self, handle: "TreeHandle") -> None:
+        """Bring the current main branch into a ticket tree before coding starts."""
+        self.commit_workspace(handle.worktree_path, handle.record.ticket_id)
+        self._ensure_main_worktree()
+        try:
+            self._run(["merge", "--no-edit", self.main_branch], cwd=handle.worktree_path)
+        except GitTreeError:
+            if self._resolve_text_add_add_conflicts(handle.worktree_path):
+                self._run(["commit", "--no-edit"], cwd=handle.worktree_path)
+                return
+            self._run_optional(["merge", "--abort"], cwd=handle.worktree_path)
+            raise
+
+    def _resolve_text_add_add_conflicts(self, worktree: Path) -> bool:
+        """Merge independently added text files without choosing either side."""
+        conflicted = self._run(["diff", "--name-only", "--diff-filter=U"], cwd=worktree).stdout.splitlines()
+        if not conflicted:
+            return False
+        for relative_path in conflicted:
+            stages = self._run(["ls-files", "-u", "--", relative_path], cwd=worktree).stdout.splitlines()
+            if {line.split()[2] for line in stages} != {"2", "3"}:
+                return False
+            try:
+                ours = self._run(["show", f":2:{relative_path}"], cwd=worktree).stdout
+                theirs = self._run(["show", f":3:{relative_path}"], cwd=worktree).stdout
+            except GitTreeError:
+                return False
+            if ours != theirs:
+                merged = ours.rstrip() + "\n\n" + theirs.lstrip()
+                if not merged.endswith("\n"):
+                    merged += "\n"
+                (worktree / relative_path).write_text(merged, encoding="utf-8")
+            self._run(["add", "--", relative_path], cwd=worktree)
+        return True
 
     def ensure_tree(self, ticket: Ticket) -> "TreeHandle":
         if ticket.process != "delivery":
@@ -119,18 +158,20 @@ class GitTreeManager:
     def release(self, ticket: Ticket) -> TreeRecord:
         handle = self.ensure_tree(ticket)
         record = handle.record
-        self.commit_workspace(handle.worktree_path, ticket.id)
-        target_branch, target_worktree = self._integration_target(ticket)
-        current_branch = self._run(["branch", "--show-current"], cwd=target_worktree).stdout.strip()
-        if current_branch != target_branch:
-            raise GitTreeError(f"Ожидалась ветка {target_branch} в {target_worktree}, получена {current_branch or '(detached)'}")
+        target_worktree: Path | None = None
         try:
+            self.commit_workspace(handle.worktree_path, ticket.id)
+            target_branch, target_worktree = self._integration_target(ticket)
+            current_branch = self._run(["branch", "--show-current"], cwd=target_worktree).stdout.strip()
+            if current_branch != target_branch:
+                raise GitTreeError(f"Ожидалась ветка {target_branch} в {target_worktree}, получена {current_branch or '(detached)'}")
             self._run(["merge", "--no-ff", record.branch, "-m", f"Интегрировать дерево тикета {ticket.id}"], cwd=target_worktree)
         except GitTreeError as exc:
             record.integration_status = "conflict"
             record.integration_error = str(exc)
             self.trees.save(record)
-            self._run_optional(["merge", "--abort"], cwd=target_worktree)
+            if target_worktree is not None:
+                self._run_optional(["merge", "--abort"], cwd=target_worktree)
             raise
         record.integration_status = "merged"
         record.integration_error = None
@@ -155,7 +196,40 @@ class GitTreeManager:
                 parent_record = self.trees.get(parent.id)
                 if parent_record:
                     return parent_record.branch, Path(parent_record.worktree)
-        return self.main_branch, self.main_worktree
+        return self.main_branch, self._ensure_main_worktree()
+
+    def _ensure_main_worktree(self) -> Path:
+        if self.main_worktree is not None:
+            return self.main_worktree
+        for path, branch in self._registered_worktrees():
+            if branch == self.main_branch:
+                self.main_worktree = path
+                return path
+        current_branch = self._run(["branch", "--show-current"], cwd=self.project).stdout.strip()
+        if current_branch == self.main_branch:
+            self.main_worktree = self.project
+            return self.project
+        if not self._run_optional(["show-ref", "--verify", f"refs/heads/{self.main_branch}"], cwd=self.project):
+            raise GitTreeError(f"Не найдена целевая ветка {self.main_branch!r} для интеграции")
+        worktree = self.worktrees_root / "__main__"
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        self._run(["worktree", "add", str(worktree), self.main_branch], cwd=self.project)
+        self.main_worktree = worktree.resolve()
+        return self.main_worktree
+
+    def _registered_worktrees(self) -> list[tuple[Path, str]]:
+        output = self._run(["worktree", "list", "--porcelain"], cwd=self.project).stdout
+        records: list[tuple[Path, str]] = []
+        path: Path | None = None
+        for line in output.splitlines() + [""]:
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree ")).resolve()
+            elif line.startswith("branch refs/heads/") and path is not None:
+                records.append((path, line.removeprefix("branch refs/heads/")))
+                path = None
+            elif not line and path is not None:
+                path = None
+        return records
 
     def _run(self, args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
