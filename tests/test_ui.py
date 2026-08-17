@@ -58,8 +58,8 @@ def test_board_handles_long_text_and_preserves_keyboard_mobile_contract(project)
 
     assert title.replace("<", "&lt;").replace(">", "&gt;") in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
-    assert f"setInterval(() => {{" in html
-    assert f"}}, {AUTO_REFRESH_SECONDS * 1000});" in html
+    assert "setInterval(refresh" in html
+    assert f"setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});" in html
     assert "@media (max-width:700px)" in html
     assert "*:focus-visible" not in html
     assert "focus-visible" in html
@@ -188,7 +188,7 @@ def test_ui_shows_unknown_usage_without_mixing_budget_or_cost(project):
     assert "cost" not in page
 
 
-def test_ui_browser_behaviour_guards_refresh_and_keeps_focused_input():
+def test_ui_browser_behaviour_uses_partial_refresh_and_guards_input():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is required for the inline browser behavior harness")
@@ -197,39 +197,47 @@ def test_ui_browser_behaviour_guards_refresh_and_keeps_focused_input():
     harness = f"""
 const assert = require('node:assert/strict');
 let timer;
-let reloads = 0;
-let openDetails = false;
-let active = null;
+    let fetches = 0;
+    let openDetails = false;
+    let active = null;
+    globalThis.sessionStorage = {{ getItem: () => null, setItem: () => {{}} }};
+    globalThis.location = {{ search: '?process=discovery' }};
 globalThis.setInterval = (callback, milliseconds) => {{ timer = {{callback, milliseconds}}; }};
-globalThis.window = {{ location: {{ reload: () => reloads++ }} }};
-globalThis.document = {{
-  hidden: false,
-  get activeElement() {{ return active; }},
-  querySelector: (selector) => selector === 'details[open]' && openDetails ? {{}} : null
-}};
+    globalThis.window = {{ scrollTo: () => {{}} }};
+    globalThis.document = {{
+      hidden: false,
+      get activeElement() {{ return active; }},
+      querySelector: (selector) => selector === 'details[open]' && openDetails ? {{}} : null,
+      querySelectorAll: () => [],
+      addEventListener: () => {{}},
+      scrollingElement: {{ scrollLeft: 0, scrollTop: 0 }}
+    }};
+    globalThis.fetch = async () => {{ fetches++; return {{ ok: true, text: async () => '<main class="board"></main>' }}; }};
 {script}
 assert.equal(timer.milliseconds, {AUTO_REFRESH_SECONDS * 1000});
-timer.callback();
-assert.equal(reloads, 1);
+    timer.callback();
+    assert.equal(fetches, 1);
 document.hidden = true;
 timer.callback();
-assert.equal(reloads, 1);
+    assert.equal(fetches, 1);
 document.hidden = false;
 openDetails = true;
 timer.callback();
-assert.equal(reloads, 1);
+    assert.equal(fetches, 1);
 openDetails = false;
 const input = {{ matches: (selector) => selector.includes('input'), value: 'введенный текст' }};
 active = input;
 timer.callback();
-assert.equal(reloads, 1);
+    assert.equal(fetches, 1);
 assert.equal(document.activeElement.value, 'введенный текст');
 active = null;
 timer.callback();
-assert.equal(reloads, 2);
+assert.equal(fetches, 2);
 """
     completed = subprocess.run([node, "--eval", harness], capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stderr
+    assert "window.location.reload" not in AUTO_REFRESH_SCRIPT
+    assert "/fragment?" in AUTO_REFRESH_SCRIPT
 
 
 def test_ui_browser_contract_exposes_focusable_controls_and_mobile_column_width(project):
@@ -259,3 +267,32 @@ def test_ui_delivery_input_persists_long_text_and_is_rendered_safely(project):
     assert reloaded.priority == 7
     assert "Новый тикет &lt;безопасно&gt;" in html
     assert "Новый тикет <безопасно>" not in html
+
+
+def test_board_compact_groups_queue_and_agent_and_flat_filters(project):
+    store = TicketStore(project)
+    queued = store.create("delivery", "task", "В очереди", status="selected_for_session")
+    active = store.create("delivery", "task", "В разработке", status="development")
+    hidden = store.create("delivery", "task", "Другая стадия", status="review")
+
+    compact = render_board(store, load_all_workflows(), "delivery")
+    assert 'data-stage-group="selected_for_session"' in compact
+    assert compact.index('data-stage="selected_for_session"') < compact.index('data-stage="system_analysis"')
+    assert compact.index('data-stage="ready_for_development"') < compact.index('data-stage="development"')
+    assert queued.title in compact and active.title in compact
+
+    flat = render_board(store, load_all_workflows(), "delivery", mode="flat", search="разработке")
+    assert 'class="board flat-list"' in flat
+    assert active.title in flat
+    assert queued.title not in flat and hidden.title not in flat
+
+
+def test_ui_fragment_endpoint_returns_only_board(http_server, project):
+    store = TicketStore(project)
+    ticket = store.create("discovery", "idea", "Найти меня", status="ready")
+    with urllib.request.urlopen(f"{http_server}/fragment?process=discovery&mode=flat&search={ticket.id}") as response:
+        fragment = response.read().decode("utf-8")
+    assert response.status == 200
+    assert fragment.startswith('<main class="board flat-list">')
+    assert ticket.title in fragment
+    assert "<!doctype html>" not in fragment
