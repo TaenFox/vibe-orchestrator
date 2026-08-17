@@ -107,3 +107,27 @@ def test_delivery_session_control_reads_active_participants(tmp_path: Path):
 
 def test_delivery_session_control_uses_legacy_mode_without_active_session(tmp_path: Path):
     assert DeliverySessionControl(tmp_path).get_participants() is None
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "active: true\n",
+        "active: true\nparticipants: not-a-list\n",
+        "active: true\nparticipants: [DEL-A, 42]\n",
+    ],
+)
+def test_delivery_session_control_fails_closed_for_active_malformed_session(tmp_path: Path, contents: str):
+    path = tmp_path / ".vibe" / "tmp"
+    path.mkdir(parents=True)
+    (path / "delivery-session.yaml").write_text(contents, encoding="utf-8")
+
+    assert DeliverySessionControl(tmp_path).get_participants() == set()
+
+
+def test_delivery_session_control_fails_closed_for_corrupted_session_file(tmp_path: Path):
+    path = tmp_path / ".vibe" / "tmp"
+    path.mkdir(parents=True)
+    (path / "delivery-session.yaml").write_text("active: [", encoding="utf-8")
+
+    assert DeliverySessionControl(tmp_path).get_participants() == set()

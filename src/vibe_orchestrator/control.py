@@ -45,16 +45,21 @@ class DeliverySessionControl:
     def get_participants(self) -> set[str] | None:
         """Return participant IDs, or ``None`` when no active session exists.
 
-        Missing and malformed state is deliberately treated as legacy mode so
-        old projects continue to be schedulable without a migration.
+        A missing file and an explicitly inactive session use legacy mode. An
+        active but malformed session fails closed by returning no participants.
         """
         try:
             payload = yaml.safe_load(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
         except (OSError, UnicodeError, yaml.YAMLError):
-            return None
-        if not isinstance(payload, dict) or payload.get("active") is not True:
-            return None
+            return set()
+        if isinstance(payload, dict):
+            if payload.get("active") is not True:
+                return None
+        else:
+            return set()
         participants = payload.get("participants")
         if not isinstance(participants, list) or any(not isinstance(item, str) or not item for item in participants):
-            return None
+            return set()
         return set(participants)
