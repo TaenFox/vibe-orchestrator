@@ -11,10 +11,11 @@ import yaml
 
 from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
 from .config import Stage, Workflow, load_all_workflows
-from .control import DeliverySessionControl, WorkerControl
+from .control import WorkerControl
 from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
+from .sessions import SessionStore
 
 log = logging.getLogger("vibe")
 
@@ -27,7 +28,7 @@ class Orchestrator:
         self.runner = CodexRunner(self.store)
         self.poll_interval = poll_interval
         self.worker_control = WorkerControl(project)
-        self.delivery_session_control = DeliverySessionControl(project)
+        self.session_store = SessionStore(project, self.store)
         initial_worker_limit = self.worker_control.get_limit() if max_agents is None else max_agents
         self.worker_control.set_limit(initial_worker_limit)
         self.max_agents = initial_worker_limit
@@ -52,7 +53,14 @@ class Orchestrator:
             return
         global_candidates = []
         running_ids = set(self.running)
-        delivery_session_participants = self.delivery_session_control.get_participants()
+        delivery_session_participants = {
+            ticket_id
+            for session in self.session_store.list()
+            if session.status == "active"
+            for ticket_id in session.ticket_ids
+        }
+        if not delivery_session_participants and not any(session.status == "active" for session in self.session_store.list()):
+            delivery_session_participants = None
         for process, workflow in self.workflows.items():
             tickets = self.store.list(process)
             session_participants = delivery_session_participants if process == "delivery" else None
