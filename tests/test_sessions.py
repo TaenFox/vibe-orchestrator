@@ -164,7 +164,7 @@ def test_save_rejects_invalid_new_lifecycle(
         store.save(session)
 
 
-def test_invalid_type_duplicate_and_legacy_reload(tmp_path: Path):
+def test_invalid_type_duplicate_and_legacy_missing_updated_at(tmp_path: Path):
     tickets, store = stores(tmp_path)
     discovery_ticket = tickets.create("discovery", "idea", "Wrong process")
     session = store.create()
@@ -175,10 +175,60 @@ def test_invalid_type_duplicate_and_legacy_reload(tmp_path: Path):
 
     legacy = tmp_path / ".vibe" / "sessions" / "SESSION-LEGACY.yaml"
     legacy.write_text(yaml.safe_dump({"id": "SESSION-LEGACY", "status": "draft", "ticket_ids": []}), encoding="utf-8")
-    loaded = store.get("SESSION-LEGACY")
-    assert loaded.schema_version == 1
-    assert loaded.audit_events == []
-    assert loaded.created_at == loaded.updated_at
+    with pytest.raises(ValueError, match="updated_at"):
+        store.get("SESSION-LEGACY")
+
+
+@pytest.mark.parametrize("updated_at", [None, "not-a-date"])
+def test_load_rejects_missing_or_invalid_updated_at(tmp_path: Path, updated_at: object):
+    _, store = stores(tmp_path)
+    payload = {
+        "id": "SESSION-CORRUPT",
+        "status": "draft",
+        "ticket_ids": [],
+        "created_at": "2020-01-01T00:00:00+00:00",
+    }
+    if updated_at is not None:
+        payload["updated_at"] = updated_at
+    else:
+        payload["updated_at"] = None
+    path = tmp_path / ".vibe" / "sessions" / "SESSION-CORRUPT.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="updated_at|ISO-8601"):
+        store.load_path(path)
+
+
+@pytest.mark.parametrize("updated_at", [None, "not-a-date"])
+def test_save_rejects_missing_or_invalid_updated_at(tmp_path: Path, updated_at: object):
+    _, store = stores(tmp_path)
+    session = DeliverySession(id="SESSION-CORRUPT", updated_at=updated_at)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="updated_at|ISO-8601"):
+        store.save(session)
+
+
+def test_load_rejects_updated_at_before_lifecycle_timestamps(tmp_path: Path):
+    _, store = stores(tmp_path)
+    path = tmp_path / ".vibe" / "sessions" / "SESSION-STALE.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "id": "SESSION-STALE",
+                "status": "active",
+                "ticket_ids": ["DEL-FAKE"],
+                "created_at": "2020-01-01T00:00:00+00:00",
+                "updated_at": "2020-01-01T00:00:00+00:00",
+                "started_at": "2020-01-02T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="updated_at cannot precede started_at"):
+        store.load_path(path)
 
 
 @pytest.mark.parametrize(
