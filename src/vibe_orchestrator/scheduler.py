@@ -23,7 +23,13 @@ def wip_count(tickets: list[Ticket], status: str) -> int:
     return sum(1 for t in tickets if t.status == status and not t.wip_exempt)
 
 
-def select_candidates(workflow: Workflow, tickets: list[Ticket], running_ids: set[str], now: datetime | None = None) -> list[Candidate]:
+def select_candidates(
+    workflow: Workflow,
+    tickets: list[Ticket],
+    running_ids: set[str],
+    now: datetime | None = None,
+    session_participants: set[str] | None = None,
+) -> list[Candidate]:
     by_id = workflow.by_id
     candidates: list[Candidate] = []
     for ticket in tickets:
@@ -41,6 +47,14 @@ def select_candidates(workflow: Workflow, tickets: list[Ticket], running_ids: se
         else:
             continue
         if target.kind != "agent":
+            continue
+        if (
+            session_participants is not None
+            and source.id == "selected_for_session"
+            and target.id == "system_analysis"
+            and ticket.id not in session_participants
+            and not ticket.wip_exempt
+        ):
             continue
         if source.kind == "queue" and not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id) >= target.wip:
             continue

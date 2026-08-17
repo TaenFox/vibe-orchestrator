@@ -34,3 +34,32 @@ class WorkerControl:
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
+
+
+class DeliverySessionControl:
+    """Read the optional active Delivery session selected by process management."""
+
+    def __init__(self, project: Path):
+        self.path = project.resolve() / ".vibe" / "tmp" / "delivery-session.yaml"
+
+    def get_participants(self) -> set[str] | None:
+        """Return participant IDs, or ``None`` when no active session exists.
+
+        A missing file and an explicitly inactive session use legacy mode. An
+        active but malformed session fails closed by returning no participants.
+        """
+        try:
+            payload = yaml.safe_load(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError, yaml.YAMLError):
+            return set()
+        if isinstance(payload, dict):
+            if payload.get("active") is not True:
+                return None
+        else:
+            return set()
+        participants = payload.get("participants")
+        if not isinstance(participants, list) or any(not isinstance(item, str) or not item for item in participants):
+            return set()
+        return set(participants)
