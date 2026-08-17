@@ -48,6 +48,39 @@ def test_membership_invariants_and_one_open_session(tmp_path: Path):
         store.save(session)
 
 
+def test_save_cannot_bypass_persisted_lifecycle(tmp_path: Path):
+    tickets, store = stores(tmp_path)
+    ticket = tickets.create("delivery", "story", "Immutable membership")
+    session = store.create([ticket.id])
+    store.activate(session)
+
+    session.status = "draft"
+    session.ticket_ids.clear()
+    with pytest.raises(ValueError, match="Invalid session status transition"):
+        store.save(session)
+
+    persisted = store.get(session.id)
+    assert persisted.status == "active"
+    assert persisted.ticket_ids == [ticket.id]
+
+    session.status = "active"
+    session.ticket_ids = [ticket.id]
+    session.started_at = "2020-01-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="start time cannot be changed"):
+        store.save(session)
+
+
+def test_cancel_draft_has_consistent_timestamps(tmp_path: Path):
+    _, store = stores(tmp_path)
+    session = store.create()
+    store.cancel(session)
+
+    loaded = store.get(session.id)
+    assert loaded.status == "cancelled"
+    assert loaded.started_at is None
+    assert loaded.cancelled_at
+
+
 def test_invalid_type_duplicate_and_legacy_reload(tmp_path: Path):
     tickets, store = stores(tmp_path)
     discovery_ticket = tickets.create("discovery", "idea", "Wrong process")
