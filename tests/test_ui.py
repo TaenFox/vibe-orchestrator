@@ -81,6 +81,22 @@ def test_board_keeps_details_balanced_between_multiple_cards(project):
     assert parser.open_tags == []
 
 
+def test_board_state_persists_scroll_details_and_form_values(project):
+    store = TicketStore(project)
+    ticket = store.create("discovery", "idea", "Состояние доски", description="Описание", status="ready")
+
+    page = render_board(store, load_all_workflows(), "discovery")
+
+    assert f'data-ticket-details="{ticket.id}"' in page
+    assert "board?.scrollLeft" in page
+    assert "refreshedBoard.scrollLeft = restored.boardScrollX" in page
+    assert "detailsState" in page
+    assert "data-ticket-details" in page
+    assert "document.addEventListener('input'" in page
+    assert "form?.getAttribute('action')" in page
+    assert "window.location.reload" not in page
+
+
 def test_ui_api_payload_covers_discovery_delivery_and_active_session(http_server, project):
     store = TicketStore(project)
     discovery = store.create("discovery", "idea", "Discovery API", status="ready")

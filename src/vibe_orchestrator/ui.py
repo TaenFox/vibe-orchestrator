@@ -22,10 +22,22 @@ AUTO_REFRESH_SCRIPT = f"""<script>
   const storage = {{ get: () => {{ try {{ return sessionStorage.getItem(key) || '{{}}'; }} catch (_) {{ return '{{}}'; }} }}, set: value => {{ try {{ sessionStorage.setItem(key, value); }} catch (_) {{ /* storage can be disabled */ }} }} }};
   const state = () => {{ try {{ return JSON.parse(storage.get()); }} catch (_) {{ return {{}}; }} }};
   const save = (extra = {{}}) => storage.set(JSON.stringify({{...state(), process: new URLSearchParams(location.search).get('process') || 'discovery', ...extra}}));
+  const controls = () => [...document.querySelectorAll('input,select,textarea')];
+  const controlKey = (el) => el.dataset.boardStateKey || `${{el.form?.getAttribute('action') || ''}}:${{el.name || el.type || el.tagName.toLowerCase()}}`;
+  const inputState = () => controls().map(el => [controlKey(el), el.value]);
+  const detailsState = () => [...document.querySelectorAll('details[data-ticket-details]')].map(el => [el.dataset.ticketDetails, el.open]);
+  const restore = () => {{
+    const restored = state();
+    const savedInputs = new Map(restored.inputs || []);
+    controls().forEach(el => {{ const value = savedInputs.get(controlKey(el)); if (value !== undefined && !el.matches(':focus')) el.value = value; }});
+    const savedDetails = new Map(restored.details || []);
+    document.querySelectorAll('details[data-ticket-details]').forEach(el => {{ if (savedDetails.has(el.dataset.ticketDetails)) el.open = savedDetails.get(el.dataset.ticketDetails); }});
+  }};
   const remember = () => {{
     const active = document.activeElement;
-    save({{mode: document.querySelector('[data-board-mode]')?.value || 'compact', ticket: document.querySelector('.card[data-ticket].selected')?.dataset.ticket || state().ticket, scrollX: document.scrollingElement?.scrollLeft || 0, scrollY: document.scrollingElement?.scrollTop || 0, inputs: [...document.querySelectorAll('input,select,textarea')].map(el => [el.name || (el.matches('[data-board-search]') ? 'search' : el.matches('[data-board-status]') ? 'status' : el.matches('[data-board-mode]') ? 'mode' : ''), el.value])}});
-    if (active) save({{focus: [...document.querySelectorAll('input,select,textarea')].indexOf(active)}});
+    const board = document.querySelector('.board');
+    save({{mode: document.querySelector('[data-board-mode]')?.value || 'compact', ticket: document.querySelector('.card[data-ticket].selected')?.dataset.ticket || state().ticket, boardScrollX: board?.scrollLeft || 0, scrollY: window.scrollY || document.scrollingElement?.scrollTop || 0, inputs: inputState(), details: detailsState()}});
+    if (active) save({{focus: controls().indexOf(active)}});
   }};
   const refresh = async () => {{
     if (document.hidden || document.querySelector('details[open]') || document.activeElement?.matches('input, select, textarea')) return;
@@ -33,14 +45,16 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || ''}});
     try {{ const response = await fetch('/fragment?' + params); if (!response.ok) return; const fragment = await response.text();
       const board = document.querySelector('.board'); if (!board) return; board.outerHTML = fragment;
-      const restored = state(); (restored.inputs || []).forEach(([name, value]) => {{ const el = [...document.querySelectorAll('input,select,textarea')].find(item => item.name === name || (name === 'search' && item.matches('[data-board-search]')) || (name === 'status' && item.matches('[data-board-status]')) || (name === 'mode' && item.matches('[data-board-mode]'))); if (el && !el.matches(':focus')) el.value = value; }});
+      const restored = state(); restore();
       if (restored.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(restored.ticket)}}"]`)?.classList.add('selected');
-      if (restored.scrollY != null) window.scrollTo(restored.scrollX || 0, restored.scrollY); if (restored.focus >= 0) document.querySelectorAll('input,select,textarea')[restored.focus]?.focus();
+      const refreshedBoard = document.querySelector('.board'); if (refreshedBoard && restored.boardScrollX != null) refreshedBoard.scrollLeft = restored.boardScrollX; if (restored.scrollY != null) window.scrollTo(0, restored.scrollY); if (restored.focus >= 0) controls()[restored.focus]?.focus();
     }} catch (_) {{ /* transient server/network failure: keep the current board */ }}
   }};
+  document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) remember(); }});
   document.addEventListener('change', event => {{ if (event.target.matches('[data-board-mode], [data-board-search], [data-board-status]')) {{ const value = event.target.value; save(event.target.matches('[data-board-mode]') ? {{mode:value}} : event.target.matches('[data-board-search]') ? {{search:value}} : {{status:value}}); refresh(); }} }});
-  document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) save({{process: new URL(link.href, location.href).searchParams.get('process')}}); const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
-  const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; if (current.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
+  document.addEventListener('toggle', event => {{ if (event.target.matches('details[data-ticket-details]')) remember(); }}, true);
+  document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }} const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
+  const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; restore(); if (current.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
 }})();
 </script>"""
 
@@ -344,7 +358,7 @@ def _ticket_details_html(ticket, tree=None) -> str:
             f'<div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
         )
     return (
-        '<details class="details"><summary>Подробнее</summary><div class="details-body">'
+        f'<details class="details" data-ticket-details="{html.escape(ticket.id)}"><summary>Подробнее</summary><div class="details-body">'
         f'<div class="details-row"><span class="meta">Описание</span>{html.escape(description)}</div>'
         f'<div class="details-row"><span class="meta">Родитель</span>{html.escape(parent)}</div>'
         f'<div class="details-row"><span class="meta">Блокирует</span>{html.escape(blockers)}</div>'
