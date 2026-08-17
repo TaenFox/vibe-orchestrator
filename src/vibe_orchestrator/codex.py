@@ -12,6 +12,7 @@ from pathlib import Path
 from . import __version__
 from .config import PromptSpec, Stage, load_prompt_spec, package_root
 from .tickets import Ticket, TicketStore
+from .token_usage import parse_codex_usage, unknown_token_usage
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class AgentResult:
     outcome: str
     summary: str
     details: str = ""
+    token_usage: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,7 @@ class CodexRunner:
             "reasoning_effort": contract.reasoning_effort,
             "ticket_snapshot": ticket_prompt_metadata(ticket),
             "workspace_path": str(workspace),
+            "token_usage": unknown_token_usage(),
         }
         cmd = self._build_exec_args(output_path, contract=contract)
         manifest["command"] = cmd
@@ -131,10 +134,15 @@ class CodexRunner:
         process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
         events_path.write_bytes(stdout or b"")
+        token_usage = parse_codex_usage(stdout or b"")
+        manifest["token_usage"] = token_usage
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if process.returncode != 0:
             raise RuntimeError(f"Codex exited with {process.returncode}; see {events_path}")
         data = json.loads(output_path.read_text(encoding="utf-8"))
-        return AgentResult(outcome=data["outcome"], summary=data["summary"], details=data.get("details", ""))
+        data["token_usage"] = token_usage
+        output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return AgentResult(outcome=data["outcome"], summary=data["summary"], details=data.get("details", ""), token_usage=token_usage)
 
     def _build_prompt(
         self,

@@ -81,6 +81,21 @@ def test_loads_legacy_ticket_without_run_history(tmp_path: Path):
     assert ticket.mandatory is True
 
 
+def test_legacy_ticket_has_no_required_token_usage_contract(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    path = tmp_path / ".vibe" / "tickets" / "delivery" / "DEL-LEGACY-USAGE.yaml"
+    path.write_text(yaml.safe_dump({
+        "id": "DEL-LEGACY-USAGE", "process": "delivery", "type": "task",
+        "title": "Legacy usage", "status": "review",
+    }, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+    ticket = store.get("DEL-LEGACY-USAGE")
+
+    assert "token_usage" not in ticket.to_dict()
+    assert ticket.run_history == []
+
+
 def test_save_persists_run_history_with_artifact_path(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()

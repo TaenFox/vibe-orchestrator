@@ -12,6 +12,7 @@ from .config import load_all_workflows
 from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
 from .tickets import TicketStore, automatic_retry_available, next_status_for_ticket, reset_failed_retry, retry_exhausted
+from .token_usage import is_confirmed_token_usage, unknown_token_usage
 
 CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}header button{margin-top:0}input,select,textarea{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px;max-width:100%;font:inherit}input[type=number]{width:52px}.create-form{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:12px 14px;border-bottom:1px solid #30363d}.create-form input[name=title],.create-form textarea[name=description]{min-width:220px}.create-form textarea{min-height:34px;resize:vertical}a{color:#58a6ff;text-decoration:none}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #f0c674;outline-offset:2px}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0;overflow-wrap:anywhere}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap;overflow-wrap:anywhere}.details-row .meta{display:block;margin-bottom:2px}@media (max-width:700px){header{gap:10px;padding:10px}header form,.create-form{width:100%}.create-form input,.create-form select,.create-form textarea{flex:1 1 100%;min-width:0}.board{padding:10px;gap:8px}.column{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}}"""
 AUTO_REFRESH_SECONDS = 5
@@ -33,7 +34,7 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
             if parsed.path == "/":
                 query = urllib.parse.parse_qs(parsed.query); process = query.get("process", ["discovery"])[0]
                 return self._html(render_board(store, workflows, process, worker_control, tree_manager, session_store))
-            if parsed.path == "/api/tickets": return self._json([ticket.to_dict() for ticket in store.list()])
+            if parsed.path == "/api/tickets": return self._json([_ticket_payload(ticket) for ticket in store.list()])
             if parsed.path == "/api/sessions": return self._json([_session_payload(item, store) for item in session_store.list()])
             if parsed.path.startswith("/api/sessions/"):
                 try:
@@ -174,7 +175,7 @@ def _session_payload(session, store) -> dict:
         "blocked": sum(bool(ticket.blocked_by) for ticket in tickets),
         "active_run": sum(bool(ticket.active_run) for ticket in tickets),
     }
-    return {"session": session.to_dict(), "aggregate": aggregate, "tickets": [ticket.to_dict() for ticket in tickets]}
+    return {"session": session.to_dict(), "aggregate": aggregate, "tickets": [_ticket_payload(ticket) for ticket in tickets]}
 
 
 def _ticket_exists(store, ticket_id: str) -> bool:
@@ -190,6 +191,28 @@ def _ticket_session_badge(ticket, session_store) -> str:
         return ""
     session = next((item for item in session_store.list() if ticket.id in item.participants), None)
     return f'<span class="badge">сессия: {html.escape(session.id)}</span>' if session else ""
+
+
+def _ticket_usage(ticket) -> tuple[dict, dict]:
+    terminal = [entry for entry in ticket.run_history if entry.get("event") in {"completed", "failed"}]
+    confirmed = [entry.get("token_usage") for entry in terminal if is_confirmed_token_usage(entry.get("token_usage"))]
+    latest = next((usage for usage in reversed(confirmed)), unknown_token_usage())
+    return latest, {
+        "confirmed_runs": len(confirmed),
+        "input_tokens": sum(usage["input_tokens"] for usage in confirmed),
+        "output_tokens": sum(usage["output_tokens"] for usage in confirmed),
+        "total_tokens": sum(usage["total_tokens"] for usage in confirmed),
+        "latest_captured_at": latest["captured_at"],
+    }
+
+
+def _ticket_payload(ticket) -> dict:
+    payload = ticket.to_dict()
+    latest, aggregate = _ticket_usage(ticket)
+    if aggregate["confirmed_runs"] or ticket.run_history:
+        payload["token_usage"] = latest
+        payload["token_usage_aggregate"] = aggregate
+    return payload
 
 
 def _sessions_html(store, session_store) -> str:
@@ -229,6 +252,12 @@ def _ticket_details_html(ticket, tree=None) -> str:
     outcome = ticket.last_outcome or "нет"
     retry_after = ticket.retry_after or "нет"
     description = ticket.description or "(пусто)"
+    latest_usage, aggregate = _ticket_usage(ticket)
+    usage_text = "unknown"
+    usage_time = "нет"
+    if is_confirmed_token_usage(latest_usage):
+        usage_text = f'{latest_usage["total_tokens"]} (input {latest_usage["input_tokens"]} · output {latest_usage["output_tokens"]})'
+        usage_time = latest_usage["captured_at"]
     tree_details = ""
     if tree:
         tree_details = (
@@ -244,6 +273,8 @@ def _ticket_details_html(ticket, tree=None) -> str:
         f'<div class="details-row"><span class="meta">Последний outcome</span>{html.escape(outcome)}</div>'
         f'<div class="details-row"><span class="meta">Ошибок подряд</span>{ticket.consecutive_failures}</div>'
         f'<div class="details-row"><span class="meta">Повтор после</span>{html.escape(retry_after)}</div>'
+        f'<div class="details-row"><span class="meta">Токены (актуальный источник)</span>{html.escape(usage_text)} · {html.escape(usage_time)}</div>'
+        f'<div class="details-row"><span class="meta">Токены (подтвержденные запуски)</span>{aggregate["total_tokens"]} · запусков {aggregate["confirmed_runs"]}</div>'
         f'{tree_details}'
         f'<div class="details-row"><span class="meta">Создан</span>{html.escape(ticket.created_at)}</div>'
         f'<div class="details-row"><span class="meta">Обновлен</span>{html.escape(ticket.updated_at)}</div>'

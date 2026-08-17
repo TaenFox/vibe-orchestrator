@@ -16,6 +16,7 @@ from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
+from .token_usage import unknown_token_usage
 
 log = logging.getLogger("vibe")
 
@@ -186,6 +187,7 @@ class Orchestrator:
             summary=str(exc),
             consecutive_failures=ticket.consecutive_failures,
             retry_after=ticket.retry_after,
+            token_usage=self._run_token_usage(run_id),
             **metadata,
         )
         ticket.active_run = None
@@ -241,6 +243,7 @@ class Orchestrator:
                 outcome=result.outcome,
                 summary=result.summary,
                 to_status=ticket.status,
+                token_usage=result.token_usage or self._run_token_usage(active_run),
                 **metadata,
             )
         ticket.active_run = None
@@ -248,6 +251,19 @@ class Orchestrator:
         self.store.save(ticket)
         self._release_parent_if_resolved(ticket)
         self._reconcile_tickets()
+
+    def _run_token_usage(self, run_id: str | None) -> dict[str, object]:
+        if not run_id:
+            return unknown_token_usage()
+        manifest_path = self.store.run_path(run_id) / "run.json"
+        try:
+            import json
+
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return unknown_token_usage()
+        usage = payload.get("token_usage")
+        return usage if isinstance(usage, dict) else unknown_token_usage()
 
     def _handle_follow_up(self, ticket: Ticket, workflow: Workflow, stage: Stage, result: AgentResult) -> None:
         if workflow.id == "delivery" and result.outcome == "needs_rework":
