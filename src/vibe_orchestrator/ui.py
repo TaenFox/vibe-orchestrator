@@ -257,7 +257,7 @@ def _ticket_details_html(ticket, tree=None) -> str:
     usage_time = "нет"
     if is_confirmed_token_usage(latest_usage):
         usage_text = f'{latest_usage["total_tokens"]} (input {latest_usage["input_tokens"]} · output {latest_usage["output_tokens"]})'
-        usage_time = latest_usage["captured_at"]
+        usage_time = latest_usage["captured_at"] or "неизвестно"
     tree_details = ""
     if tree:
         tree_details = (

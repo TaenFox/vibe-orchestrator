@@ -6,7 +6,7 @@ from pathlib import Path
 from vibe_orchestrator.codex import CodexRunner
 from vibe_orchestrator.config import Stage, load_workflow
 from vibe_orchestrator.tickets import TicketStore
-from vibe_orchestrator.token_usage import parse_codex_usage, unknown_token_usage
+from vibe_orchestrator.token_usage import is_confirmed_token_usage, parse_codex_usage, unknown_token_usage
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -36,6 +36,7 @@ def test_parser_keeps_captured_at_unknown_when_timestamp_is_missing():
         "source": "codex_cli.turn.completed",
         "captured_at": None,
     }
+    assert is_confirmed_token_usage(usage)
 
 
 def test_parser_sums_all_supported_turn_completed_events():

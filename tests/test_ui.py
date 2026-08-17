@@ -135,6 +135,41 @@ def test_ticket_api_exposes_latest_usage_and_confirmed_aggregate(http_server, pr
     }
 
 
+def test_ticket_api_aggregates_confirmed_usage_without_timestamp(http_server, project):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Timestamp-free tokens", status="done")
+    store.record_run_event(ticket, run_id="run-1", stage_id="development", event="completed", token_usage={
+        "input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+        "source": "codex_cli.turn.completed", "captured_at": None,
+    })
+    store.save(ticket)
+
+    with urllib.request.urlopen(f"{http_server}/api/tickets") as response:
+        payload = json.load(response)
+    item = next(item for item in payload if item["id"] == ticket.id)
+
+    assert item["token_usage"]["total_tokens"] == 14
+    assert item["token_usage"]["captured_at"] is None
+    assert item["token_usage_aggregate"] == {
+        "confirmed_runs": 1, "input_tokens": 10, "output_tokens": 4,
+        "total_tokens": 14, "latest_captured_at": None,
+    }
+
+
+def test_ui_shows_unknown_timestamp_for_confirmed_usage(project):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Timestamp-free tokens", status="done")
+    store.record_run_event(ticket, run_id="run-1", stage_id="development", event="completed", token_usage={
+        "input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+        "source": "codex_cli.turn.completed", "captured_at": None,
+    })
+    store.save(ticket)
+
+    page = render_board(store, load_all_workflows(), "delivery")
+
+    assert "Токены (актуальный источник)</span>14 (input 10 · output 4) · неизвестно" in page
+
+
 def test_ui_shows_unknown_usage_without_mixing_budget_or_cost(project):
     store = TicketStore(project)
     ticket = store.create("delivery", "task", "Unknown tokens", status="review")
