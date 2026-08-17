@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.scheduler import select_candidates
-from vibe_orchestrator.tickets import next_status_for_ticket
+from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
 
 
 class SuccessfulRunner:
@@ -141,6 +142,8 @@ def test_schedule_records_started_and_completed_run_history(tmp_path: Path):
     ticket = orchestrator.store.create("delivery", "task", "Ship durable history", status="ready_for_review")
     ticket.last_outcome = "needs_rework"
     ticket.last_summary = "Previous review failed"
+    ticket.consecutive_failures = 2
+    ticket.retry_after = "2026-01-01T00:00:30+00:00"
     orchestrator.store.save(ticket)
 
     asyncio.run(_schedule_and_wait(orchestrator, ticket.id))
@@ -151,6 +154,8 @@ def test_schedule_records_started_and_completed_run_history(tmp_path: Path):
     assert ticket.active_run is None
     assert ticket.last_outcome == "completed"
     assert ticket.last_summary == "review done"
+    assert ticket.consecutive_failures == 0
+    assert ticket.retry_after is None
     assert ticket.status == "ready_for_acceptance"
     assert [entry["event"] for entry in ticket.run_history] == ["started", "completed"]
     assert ticket.run_history[0]["run_id"] == ticket.run_history[1]["run_id"]
@@ -184,11 +189,44 @@ def test_execute_records_failed_run_history(tmp_path: Path):
     assert ticket.active_run is None
     assert ticket.last_outcome == "failed"
     assert ticket.last_summary == "agent crashed"
+    assert ticket.consecutive_failures == 1
+    assert ticket.retry_after is not None
     assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
     assert ticket.run_history[-1]["summary"] == "agent crashed"
     assert ticket.run_history[-1]["prompt_path"] == "delivery/review.md"
     assert ticket.run_history[-1]["prompt_version"] == "sha256:stub"
     assert ticket.run_history[-1]["artifacts_path"] == ".vibe/runs/run-failed"
+    assert ticket.run_history[-1]["consecutive_failures"] == 1
+    assert ticket.run_history[-1]["retry_after"] == ticket.retry_after
+
+
+def test_agent_failure_stops_after_three_attempts_and_can_be_reset(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = FailingRunner()
+    ticket = orchestrator.store.create("delivery", "task", "Bound retries", status="review")
+    workflow = load_workflow("delivery")
+
+    retry_delays = []
+    for attempt in range(1, 4):
+        ticket = orchestrator.store.get(ticket.id)
+        ticket.active_run = f"run-failed-{attempt}"
+        orchestrator.store.save(ticket)
+        asyncio.run(orchestrator._execute(workflow, ticket.id, "review", ticket.active_run))
+        ticket = orchestrator.store.get(ticket.id)
+        if ticket.retry_after:
+            failed_at = datetime.fromisoformat(ticket.run_history[-1]["timestamp"])
+            retry_delays.append((datetime.fromisoformat(ticket.retry_after) - failed_at).total_seconds())
+
+    ticket = orchestrator.store.get(ticket.id)
+
+    assert ticket.last_outcome == "failed"
+    assert ticket.consecutive_failures == 3
+    assert ticket.retry_after is None
+    assert retry_delays == pytest.approx([5, 30], abs=0.1)
+    assert select_candidates(workflow, [ticket], set()) == []
+    assert reset_failed_retry(ticket) is True
+    assert ticket.consecutive_failures == 0
+    assert select_candidates(workflow, [ticket], set())[0].target_status == "review"
 
 
 def test_schedule_preserves_execution_contract_when_prompt_changes_during_run(tmp_path: Path):
@@ -292,6 +330,25 @@ def test_execute_records_failed_run_history_when_prompt_metadata_breaks(tmp_path
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
     assert "prompt_path" not in ticket.run_history[-1]
     assert "prompt_version" not in ticket.run_history[-1]
+
+
+def test_schedule_retries_execution_contract_preparation_failure(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = BrokenPromptRunner()
+    ticket = orchestrator.store.create("delivery", "task", "Broken prompt", status="ready_for_review")
+
+    asyncio.run(orchestrator._schedule_once())
+
+    ticket = orchestrator.store.get(ticket.id)
+
+    assert ticket.status == "review"
+    assert ticket.active_run is None
+    assert ticket.last_outcome == "failed"
+    assert ticket.consecutive_failures == 1
+    assert ticket.retry_after is not None
+    assert ticket.id not in orchestrator.running
+    assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
+    assert ticket.run_history[-1]["summary"] == "prompt file disappeared"
 
 
 def test_completed_run_history_reuses_started_metadata_when_stage_definition_drifts(tmp_path: Path):

@@ -12,6 +12,8 @@ import yaml
 
 from .config import load_workflow
 
+RETRY_BACKOFF_SECONDS = (5, 30)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -36,6 +38,8 @@ class Ticket:
     active_run: str | None = None
     last_outcome: str | None = None
     last_summary: str | None = None
+    consecutive_failures: int = 0
+    retry_after: str | None = None
     run_history: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -55,6 +59,10 @@ class Ticket:
             payload.pop("run_history")
         if payload["implementation_required"] is None:
             payload.pop("implementation_required")
+        if payload["consecutive_failures"] == 0:
+            payload.pop("consecutive_failures")
+        if payload["retry_after"] is None:
+            payload.pop("retry_after")
         return payload
 
 
@@ -168,3 +176,38 @@ def next_status_for_ticket(store: TicketStore, ticket: Ticket) -> str | None:
     # Legacy tickets predate the explicit technical-analysis decision.
     linked = store.children_of(ticket.id, process="delivery")
     return "implementation" if linked else "ready_for_validation"
+
+
+def automatic_retry_available(ticket: Ticket) -> bool:
+    return ticket.last_outcome == "failed" and 0 <= ticket.consecutive_failures <= len(RETRY_BACKOFF_SECONDS)
+
+
+def automatic_retry_due(ticket: Ticket, now: datetime | None = None) -> bool:
+    if not automatic_retry_available(ticket):
+        return False
+    if ticket.retry_after is None:
+        return True
+    try:
+        retry_after = datetime.fromisoformat(ticket.retry_after)
+    except ValueError:
+        return False
+    if retry_after.tzinfo is None:
+        retry_after = retry_after.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return retry_after <= current
+
+
+def retry_exhausted(ticket: Ticket) -> bool:
+    return ticket.last_outcome == "failed" and ticket.consecutive_failures > len(RETRY_BACKOFF_SECONDS)
+
+
+def reset_failed_retry(ticket: Ticket) -> bool:
+    workflow = load_workflow(ticket.process)
+    stage = workflow.by_id.get(ticket.status)
+    if not stage or stage.kind != "agent" or ticket.active_run or not retry_exhausted(ticket):
+        return False
+    ticket.consecutive_failures = 0
+    ticket.retry_after = None
+    return True

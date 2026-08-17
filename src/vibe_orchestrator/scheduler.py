@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .config import Workflow
-from .tickets import Ticket
+from .tickets import Ticket, automatic_retry_due
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ def wip_count(tickets: list[Ticket], status: str) -> int:
     return sum(1 for t in tickets if t.status == status and not t.wip_exempt)
 
 
-def select_candidates(workflow: Workflow, tickets: list[Ticket], running_ids: set[str]) -> list[Candidate]:
+def select_candidates(workflow: Workflow, tickets: list[Ticket], running_ids: set[str], now: datetime | None = None) -> list[Candidate]:
     by_id = workflow.by_id
     candidates: list[Candidate] = []
     for ticket in tickets:
@@ -34,6 +34,8 @@ def select_candidates(workflow: Workflow, tickets: list[Ticket], running_ids: se
             continue
         if source.kind == "queue" and source.pull_to:
             target = by_id[source.pull_to]
+        elif source.kind == "agent" and automatic_retry_due(ticket, now):
+            target = source
         elif source.kind == "agent" and ticket.last_outcome and (source.outcomes or {}).get(ticket.last_outcome) == source.id:
             target = source
         else:

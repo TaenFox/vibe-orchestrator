@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from vibe_orchestrator.config import load_workflow
 from vibe_orchestrator.scheduler import select_candidates
 from vibe_orchestrator.tickets import Ticket
@@ -25,3 +27,24 @@ def test_parent_retries_same_agent_stage_after_rework():
 
 def test_parent_retries_same_agent_stage_after_correction():
     workflow=load_workflow("discovery"); parent=Ticket(id="DISC-1",process="discovery",type="idea",title="Idea",status="analysis",last_outcome="needs_correction",created_at="2026-01-01T00:00:00+00:00"); assert select_candidates(workflow,[parent],set())[0].target_status=="analysis"
+
+
+def test_failed_agent_retries_only_after_backoff():
+    workflow = load_workflow("delivery")
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    failed = ticket("FAILED", "review")
+    failed.last_outcome = "failed"
+    failed.consecutive_failures = 1
+    failed.retry_after = (now + timedelta(seconds=5)).isoformat()
+
+    assert select_candidates(workflow, [failed], set(), now=now) == []
+    assert select_candidates(workflow, [failed], set(), now=now + timedelta(seconds=5))[0].target_status == "review"
+
+
+def test_failed_agent_stops_after_retry_budget_is_exhausted():
+    workflow = load_workflow("delivery")
+    failed = ticket("FAILED", "review")
+    failed.last_outcome = "failed"
+    failed.consecutive_failures = 3
+
+    assert select_candidates(workflow, [failed], set()) == []

@@ -84,3 +84,25 @@ def test_ui_closes_confirmed_correction_instead_of_starting_analysis(tmp_path: P
 
     assert 'name="target" value="done"' in html
     assert "Переместить → Готово" in html
+
+
+def test_ui_shows_retry_state_and_manual_retry_action(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    pending = store.create("delivery", "task", "Temporary failure", status="review")
+    pending.last_outcome = "failed"
+    pending.consecutive_failures = 1
+    pending.retry_after = "2026-01-01T00:00:05+00:00"
+    store.save(pending)
+    exhausted = store.create("delivery", "task", "Permanent failure", status="acceptance")
+    exhausted.last_outcome = "failed"
+    exhausted.consecutive_failures = 3
+    store.save(exhausted)
+
+    html = render_board(store, load_all_workflows(), "delivery")
+
+    assert "ожидает автоповтора" in html
+    assert "Ошибок подряд" in html
+    assert "2026-01-01T00:00:05+00:00" in html
+    assert '<form method="post" action="/retry">' in html
+    assert "Повторить" in html

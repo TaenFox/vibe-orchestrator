@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -11,7 +12,7 @@ import yaml
 from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
 from .config import Stage, Workflow, load_all_workflows
 from .scheduler import select_candidates
-from .tickets import Ticket, TicketStore
+from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 
 log = logging.getLogger("vibe")
 
@@ -51,9 +52,36 @@ class Orchestrator:
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
             stage = workflow.by_id[candidate.target_status]
-            contract = self.runner.prepare_execution_contract(stage, uuid.uuid4().hex)
+            run_id = uuid.uuid4().hex
+            try:
+                contract = self.runner.prepare_execution_contract(stage, run_id)
+            except Exception as exc:
+                try:
+                    metadata = self.runner.execution_profile(stage)
+                except Exception:
+                    metadata = {}
+                if stage.prompt:
+                    metadata["prompt_path"] = stage.prompt
+                ticket.status = candidate.target_status
+                ticket.active_run = run_id
+                ticket.retry_after = None
+                self.store.record_run_event(
+                    ticket,
+                    run_id=run_id,
+                    stage_id=candidate.target_status,
+                    event="started",
+                    from_status=candidate.source_status,
+                    to_status=candidate.target_status,
+                    **metadata,
+                    **ticket_prompt_metadata(ticket),
+                )
+                self.store.save(ticket)
+                self._record_failure(ticket, run_id, candidate.target_status, exc, metadata)
+                log.exception("сбой подготовки запуска для %s", ticket.id)
+                continue
             ticket.status = candidate.target_status
             ticket.active_run = contract.run_id
+            ticket.retry_after = None
             self.store.record_run_event(
                 ticket,
                 run_id=contract.run_id,
@@ -90,20 +118,36 @@ class Orchestrator:
             else:
                 run_id = contract.run_id
                 metadata = metadata or self._run_traceability_metadata(ticket, run_id, stage, fallback=contract.history_metadata())
-            self.store.record_run_event(
-                ticket,
-                run_id=run_id,
-                stage_id=stage_id,
-                event="failed",
-                outcome="failed",
-                summary=str(exc),
-                **metadata,
-            )
-            ticket.active_run = None
-            ticket.last_outcome = "failed"
-            ticket.last_summary = str(exc)
-            self.store.save(ticket)
+            self._record_failure(ticket, run_id, stage_id, exc, metadata)
             log.exception("сбой воркера для %s", ticket_id)
+
+    def _record_failure(self, ticket: Ticket, run_id: str, stage_id: str, exc: Exception, metadata: dict[str, str]) -> None:
+        ticket.consecutive_failures += 1
+        retry_delay = (
+            RETRY_BACKOFF_SECONDS[ticket.consecutive_failures - 1]
+            if ticket.consecutive_failures <= len(RETRY_BACKOFF_SECONDS)
+            else None
+        )
+        ticket.retry_after = (
+            (datetime.now(timezone.utc) + timedelta(seconds=retry_delay)).isoformat()
+            if retry_delay is not None
+            else None
+        )
+        self.store.record_run_event(
+            ticket,
+            run_id=run_id,
+            stage_id=stage_id,
+            event="failed",
+            outcome="failed",
+            summary=str(exc),
+            consecutive_failures=ticket.consecutive_failures,
+            retry_after=ticket.retry_after,
+            **metadata,
+        )
+        ticket.active_run = None
+        ticket.last_outcome = "failed"
+        ticket.last_summary = str(exc)
+        self.store.save(ticket)
 
     def _apply_result(
         self,
@@ -136,6 +180,8 @@ class Orchestrator:
         )
         ticket.last_outcome = result.outcome
         ticket.last_summary = result.summary
+        ticket.consecutive_failures = 0
+        ticket.retry_after = None
         ticket.status = (stage.outcomes or {})[result.outcome]
         if active_run:
             self.store.record_run_event(

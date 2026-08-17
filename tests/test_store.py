@@ -36,6 +36,20 @@ def test_discovery_implementation_decision_is_persisted(tmp_path: Path):
     assert store.get(ticket.id).implementation_required is False
 
 
+def test_retry_state_is_persisted(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Retry later", status="review")
+    ticket.consecutive_failures = 2
+    ticket.retry_after = "2026-01-01T00:00:30+00:00"
+    store.save(ticket)
+
+    reloaded = store.get(ticket.id)
+
+    assert reloaded.consecutive_failures == 2
+    assert reloaded.retry_after == "2026-01-01T00:00:30+00:00"
+
+
 def test_loads_legacy_ticket_without_run_history(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()
