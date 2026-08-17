@@ -89,9 +89,9 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     dialog?.close();
     const process = form.elements.process?.value || 'discovery';
     save({{process}});
-    fetch('/create', {{method: 'POST', body: new URLSearchParams(new FormData(form)), redirect: 'manual'}})
+    fetch('/create', {{method: 'POST', body: new URLSearchParams(new FormData(form))}})
       .then(response => {{
-        if (response.status !== 303 && !response.ok) throw new Error('Не удалось создать тикет');
+        if (!response.ok) throw new Error('Не удалось создать тикет');
         form.reset();
         remember();
         return refresh(true);
