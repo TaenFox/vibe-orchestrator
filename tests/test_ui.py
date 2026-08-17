@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import urllib.request
+from html.parser import HTMLParser
 
 import pytest
 
@@ -10,6 +11,41 @@ from vibe_orchestrator.control import DeliverySessionStore
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.ui import AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, render_board
 from vibe_orchestrator.config import load_all_workflows
+
+
+class _CardDetailsParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.open_tags = []
+        self.details_in_card = 0
+        self.card_count = 0
+        self.in_card = False
+        self.card_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div" and "card" in attrs.get("class", "").split():
+            assert not self.in_card
+            self.in_card = True
+            self.card_count += 1
+        if tag == "details":
+            assert self.in_card
+            self.details_in_card += 1
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self.open_tags.append(tag)
+            if self.in_card:
+                self.card_depth += 1
+
+    def handle_endtag(self, tag):
+        assert self.open_tags and self.open_tags[-1] == tag
+        self.open_tags.pop()
+        if self.in_card:
+            self.card_depth -= 1
+        if tag == "details":
+            self.details_in_card -= 1
+        if self.in_card and self.card_depth == 0:
+            assert self.details_in_card == 0
+            self.in_card = False
 
 
 def test_board_handles_long_text_and_preserves_keyboard_mobile_contract(project):
@@ -28,6 +64,21 @@ def test_board_handles_long_text_and_preserves_keyboard_mobile_contract(project)
     assert "*:focus-visible" not in html
     assert "focus-visible" in html
     assert '<textarea name="description"' in html
+
+
+def test_board_keeps_details_balanced_between_multiple_cards(project):
+    store = TicketStore(project)
+    store.create("discovery", "idea", "Первая карточка", status="ready")
+    store.create("discovery", "idea", "Вторая карточка", status="ready")
+
+    page = render_board(store, load_all_workflows(), "discovery")
+    parser = _CardDetailsParser()
+    parser.feed(page)
+    parser.close()
+
+    assert parser.card_count == 2
+    assert parser.details_in_card == 0
+    assert parser.open_tags == []
 
 
 def test_ui_api_payload_covers_discovery_delivery_and_active_session(http_server, project):
