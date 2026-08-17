@@ -283,6 +283,8 @@ assert.equal(fetches, 3);
     assert completed.returncode == 0, completed.stderr
     assert "window.location.reload" not in AUTO_REFRESH_SCRIPT
     assert "/fragment?" in AUTO_REFRESH_SCRIPT
+    assert "redirect: 'manual'" not in AUTO_REFRESH_SCRIPT
+    assert "if (!response.ok) throw new Error('Не удалось создать тикет')" in AUTO_REFRESH_SCRIPT
 
 
 def test_ui_browser_contract_exposes_focusable_controls_and_mobile_column_width(project):

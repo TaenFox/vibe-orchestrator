@@ -52,7 +52,7 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     if (active) save({{focus: controls().indexOf(active)}});
   }};
   const refresh = async (force = false) => {{
-    if (document.hidden || document.querySelector('details[open]') || (!force && document.activeElement?.matches('input, select, textarea'))) return;
+    if (document.hidden || (!force && (document.querySelector('details[open]') || document.activeElement?.matches('input, select, textarea')))) return;
     remember(); const current = state();
     const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || '', active: current.active ? '1' : ''}});
     const refreshDrawer = async (ticketId) => {{
@@ -77,6 +77,28 @@ AUTO_REFRESH_SCRIPT = f"""<script>
       if (restored.ticket) await refreshDrawer(restored.ticket);
     }} catch (_) {{ /* transient server/network failure: keep the current board */ }}
   }};
+  let ticketCreationInProgress = false;
+  document.addEventListener('submit', event => {{
+    const form = event.target.closest?.('form[action="/create"]');
+    if (!form || ticketCreationInProgress) return;
+    event.preventDefault();
+    ticketCreationInProgress = true;
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    const dialog = form.closest('dialog');
+    dialog?.close();
+    const process = form.elements.process?.value || 'discovery';
+    save({{process}});
+    fetch('/create', {{method: 'POST', body: new URLSearchParams(new FormData(form))}})
+      .then(response => {{
+        if (!response.ok) throw new Error('Не удалось создать тикет');
+        form.reset();
+        remember();
+        return refresh(true);
+      }})
+      .catch(() => dialog?.showModal())
+      .finally(() => {{ ticketCreationInProgress = false; if (submit) submit.disabled = false; }});
+  }});
   document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) remember(); }});
   document.addEventListener('change', event => {{ if (event.target.matches('[data-board-mode], [data-board-search], [data-board-status], [data-board-active]')) {{ const value = event.target.value; save(event.target.matches('[data-board-mode]') ? {{mode:value}} : event.target.matches('[data-board-search]') ? {{search:value}} : event.target.matches('[data-board-status]') ? {{status:value}} : {{active:value === '1'}}); refresh(true); }} }});
   document.addEventListener('toggle', event => {{ if (event.target.matches('details[data-ticket-details]')) remember(); }}, true);
