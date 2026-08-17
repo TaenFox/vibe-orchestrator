@@ -54,7 +54,15 @@ class Orchestrator:
         for process, workflow in self.workflows.items():
             tickets = self.store.list(process)
             global_candidates.extend((workflow, c) for c in select_candidates(workflow, tickets, running_ids))
-        global_candidates.sort(key=lambda item: (0 if item[1].ticket.wip_exempt else 1, item[1].ticket.priority, item[1].ticket.created_at))
+        global_candidates.sort(
+            key=lambda item: (
+                -item[1].stage_position,
+                0 if item[1].ticket.wip_exempt else 1,
+                item[1].ticket.priority,
+                item[1].ticket.created_at,
+                item[1].ticket.id,
+            )
+        )
         for workflow, candidate in global_candidates[:slots]:
             if len(self.running) >= self._read_worker_limit():
                 break
