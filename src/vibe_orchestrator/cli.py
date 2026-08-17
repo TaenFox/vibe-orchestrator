@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import load_all_workflows
 from .control import WorkerControl
+from .git_trees import GitTreeManager
 from .orchestrator import Orchestrator
 from .tickets import TicketStore
 from .ui import serve
@@ -35,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     move = sub.add_parser("move", help="Переместить тикет вручную"); move.add_argument("project", type=project_path); move.add_argument("ticket"); move.add_argument("status")
     run = sub.add_parser("run", help="Запустить оркестратор"); run.add_argument("project", type=project_path); run.add_argument("--poll", type=float, default=2.0); run.add_argument("--max-agents", type=non_negative_int)
     workers = sub.add_parser("workers", help="Показать или изменить лимит воркеров"); workers.add_argument("project", type=project_path); workers.add_argument("count", nargs="?", type=non_negative_int)
+    release_retry = sub.add_parser("release-retry", help="Повторить интеграцию дерева тикета"); release_retry.add_argument("project", type=project_path); release_retry.add_argument("ticket")
     ui = sub.add_parser("ui", help="Запустить минимальный локальный Kanban UI"); ui.add_argument("project", type=project_path); ui.add_argument("--host", default="127.0.0.1"); ui.add_argument("--port", type=int, default=8765); ui.add_argument("--no-browser", action="store_true")
     return parser
 
@@ -58,5 +60,10 @@ def main() -> None:
         control = WorkerControl(args.project)
         if args.count is not None: control.set_limit(args.count)
         print(f"Лимит воркеров: {control.get_limit()}"); return
+    if args.command == "release-retry":
+        store = TicketStore(args.project); store.init(); manager = GitTreeManager(args.project, store)
+        if not manager.reset_integration(args.ticket): raise SystemExit("Для тикета нет ожидающего merge-конфликта")
+        ticket = store.get(args.ticket); ticket.last_outcome = None; ticket.last_summary = None; store.save(ticket)
+        print(f"Повтор интеграции разрешен: {args.ticket}"); return
     if args.command == "run": asyncio.run(Orchestrator(args.project, args.poll, args.max_agents).run_forever()); return
     if args.command == "ui": serve(args.project, args.host, args.port, not args.no_browser); return

@@ -92,7 +92,7 @@ class CodexRunner:
             reasoning_effort=profile["reasoning_effort"],
         )
 
-    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None) -> AgentResult:
+    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None) -> AgentResult:
         contract = contract or self.prepare_execution_contract(stage, run_id or ticket.active_run)
         run_id = contract.run_id
         run_dir = self.store.run_path(run_id)
@@ -102,7 +102,8 @@ class CodexRunner:
         manifest_path = run_dir / "run.json"
         prompt_path = run_dir / "prompt.txt"
         prompt_contract_path = run_dir / "prompt.contract.txt"
-        prompt = self._build_prompt(ticket, stage, contract)
+        workspace = workspace or self.store.project
+        prompt = self._build_prompt(ticket, stage, contract, workspace=workspace)
         prompt_path.write_text(prompt, encoding="utf-8")
         prompt_contract_path.write_text(contract.prompt_contract, encoding="utf-8")
         manifest = {
@@ -122,11 +123,12 @@ class CodexRunner:
             "model": contract.model,
             "reasoning_effort": contract.reasoning_effort,
             "ticket_snapshot": ticket_prompt_metadata(ticket),
+            "workspace_path": str(workspace),
         }
         cmd = self._build_exec_args(output_path, contract=contract)
         manifest["command"] = cmd
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        process = await asyncio.create_subprocess_exec(*cmd, cwd=self.store.project, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
         events_path.write_bytes(stdout or b"")
         if process.returncode != 0:
@@ -139,11 +141,12 @@ class CodexRunner:
         ticket: Ticket,
         stage: Stage,
         contract: ExecutionContract,
+        workspace: Path | None = None,
     ) -> str:
         return self._render_prompt(
             stage=stage,
             prompt_body=contract.prompt_body,
-            repository_root=str(self.store.project),
+            repository_root=str(workspace or self.store.project),
             run_id=contract.run_id,
             ticket_id=ticket.id,
             process=ticket.process,

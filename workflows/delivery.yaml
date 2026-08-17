@@ -39,6 +39,6 @@ stages:
     model: gpt-5.4
     reasoning_effort: low
     outcomes: {completed: ready_for_release, needs_rework: acceptance}
-  - {id: ready_for_release, title: Готово к релизу, kind: human, next: release}
-  - {id: release, title: Релиз, kind: human, next: done}
+  - {id: ready_for_release, title: Готово к релизу, kind: queue}
+  - {id: release, title: Релиз, kind: done}
   - {id: done, title: Готово, kind: done}

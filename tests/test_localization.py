@@ -122,6 +122,19 @@ def test_ui_shows_retry_state_and_manual_retry_action(tmp_path: Path):
     assert "Повторить" in html
 
 
+def test_ui_offers_release_retry_after_merge_conflict(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Conflict", status="ready_for_release")
+    ticket.last_outcome = "integration_conflict"
+    ticket.last_summary = "Конфликт в app.py"
+    store.save(ticket)
+
+    html = render_board(store, load_all_workflows(), "delivery")
+
+    assert "Повторить интеграцию" in html
+
+
 def test_ui_controls_worker_limit_including_zero(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()

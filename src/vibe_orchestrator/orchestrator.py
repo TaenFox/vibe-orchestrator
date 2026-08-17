@@ -12,6 +12,7 @@ import yaml
 from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
 from .config import Stage, Workflow, load_all_workflows
 from .control import WorkerControl
+from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 
@@ -30,6 +31,7 @@ class Orchestrator:
         self.worker_control.set_limit(initial_worker_limit)
         self.max_agents = initial_worker_limit
         self._last_worker_limit = initial_worker_limit
+        self.tree_manager = GitTreeManager(project, self.store)
         self.running: dict[str, asyncio.Task[None]] = {}
 
     async def run_forever(self) -> None:
@@ -61,7 +63,9 @@ class Orchestrator:
                 continue
             stage = workflow.by_id[candidate.target_status]
             run_id = uuid.uuid4().hex
+            workspace = None
             try:
+                workspace = self.tree_manager.workspace_for(ticket)
                 contract = self.runner.prepare_execution_contract(stage, run_id)
             except Exception as exc:
                 try:
@@ -101,7 +105,7 @@ class Orchestrator:
                 **ticket_prompt_metadata(ticket),
             )
             self.store.save(ticket)
-            task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract), name=ticket.id)
+            task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace), name=ticket.id)
             self.running[ticket.id] = task
             log.info("запущено %s -> %s", ticket.id, candidate.target_status)
 
@@ -112,7 +116,7 @@ class Orchestrator:
             self._last_worker_limit = worker_limit
         return worker_limit
 
-    async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str, contract: ExecutionContract | str) -> None:
+    async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str, contract: ExecutionContract | str, *, workspace: Path | None = None) -> None:
         ticket = self.store.get(ticket_id)
         stage = workflow.by_id[stage_id]
         metadata: dict[str, str] | None = None
@@ -122,7 +126,10 @@ class Orchestrator:
                 contract = self.runner.prepare_execution_contract(stage, contract)
             else:
                 metadata = contract.history_metadata()
-            result = await self.runner.run(ticket, stage, contract.run_id, contract=contract)
+            if workspace is None:
+                result = await self.runner.run(ticket, stage, contract.run_id, contract=contract)
+            else:
+                result = await self.runner.run(ticket, stage, contract.run_id, contract=contract, workspace=workspace)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
             log.info("завершено %s: %s -> %s", ticket_id, result.outcome, self.store.get(ticket_id).status)
         except Exception as exc:
@@ -317,6 +324,37 @@ class Orchestrator:
     def _reconcile_tickets(self) -> None:
         self._reconcile_blockers()
         self._reconcile_discovery_implementation()
+        self._reconcile_releases()
+
+    def _reconcile_releases(self) -> None:
+        if not self.tree_manager.enabled():
+            return
+        for ticket in self.store.list("delivery"):
+            if ticket.status != "ready_for_release" or ticket.active_run or ticket.blocked_by:
+                continue
+            record = self.tree_manager.trees.get(ticket.id)
+            if record and record.integration_status == "conflict":
+                continue
+            try:
+                self.tree_manager.release(ticket)
+            except GitTreeError as exc:
+                ticket.last_outcome = "integration_conflict"
+                ticket.last_summary = str(exc)
+                self.store.save(ticket)
+                log.error("конфликт интеграции для %s: %s", ticket.id, exc)
+                continue
+            ticket.status = "done"
+            ticket.last_outcome = "completed"
+            ticket.last_summary = "Дерево тикета интегрировано в целевую ветку"
+            self.store.record_run_event(
+                ticket,
+                run_id=f"release-{ticket.id}",
+                stage_id="release",
+                event="completed",
+                outcome="completed",
+                summary=ticket.last_summary,
+            )
+            self.store.save(ticket)
 
     def _reconcile_blockers(self) -> None:
         for ticket in self.store.list():
