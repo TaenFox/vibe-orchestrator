@@ -62,10 +62,10 @@ def test_ui_board_uses_russian_labels(tmp_path: Path):
     assert "агент выполняется" in html
     assert "без учета WIP" in html
     assert "приоритет 100" in html
-    assert "setInterval(() => {" in html
+    assert "setInterval(refresh" in html
     assert "document.querySelector('details[open]')" in html
-    assert "document.activeElement.matches('input, select, textarea')" in html
-    assert "автообновление 5с, пауза при открытых деталях" in html
+    assert "document.activeElement?.matches('input, select, textarea')" in html
+    assert "частичное автообновление 5с" in html
     assert "Подробнее" in html
     assert "Показать детали тикета" in html
     assert "Родитель" in html
