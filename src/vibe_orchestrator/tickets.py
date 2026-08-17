@@ -158,6 +158,8 @@ class TicketStore:
 def next_status_for_ticket(store: TicketStore, ticket: Ticket) -> str | None:
     workflow = load_workflow(ticket.process)
     stage = workflow.by_id[ticket.status]
+    if ticket.process == "discovery" and ticket.type == "correction" and stage.id == "human":
+        return "done"
     if ticket.process != "discovery" or stage.id != "investment_decision":
         return stage.next
     if ticket.implementation_required is not None:

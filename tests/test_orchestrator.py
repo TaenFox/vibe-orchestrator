@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
@@ -377,11 +379,13 @@ def test_failed_run_history_preserves_execution_contract_when_prompt_changes_dur
     assert [entry["prompt_path"] for entry in ticket.run_history] == ["delivery/review.md", "delivery/review.md"]
 
 
-def test_completed_rework_unblocks_parent(tmp_path: Path):
+@pytest.mark.parametrize("parent_stage", ["review", "acceptance"])
+def test_completed_rework_unblocks_parent(tmp_path: Path, parent_stage: str):
     orchestrator = Orchestrator(tmp_path)
-    parent = orchestrator.store.create("delivery", "task", "Parent task", status="review")
+    parent = orchestrator.store.create("delivery", "task", "Parent task", status=parent_stage)
     child = orchestrator.store.create("delivery", "rework", "Child rework", parent=parent.id, status="acceptance")
     parent.blocked_by = [child.id]
+    parent.last_outcome = "needs_rework"
     orchestrator.store.save(parent)
     child.active_run = "run-acceptance"
     orchestrator.store.save(child)
@@ -399,17 +403,11 @@ def test_completed_rework_unblocks_parent(tmp_path: Path):
 
     assert child.status == "ready_for_release"
     assert not orchestrator.store.is_done(child)
-    assert parent.blocked_by == [child.id]
-
-    child.status = "done"
-    orchestrator.store.save(child)
-    orchestrator._reconcile_tickets()
-
-    parent = orchestrator.store.get(parent.id)
-    child = orchestrator.store.get(child.id)
-
-    assert child.status == "done"
     assert parent.blocked_by == []
+    candidates = select_candidates(workflow, orchestrator.store.list("delivery"), set())
+    assert [(candidate.ticket.id, candidate.target_status) for candidate in candidates if candidate.ticket.id == parent.id] == [
+        (parent.id, parent_stage)
+    ]
     assert [entry["event"] for entry in child.run_history] == ["completed"]
     assert child.run_history[0]["run_id"] == "run-acceptance"
 
@@ -729,27 +727,41 @@ def test_implementation_marked_unnecessary_ignores_stale_delivery_children(tmp_p
     assert orchestrator.store.get(idea.id).status == "ready_for_validation"
 
 
-def test_analysis_needs_correction_creates_blocking_child(tmp_path: Path):
+@pytest.mark.parametrize("parent_stage", ["analysis", "technical_analysis"])
+def test_analysis_needs_correction_creates_blocking_child(tmp_path: Path, parent_stage: str):
     orchestrator = Orchestrator(tmp_path)
-    idea = orchestrator.store.create("discovery", "idea", "Clarify scope", status="analysis")
-    idea.active_run = "run-analysis"
+    idea = orchestrator.store.create("discovery", "idea", "Clarify scope", status=parent_stage)
+    idea.active_run = f"run-{parent_stage}"
     orchestrator.store.save(idea)
 
     workflow = load_workflow("discovery")
     orchestrator._apply_result(
         workflow,
         idea.id,
-        workflow.by_id["analysis"],
+        workflow.by_id[parent_stage],
         AgentResult(outcome="needs_correction", summary="Не хватает требований", details="Нужны ограничения по ролям."),
     )
 
     idea = orchestrator.store.get(idea.id)
     children = orchestrator.store.children_of(idea.id, process="discovery")
 
-    assert idea.status == "analysis"
+    assert idea.status == parent_stage
     assert len(children) == 1
     assert children[0].type == "correction"
     assert children[0].status == "ready"
     assert idea.blocked_by == [children[0].id]
     assert [entry["event"] for entry in idea.run_history] == ["completed"]
-    assert idea.run_history[0]["run_id"] == "run-analysis"
+    assert idea.run_history[0]["run_id"] == f"run-{parent_stage}"
+
+    correction = children[0]
+    correction.status = "done"
+    orchestrator.store.save(correction)
+    orchestrator._reconcile_tickets()
+
+    idea = orchestrator.store.get(idea.id)
+    candidates = select_candidates(workflow, orchestrator.store.list("discovery"), set())
+
+    assert idea.blocked_by == []
+    assert [(candidate.ticket.id, candidate.target_status) for candidate in candidates if candidate.ticket.id == idea.id] == [
+        (idea.id, parent_stage)
+    ]

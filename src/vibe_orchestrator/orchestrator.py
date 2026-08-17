@@ -151,7 +151,7 @@ class Orchestrator:
         ticket.active_run = None
         self._handle_follow_up(ticket, workflow, stage, result)
         self.store.save(ticket)
-        self._release_parent_if_done(ticket)
+        self._release_parent_if_resolved(ticket)
         self._reconcile_tickets()
 
     def _handle_follow_up(self, ticket: Ticket, workflow: Workflow, stage: Stage, result: AgentResult) -> None:
@@ -245,7 +245,7 @@ class Orchestrator:
         child.status = "done"
         self.store.save(child)
 
-    def _release_parent_if_done(self, ticket: Ticket) -> None:
+    def _release_parent_if_resolved(self, ticket: Ticket) -> None:
         if ticket.type not in {"rework", "correction"} or not ticket.parent or not self._is_resolved_blocker(ticket):
             return
         parent = self.store.get(ticket.parent)
@@ -301,10 +301,9 @@ class Orchestrator:
                 del self.running[ticket_id]
 
     def _is_resolved_blocker(self, ticket: Ticket) -> bool:
-        if ticket.type == "rework":
-            return self.store.is_done(ticket)
-        if ticket.type == "correction":
-            return self.store.is_done(ticket)
+        if ticket.process == "delivery" and ticket.type == "rework":
+            workflow = self.workflows[ticket.process]
+            return workflow.position(ticket.status) >= workflow.position("ready_for_release")
         return self.store.is_done(ticket)
 
     def _prompt_metadata(self, stage: Stage) -> dict[str, str]:

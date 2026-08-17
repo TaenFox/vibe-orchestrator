@@ -73,3 +73,14 @@ def test_ui_skips_implementation_when_technical_analysis_requires_no_delivery(tm
 
     assert 'name="target" value="ready_for_validation"' in html
     assert "Переместить → Готово к валидации" in html
+
+
+def test_ui_closes_confirmed_correction_instead_of_starting_analysis(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    store.create("discovery", "correction", "Уточнить требования", status="human")
+
+    html = render_board(store, load_all_workflows(), "discovery")
+
+    assert 'name="target" value="done"' in html
+    assert "Переместить → Готово" in html
