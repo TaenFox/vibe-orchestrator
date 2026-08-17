@@ -11,7 +11,7 @@ import yaml
 
 from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
 from .config import Stage, Workflow, load_all_workflows
-from .control import WorkerControl
+from .control import DeliverySessionControl, WorkerControl
 from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
@@ -27,6 +27,7 @@ class Orchestrator:
         self.runner = CodexRunner(self.store)
         self.poll_interval = poll_interval
         self.worker_control = WorkerControl(project)
+        self.delivery_session_control = DeliverySessionControl(project)
         initial_worker_limit = self.worker_control.get_limit() if max_agents is None else max_agents
         self.worker_control.set_limit(initial_worker_limit)
         self.max_agents = initial_worker_limit
@@ -51,10 +52,23 @@ class Orchestrator:
             return
         global_candidates = []
         running_ids = set(self.running)
+        delivery_session_participants = self.delivery_session_control.get_participants()
         for process, workflow in self.workflows.items():
             tickets = self.store.list(process)
-            global_candidates.extend((workflow, c) for c in select_candidates(workflow, tickets, running_ids))
-        global_candidates.sort(key=lambda item: (0 if item[1].ticket.wip_exempt else 1, item[1].ticket.priority, item[1].ticket.created_at))
+            session_participants = delivery_session_participants if process == "delivery" else None
+            global_candidates.extend(
+                (workflow, c)
+                for c in select_candidates(workflow, tickets, running_ids, session_participants=session_participants)
+            )
+        global_candidates.sort(
+            key=lambda item: (
+                -item[1].stage_position,
+                0 if item[1].ticket.wip_exempt else 1,
+                item[1].ticket.priority,
+                item[1].ticket.created_at,
+                item[1].ticket.id,
+            )
+        )
         for workflow, candidate in global_candidates[:slots]:
             if len(self.running) >= self._read_worker_limit():
                 break

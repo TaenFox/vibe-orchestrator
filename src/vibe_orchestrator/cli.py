@@ -5,8 +5,10 @@ import asyncio
 import logging
 from pathlib import Path
 
+import yaml
+
 from .config import load_all_workflows
-from .control import WorkerControl
+from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
 from .orchestrator import Orchestrator
 from .tickets import TicketStore
@@ -38,6 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
     workers = sub.add_parser("workers", help="Показать или изменить лимит воркеров"); workers.add_argument("project", type=project_path); workers.add_argument("count", nargs="?", type=non_negative_int)
     release_retry = sub.add_parser("release-retry", help="Повторить интеграцию дерева тикета"); release_retry.add_argument("project", type=project_path); release_retry.add_argument("ticket")
     ui = sub.add_parser("ui", help="Запустить минимальный локальный Kanban UI"); ui.add_argument("project", type=project_path); ui.add_argument("--host", default="127.0.0.1"); ui.add_argument("--port", type=int, default=8765); ui.add_argument("--no-browser", action="store_true")
+    session = sub.add_parser("session", aliases=["sessions"], help="Управление Delivery-сессиями")
+    session_sub = session.add_subparsers(dest="session_command", required=True)
+    create_session = session_sub.add_parser("create", help="Создать черновик сессии"); create_session.add_argument("project", type=project_path); create_session.add_argument("title", nargs="?", default=""); create_session.add_argument("--title", dest="title_option")
+    list_sessions = session_sub.add_parser("list", help="Показать сессии"); list_sessions.add_argument("project", type=project_path)
+    show_session = session_sub.add_parser("show", help="Показать сессию"); show_session.add_argument("project", type=project_path); show_session.add_argument("session")
+    for action, help_text in (("add", "Добавить тикет в черновик"), ("remove", "Убрать тикет из черновика")):
+        command = session_sub.add_parser(action, help=help_text); command.add_argument("project", type=project_path); command.add_argument("session"); command.add_argument("ticket")
+    activate_session = session_sub.add_parser("activate", help="Активировать сессию"); activate_session.add_argument("project", type=project_path); activate_session.add_argument("session")
+    for action, help_text in (("complete", "Завершить сессию"), ("cancel", "Отменить сессию")):
+        command = session_sub.add_parser(action, help=help_text); command.add_argument("project", type=project_path); command.add_argument("session"); command.add_argument("--override", "--override-reason", "--reason", dest="override_reason")
     return parser
 
 
@@ -46,6 +58,29 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.command == "init":
         store = TicketStore(args.project); store.init(); print(f"Инициализировано: {store.root}"); return
+    if args.command in {"session", "sessions"}:
+        store = TicketStore(args.project); store.init(); sessions = DeliverySessionStore(args.project)
+        try:
+            if args.session_command == "create":
+                title = args.title_option if args.title_option is not None else args.title
+                print(sessions.create(title).id); return
+            if args.session_command == "list":
+                for item in sessions.list(): print(f"{item.id:12} {item.status:10} {len(item.participants):3} {item.title}")
+                return
+            if args.session_command == "show":
+                print(yaml.safe_dump(sessions.get(args.session).to_dict(), sort_keys=False, allow_unicode=True), end=""); return
+            if args.session_command == "add":
+                print(f"{sessions.add(args.session, args.ticket, store).id}: добавлен {args.ticket}"); return
+            if args.session_command == "remove":
+                print(f"{sessions.remove(args.session, args.ticket).id}: удален {args.ticket}"); return
+            if args.session_command == "activate":
+                print(f"{sessions.activate(args.session, store).id}: active"); return
+            if args.session_command == "complete":
+                print(f"{sessions.complete(args.session, store, args.override_reason).id}: completed"); return
+            if args.session_command == "cancel":
+                print(f"{sessions.cancel(args.session, store, args.override_reason).id}: cancelled"); return
+        except SessionError as exc:
+            raise SystemExit(str(exc)) from exc
     if args.command == "add":
         store = TicketStore(args.project); store.init(); ticket = store.create(args.process, args.type, args.title, description=args.description, priority=args.priority, parent=args.parent, status=args.status); print(ticket.id); return
     if args.command == "list":

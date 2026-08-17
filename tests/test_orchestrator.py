@@ -108,6 +108,34 @@ async def _schedule_and_wait(orchestrator: Orchestrator, ticket_id: str) -> None
     await orchestrator.running[ticket_id]
 
 
+def test_schedule_prefers_later_workflow_stage_before_priority(tmp_path: Path):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        orchestrator.runner = SuccessfulRunner()
+        earlier = orchestrator.store.create(
+            "delivery",
+            "task",
+            "Earlier stage",
+            priority=1,
+            status="selected_for_session",
+        )
+        later = orchestrator.store.create(
+            "delivery",
+            "task",
+            "Later stage",
+            priority=100,
+            status="ready_for_review",
+        )
+
+        await orchestrator._schedule_once()
+
+        assert orchestrator.store.get(later.id).active_run is not None
+        assert orchestrator.store.get(earlier.id).active_run is None
+        await orchestrator.running[later.id]
+
+    asyncio.run(scenario())
+
+
 def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     parent = orchestrator.store.create("delivery", "task", "Fix API contract", status="review")
