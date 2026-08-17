@@ -106,6 +106,64 @@ def test_cancel_active_rejects_completed_timestamp(tmp_path: Path):
         store.save(session)
 
 
+@pytest.mark.parametrize(
+    ("status", "terminal_fields", "message"),
+    [
+        (
+            "completed",
+            {
+                "started_at": "2020-01-01T00:00:00+00:00",
+                "completed_at": "2020-01-01T00:00:00+00:00",
+                "cancelled_at": "2020-01-01T00:00:00+00:00",
+            },
+            "Completed sessions",
+        ),
+        (
+            "cancelled",
+            {
+                "cancelled_at": "2020-01-01T00:00:00+00:00",
+                "completed_at": "2020-01-01T00:00:00+00:00",
+            },
+            "Cancelled sessions",
+        ),
+    ],
+)
+def test_save_rejects_incompatible_terminal_timestamps_for_new_sessions(
+    tmp_path: Path,
+    status: str,
+    terminal_fields: dict[str, str],
+    message: str,
+):
+    _, store = stores(tmp_path)
+    session = DeliverySession(id=f"SESSION-{status.upper()}", status=status, **terminal_fields)
+
+    with pytest.raises(ValueError, match=message):
+        store.save(session)
+
+
+@pytest.mark.parametrize(
+    ("status", "fields", "message"),
+    [
+        ("active", {"ticket_ids": []}, "cannot be empty"),
+        ("active", {}, "started_at"),
+        ("completed", {}, "started_at"),
+        ("completed", {"started_at": "2020-01-01T00:00:00+00:00"}, "completed_at"),
+        ("cancelled", {}, "cancelled_at"),
+    ],
+)
+def test_save_rejects_invalid_new_lifecycle(
+    tmp_path: Path, status: str, fields: dict[str, object], message: str
+):
+    tickets, store = stores(tmp_path)
+    session = DeliverySession(id=f"SESSION-{status.upper()}", status=status, **fields)
+    if status == "active" and message == "started_at":
+        ticket = tickets.create("delivery", "story", "Active session")
+        session.ticket_ids = [ticket.id]
+
+    with pytest.raises(ValueError, match=message):
+        store.save(session)
+
+
 def test_invalid_type_duplicate_and_legacy_reload(tmp_path: Path):
     tickets, store = stores(tmp_path)
     discovery_ticket = tickets.create("discovery", "idea", "Wrong process")

@@ -174,6 +174,7 @@ class SessionStore:
         if session.status not in SESSION_STATUSES:
             raise ValueError(f"Invalid session status: {session.status!r}")
         self._validate_membership(session, session.ticket_ids)
+        self._validate_lifecycle(session)
         if session.status in OPEN_STATUSES:
             for other in self.list():
                 if other.id == session.id or other.status not in OPEN_STATUSES:
@@ -181,6 +182,56 @@ class SessionStore:
                 overlap = set(session.ticket_ids) & set(other.ticket_ids)
                 if overlap:
                     raise ValueError(f"Ticket already belongs to an open session: {sorted(overlap)[0]}")
+
+    def _validate_lifecycle(self, session: DeliverySession) -> None:
+        if session.status == "active" and not session.ticket_ids:
+            raise ValueError("Active sessions cannot be empty")
+        if session.status == "draft":
+            expected = (None, None, None)
+        elif session.status == "active":
+            expected = (session.started_at, None, None)
+        elif session.status == "completed":
+            expected = (session.started_at, session.completed_at, None)
+        else:
+            expected = (session.started_at, None, session.cancelled_at)
+
+        if session.status == "active" and not expected[0]:
+            raise ValueError("Active sessions require started_at")
+        if session.status == "completed" and not expected[0]:
+            raise ValueError("Completed sessions require started_at")
+        if session.status == "completed" and not expected[1]:
+            raise ValueError("Completed sessions require completed_at")
+        if session.status == "cancelled" and not expected[2]:
+            raise ValueError("Cancelled sessions require cancelled_at")
+        if session.status == "completed" and session.cancelled_at:
+            raise ValueError("Completed sessions cannot have cancelled_at")
+        if session.status == "cancelled" and session.completed_at:
+            raise ValueError("Cancelled sessions cannot have completed_at")
+        if session.status in {"draft", "active"} and (session.completed_at or session.cancelled_at):
+            raise ValueError("Open sessions cannot have terminal timestamps")
+        if session.status == "draft" and session.started_at:
+            raise ValueError("Draft sessions cannot have started_at")
+
+        timestamps = {
+            "created_at": session.created_at,
+            "started_at": session.started_at,
+            "completed_at": session.completed_at,
+            "cancelled_at": session.cancelled_at,
+        }
+        parsed_timestamps = {}
+        for name, value in timestamps.items():
+            if value is not None:
+                try:
+                    parsed_timestamps[name] = datetime.fromisoformat(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Session timestamps must be ISO-8601") from exc
+        try:
+            if parsed_timestamps.get("started_at") and parsed_timestamps.get("completed_at") is not None and parsed_timestamps["completed_at"] < parsed_timestamps["started_at"]:
+                raise ValueError("completed_at cannot precede started_at")
+            if parsed_timestamps.get("started_at") and parsed_timestamps.get("cancelled_at") is not None and parsed_timestamps["cancelled_at"] < parsed_timestamps["started_at"]:
+                raise ValueError("cancelled_at cannot precede started_at")
+        except TypeError as exc:
+            raise ValueError("Session timestamps must use compatible ISO-8601 offsets") from exc
 
     def _validate_transition(self, persisted: DeliverySession, session: DeliverySession) -> None:
         if persisted.id != session.id:
@@ -216,46 +267,8 @@ class SessionStore:
         if session.status == "cancelled" and persisted.status == "active" and session.completed_at is not None:
             raise ValueError("Cancelled active sessions cannot have completed_at")
 
-        if session.status == "draft":
-            expected = (None, None, None)
-        elif session.status == "active":
-            expected = (session.started_at, None, None)
-        elif session.status == "completed":
-            expected = (session.started_at, session.completed_at, None)
-        else:
-            expected = (session.started_at, None, session.cancelled_at)
-        if session.status == "active" and not expected[0]:
-            raise ValueError("Active sessions require started_at")
-        if session.status == "cancelled" and persisted.status == "active" and not expected[0]:
+        if session.status == "cancelled" and persisted.status == "active" and not session.started_at:
             raise ValueError("Cancelled active sessions require started_at")
-        if session.status == "completed" and not expected[1]:
-            raise ValueError("Completed sessions require completed_at")
-        if session.status == "cancelled" and not expected[2]:
-            raise ValueError("Cancelled sessions require cancelled_at")
-        if session.status in {"draft", "active"} and (session.completed_at or session.cancelled_at):
-            raise ValueError("Open sessions cannot have terminal timestamps")
-        if session.status == "draft" and session.started_at:
-            raise ValueError("Draft sessions cannot have started_at")
-        timestamps = {
-            "created_at": session.created_at,
-            "started_at": session.started_at,
-            "completed_at": session.completed_at,
-            "cancelled_at": session.cancelled_at,
-        }
-        parsed_timestamps = {}
-        for name, value in timestamps.items():
-            if value is not None:
-                try:
-                    parsed_timestamps[name] = datetime.fromisoformat(value)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("Session timestamps must be ISO-8601") from exc
-        try:
-            if parsed_timestamps.get("started_at") and parsed_timestamps.get("completed_at") is not None and parsed_timestamps["completed_at"] < parsed_timestamps["started_at"]:
-                raise ValueError("completed_at cannot precede started_at")
-            if parsed_timestamps.get("started_at") and parsed_timestamps.get("cancelled_at") is not None and parsed_timestamps["cancelled_at"] < parsed_timestamps["started_at"]:
-                raise ValueError("cancelled_at cannot precede started_at")
-        except TypeError as exc:
-            raise ValueError("Session timestamps must use compatible ISO-8601 offsets") from exc
 
     @contextmanager
     def _save_lock(self):
