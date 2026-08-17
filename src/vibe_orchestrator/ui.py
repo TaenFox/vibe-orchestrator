@@ -6,13 +6,14 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 from .config import load_all_workflows
 from .control import WorkerControl
 from .git_trees import GitTreeManager
 from .tickets import TicketStore, automatic_retry_available, next_status_for_ticket, reset_failed_retry, retry_exhausted
 
-CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}body{margin:0}header{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center}header button{margin-top:0}input[type=number]{width:52px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:5px}a{color:#58a6ff;text-decoration:none}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap}.details-row .meta{display:block;margin-bottom:2px}"""
+CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}body{margin:0}header{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center}header button{margin-top:0}input,select{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px}input[type=number]{width:52px}.create-form{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:12px 14px;border-bottom:1px solid #30363d}.create-form input[name=title]{min-width:220px}.create-form input[name=description]{min-width:220px}a{color:#58a6ff;text-decoration:none}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 72px)}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap}.details-row .meta{display:block;margin-bottom:2px}"""
 AUTO_REFRESH_SECONDS = 5
 AUTO_REFRESH_SCRIPT = f"""<script>
 setInterval(() => {{
@@ -24,7 +25,7 @@ setInterval(() => {{
 </script>"""
 
 
-def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
+def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
     store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -36,6 +37,20 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
             self.send_error(404)
         def do_POST(self):
             length = int(self.headers.get("content-length", "0")); data = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+            if self.path == "/create":
+                try:
+                    process = data["process"][0]
+                    ticket_type = data["type"][0].strip()
+                    title = data["title"][0].strip()
+                    description = data.get("description", [""])[0].strip()
+                    priority = int(data.get("priority", ["100"])[0])
+                    parent = data.get("parent", [""])[0].strip() or None
+                    if process not in workflows or not ticket_type or not title or priority < 0:
+                        raise ValueError
+                    ticket = store.create(process, ticket_type, title, description=description, priority=priority, parent=parent)
+                except (KeyError, ValueError):
+                    return self.send_error(400, "Некорректные данные тикета")
+                return self._redirect(f"/?process={urllib.parse.quote(ticket.process)}")
             if self.path == "/move":
                 ticket = store.get(data["id"][0]); workflow = workflows[ticket.process]; target = next_status_for_ticket(store, ticket); requested = data.get("target", [target])[0]
                 if not target or requested != target or target not in workflow.by_id: return self.send_error(400, "Переход недоступен")
@@ -64,10 +79,28 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
         def _json(self,obj):
             payload=json.dumps(obj,ensure_ascii=False,indent=2).encode("utf-8"); self.send_response(200); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload)
         def _redirect(self,location): self.send_response(303); self.send_header("Location",location); self.end_headers()
-    server=ThreadingHTTPServer((host,port),Handler); url=f"http://{host}:{port}"; print(f"Интерфейс: {url}")
+
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> tuple[ThreadingHTTPServer, Thread]:
+    server = _build_server(project, host, port)
+    url = f"http://{host}:{port}"
+    print(f"Интерфейс: {url}")
+    if open_browser: webbrowser.open(url)
+    thread = Thread(target=server.serve_forever, name="vibe-ui", daemon=True)
+    thread.start()
+    return server, thread
+
+
+def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
+    server = _build_server(project, host, port)
+    url = f"http://{host}:{port}"
+    print(f"Интерфейс: {url}")
     if open_browser: webbrowser.open(url)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
+    finally: server.server_close()
 
 
 def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None) -> str:
@@ -92,7 +125,19 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
     worker_limit = worker_control.get_limit()
     active_workers = sum(1 for ticket in store.list() if ticket.active_run)
     worker_form = f'<form method="post" action="/workers"><input type="hidden" name="process" value="{html.escape(workflow.id)}"><label class="meta">воркеры <input type="number" name="count" min="0" value="{worker_limit}"></label><button>Применить</button><span class="meta">активно {active_workers}</span></form>'
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header><main class="board">{"".join(columns)}</main></body></html>'
+    process_options = "".join(f'<option value="{html.escape(item.id)}"{(" selected" if item.id == workflow.id else "")}>{html.escape(item.title)}</option>' for item in workflows.values())
+    create_form = (
+        '<form class="create-form" method="post" action="/create">'
+        '<strong>Новый тикет</strong>'
+        f'<select name="process">{process_options}</select>'
+        '<input name="type" placeholder="тип, например idea" required>'
+        '<input name="title" placeholder="заголовок" required>'
+        '<input name="description" placeholder="описание">'
+        '<input name="priority" type="number" min="0" value="100" title="Приоритет">'
+        '<input name="parent" placeholder="родительский ID, необязательно">'
+        '<button>Создать</button></form>'
+    )
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}<main class="board">{"".join(columns)}</main></body></html>'
 
 
 def _ticket_details_html(ticket, tree=None) -> str:
