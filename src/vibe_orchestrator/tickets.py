@@ -14,6 +14,11 @@ import yaml
 from .config import load_workflow
 
 RETRY_BACKOFF_SECONDS = (5, 30)
+TICKET_TYPES_BY_PROCESS = {
+    "discovery": ("idea", "correction"),
+    "delivery": ("story", "task", "bug", "rework"),
+    "process_management": ("audit", "planning", "estimation"),
+}
 log = logging.getLogger("vibe")
 
 
