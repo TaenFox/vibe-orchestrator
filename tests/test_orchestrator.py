@@ -20,6 +20,10 @@ CONFIRMED_USAGE = {
 }
 
 
+def run_events(ticket):
+    return [entry for entry in ticket.run_history if entry["event"] != "created"]
+
+
 class SuccessfulRunner:
     def available(self):
         return True
@@ -170,8 +174,8 @@ def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     assert children[0].status == "selected_for_session"
     assert children[0].rework_stage == "review"
     assert children[0].wip_exempt is True
-    assert [entry["event"] for entry in parent.run_history] == ["completed"]
-    assert all(entry["run_id"] == "run-review" for entry in parent.run_history)
+    assert [entry["event"] for entry in run_events(parent)] == ["completed"]
+    assert all(entry["run_id"] == "run-review" for entry in run_events(parent))
 
 
 def test_schedule_records_started_and_completed_run_history(tmp_path: Path):
@@ -195,21 +199,21 @@ def test_schedule_records_started_and_completed_run_history(tmp_path: Path):
     assert ticket.consecutive_failures == 0
     assert ticket.retry_after is None
     assert ticket.status == "ready_for_acceptance"
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "completed"]
-    assert ticket.run_history[0]["run_id"] == ticket.run_history[1]["run_id"]
-    assert ticket.run_history[0]["event"] == "started"
-    assert ticket.run_history[0]["artifacts_path"].endswith(ticket.run_history[0]["run_id"])
-    assert ticket.run_history[0]["prompt_path"] == "delivery/review.md"
-    assert ticket.run_history[0]["prompt_version"] == "sha256:stub"
-    assert ticket.run_history[0]["model"] == "gpt-5.6-luna"
-    assert ticket.run_history[0]["reasoning_effort"] == "low"
-    assert ticket.run_history[0]["ticket_title"] == "Ship durable history"
-    assert ticket.run_history[0]["ticket_priority"] == "100"
-    assert ticket.run_history[0]["ticket_parent"] == "none"
-    assert ticket.run_history[0]["ticket_description"] == "(пусто)"
-    assert ticket.run_history[1]["to_status"] == "ready_for_acceptance"
-    assert ticket.run_history[1]["ticket_title"] == "Ship durable history"
-    assert ticket.run_history[1]["ticket_priority"] == "100"
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "completed"]
+    assert run_events(ticket)[0]["run_id"] == run_events(ticket)[1]["run_id"]
+    assert run_events(ticket)[0]["event"] == "started"
+    assert run_events(ticket)[0]["artifacts_path"].endswith(run_events(ticket)[0]["run_id"])
+    assert run_events(ticket)[0]["prompt_path"] == "delivery/review.md"
+    assert run_events(ticket)[0]["prompt_version"] == "sha256:stub"
+    assert run_events(ticket)[0]["model"] == "gpt-5.6-luna"
+    assert run_events(ticket)[0]["reasoning_effort"] == "low"
+    assert run_events(ticket)[0]["ticket_title"] == "Ship durable history"
+    assert run_events(ticket)[0]["ticket_priority"] == "100"
+    assert run_events(ticket)[0]["ticket_parent"] == "none"
+    assert run_events(ticket)[0]["ticket_description"] == "(пусто)"
+    assert run_events(ticket)[1]["to_status"] == "ready_for_acceptance"
+    assert run_events(ticket)[1]["ticket_title"] == "Ship durable history"
+    assert run_events(ticket)[1]["ticket_priority"] == "100"
 
 
 def test_execute_records_failed_run_history(tmp_path: Path):
@@ -229,7 +233,7 @@ def test_execute_records_failed_run_history(tmp_path: Path):
     assert ticket.last_summary == "agent crashed"
     assert ticket.consecutive_failures == 1
     assert ticket.retry_after is not None
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "failed"]
     assert ticket.run_history[-1]["summary"] == "agent crashed"
     assert ticket.run_history[-1]["prompt_path"] == "delivery/review.md"
     assert ticket.run_history[-1]["prompt_version"] == "sha256:stub"
@@ -276,9 +280,9 @@ def test_schedule_preserves_execution_contract_when_prompt_changes_during_run(tm
 
     ticket = orchestrator.store.get(ticket.id)
 
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "completed"]
-    assert [entry["prompt_version"] for entry in ticket.run_history] == ["sha256:initial", "sha256:initial"]
-    assert [entry["prompt_path"] for entry in ticket.run_history] == ["delivery/review.md", "delivery/review.md"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "completed"]
+    assert [entry["prompt_version"] for entry in run_events(ticket)] == ["sha256:initial", "sha256:initial"]
+    assert [entry["prompt_path"] for entry in run_events(ticket)] == ["delivery/review.md", "delivery/review.md"]
 
 
 def test_run_history_preserves_ticket_snapshot_after_later_ticket_edits(tmp_path: Path):
@@ -305,11 +309,11 @@ def test_run_history_preserves_ticket_snapshot_after_later_ticket_edits(tmp_path
 
     reloaded = orchestrator.store.get(ticket.id)
 
-    assert [entry["event"] for entry in reloaded.run_history] == ["started", "completed"]
-    assert all(entry["ticket_title"] == "Original title" for entry in reloaded.run_history)
-    assert all(entry["ticket_priority"] == "42" for entry in reloaded.run_history)
-    assert all(entry["ticket_parent"] == "DEL-PARENT" for entry in reloaded.run_history)
-    assert all(entry["ticket_description"] == "Original description" for entry in reloaded.run_history)
+    assert [entry["event"] for entry in run_events(reloaded)] == ["started", "completed"]
+    assert all(entry["ticket_title"] == "Original title" for entry in run_events(reloaded))
+    assert all(entry["ticket_priority"] == "42" for entry in run_events(reloaded))
+    assert all(entry["ticket_parent"] == "DEL-PARENT" for entry in run_events(reloaded))
+    assert all(entry["ticket_description"] == "Original description" for entry in run_events(reloaded))
 
 
 def test_schedule_preserves_last_terminal_outcome_until_run_finishes(tmp_path: Path):
@@ -329,7 +333,7 @@ def test_schedule_preserves_last_terminal_outcome_until_run_finishes(tmp_path: P
         assert scheduled.active_run is not None
         assert scheduled.last_outcome == "needs_rework"
         assert scheduled.last_summary == "Regression found"
-        assert [entry["event"] for entry in scheduled.run_history] == ["started"]
+        assert [entry["event"] for entry in run_events(scheduled)] == ["started"]
 
         runner.release.set()
         await orchestrator.running[ticket.id]
@@ -362,7 +366,7 @@ def test_execute_records_failed_run_history_when_prompt_metadata_breaks(tmp_path
     assert ticket.active_run is None
     assert ticket.last_outcome == "failed"
     assert ticket.last_summary == "prompt file disappeared"
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "failed"]
     assert ticket.run_history[-1]["summary"] == "prompt file disappeared"
     assert ticket.run_history[-1]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
@@ -385,7 +389,7 @@ def test_schedule_retries_execution_contract_preparation_failure(tmp_path: Path)
     assert ticket.consecutive_failures == 1
     assert ticket.retry_after is not None
     assert ticket.id not in orchestrator.running
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "failed"]
     assert ticket.run_history[-1]["summary"] == "prompt file disappeared"
 
 
@@ -421,7 +425,7 @@ def test_completed_run_history_reuses_started_metadata_when_stage_definition_dri
 
     ticket = orchestrator.store.get(ticket.id)
 
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "completed"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "completed"]
     assert ticket.run_history[-1]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
     assert ticket.run_history[-1]["prompt_path"] == "delivery/review.md"
@@ -453,7 +457,7 @@ def test_failed_run_history_reuses_started_metadata_when_stage_definition_drifts
 
     ticket = orchestrator.store.get(ticket.id)
 
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "failed"]
     assert ticket.run_history[-1]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
     assert ticket.run_history[-1]["prompt_path"] == "delivery/review.md"
@@ -469,9 +473,9 @@ def test_failed_run_history_preserves_execution_contract_when_prompt_changes_dur
 
     ticket = orchestrator.store.get(ticket.id)
 
-    assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
-    assert [entry["prompt_version"] for entry in ticket.run_history] == ["sha256:stub", "sha256:stub"]
-    assert [entry["prompt_path"] for entry in ticket.run_history] == ["delivery/review.md", "delivery/review.md"]
+    assert [entry["event"] for entry in run_events(ticket)] == ["started", "failed"]
+    assert [entry["prompt_version"] for entry in run_events(ticket)] == ["sha256:stub", "sha256:stub"]
+    assert [entry["prompt_path"] for entry in run_events(ticket)] == ["delivery/review.md", "delivery/review.md"]
 
 
 @pytest.mark.parametrize("parent_stage", ["review", "acceptance"])
@@ -503,8 +507,8 @@ def test_completed_rework_unblocks_parent(tmp_path: Path, parent_stage: str):
     assert [(candidate.ticket.id, candidate.target_status) for candidate in candidates if candidate.ticket.id == parent.id] == [
         (parent.id, parent_stage)
     ]
-    assert [entry["event"] for entry in child.run_history] == ["completed"]
-    assert child.run_history[0]["run_id"] == f"run-{parent_stage}"
+    assert [entry["event"] for entry in run_events(child)] == ["completed"]
+    assert run_events(child)[0]["run_id"] == f"run-{parent_stage}"
 
 
 def test_technical_analysis_creates_delivery_children_and_waits_for_completion(tmp_path: Path):
@@ -549,8 +553,8 @@ delivery_tickets:
     assert all(child.mandatory is True for child in children)
     assert idea.implementation_required is True
     assert next_status_for_ticket(orchestrator.store, idea) == "implementation"
-    assert [entry["event"] for entry in idea.run_history] == ["completed"]
-    assert idea.run_history[0]["run_id"] == "run-ta"
+    assert [entry["event"] for entry in run_events(idea)] == ["completed"]
+    assert run_events(idea)[0]["run_id"] == "run-ta"
 
     idea.status = "implementation"
     orchestrator.store.save(idea)
@@ -644,7 +648,7 @@ delivery_tickets: []
     updated = orchestrator.store.get(idea.id)
 
     assert updated.last_outcome == "needs_correction"
-    assert updated.run_history[0]["token_usage"] == CONFIRMED_USAGE
+    assert run_events(updated)[0]["token_usage"] == CONFIRMED_USAGE
 
 
 def test_technical_analysis_retry_reuses_existing_delivery_children(tmp_path: Path):
@@ -874,8 +878,8 @@ def test_analysis_needs_correction_creates_blocking_child(tmp_path: Path, parent
     assert children[0].status == expected_status
     assert children[0].correction_stage == parent_stage
     assert idea.blocked_by == [children[0].id]
-    assert [entry["event"] for entry in idea.run_history] == ["completed"]
-    assert idea.run_history[0]["run_id"] == f"run-{parent_stage}"
+    assert [entry["event"] for entry in run_events(idea)] == ["completed"]
+    assert run_events(idea)[0]["run_id"] == f"run-{parent_stage}"
 
     correction = children[0]
     correction.status = "done"

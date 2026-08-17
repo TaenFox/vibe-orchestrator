@@ -7,6 +7,7 @@ from vibe_orchestrator.tickets import TicketStore
 
 def test_create_and_reload(tmp_path: Path):
     store=TicketStore(tmp_path); store.init(); created=store.create("discovery","idea","Test idea",description="Hello"); loaded=store.get(created.id); assert loaded.title=="Test idea"; assert loaded.status=="todo"; assert loaded.description=="Hello"
+    assert loaded.run_history == [{"event": "created", "timestamp": loaded.run_history[0]["timestamp"], "ticket_type": "idea", "stage": "todo"}]
 
 
 def test_rework_defaults_to_wip_exempt(tmp_path: Path):
@@ -106,13 +107,13 @@ def test_save_persists_run_history_with_artifact_path(tmp_path: Path):
 
     reloaded = store.get(ticket.id)
 
-    assert [entry["event"] for entry in reloaded.run_history] == ["started", "completed"]
-    assert all(entry["artifacts_path"] == ".vibe/runs/run-123" for entry in reloaded.run_history)
-    assert all(entry["prompt_path"] == "delivery/review.md" for entry in reloaded.run_history)
-    assert all(entry["prompt_version"] == "sha256:abc" for entry in reloaded.run_history)
-    assert all(entry["ticket_title"] == "Track runs" for entry in reloaded.run_history)
-    assert all(entry["ticket_priority"] == "100" for entry in reloaded.run_history)
-    assert reloaded.to_dict()["run_history"][1]["summary"] == "Проверка пройдена"
+    assert [entry["event"] for entry in reloaded.run_history if entry["event"] != "created"] == ["started", "completed"]
+    assert all(entry["artifacts_path"] == ".vibe/runs/run-123" for entry in reloaded.run_history if entry["event"] != "created")
+    assert all(entry["prompt_path"] == "delivery/review.md" for entry in reloaded.run_history if entry["event"] != "created")
+    assert all(entry["prompt_version"] == "sha256:abc" for entry in reloaded.run_history if entry["event"] != "created")
+    assert all(entry["ticket_title"] == "Track runs" for entry in reloaded.run_history if entry["event"] != "created")
+    assert all(entry["ticket_priority"] == "100" for entry in reloaded.run_history if entry["event"] != "created")
+    assert [entry for entry in reloaded.run_history if entry["event"] != "created"][1]["summary"] == "Проверка пройдена"
 
 
 def test_children_of_returns_creation_order_instead_of_ticket_id_order(tmp_path: Path):
@@ -135,12 +136,16 @@ def test_run_history_is_persisted_with_artifacts_path(tmp_path: Path):
 
     reloaded=store.get(ticket.id)
 
-    assert reloaded.run_history==[{
+    assert reloaded.run_history[0]["event"] == "created"
+    assert reloaded.run_history[0]["ticket_type"] == "task"
+    event = reloaded.run_history[1]
+    assert event=={
         "run_id":"run-42",
         "stage":"development",
         "event":"started",
-        "timestamp":reloaded.run_history[0]["timestamp"],
+        "timestamp":event["timestamp"],
         "artifacts_path":".vibe/runs/run-42",
+        "ticket_type":"task",
         "model":"gpt-5.6-luna",
         "reasoning_effort":"high",
-    }]
+    }

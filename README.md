@@ -254,7 +254,8 @@ Source of truth для аудита разделен на два слоя:
 
 - `active_run` — только указатель на текущий незавершенный запуск. После завершения или ошибки поле очищается.
 - `run_history[].run_id` — единый идентификатор запуска, одинаковый для тикета, prompt и каталога `.vibe/runs/<run_id>`.
-- `run_history[].event` — durable timeline (`started`, `completed`, `failed`) для тикета; именно она нужна для ретроспективы после очистки `active_run`.
+- `run_history[].event` — durable timeline (`created`, `started`, `completed`, `failed`) для тикета; именно она нужна для ретроспективы после очистки `active_run`.
+- `run_history[].ticket_type` — тип тикета, к которому относится событие.
 - `run_history[].artifacts_path` — относительный путь к локальным артефактам этого запуска.
 - `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
 - `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.

@@ -112,7 +112,7 @@ class Orchestrator:
                 )
                 self.store.save(ticket)
                 self._record_failure(ticket, run_id, candidate.target_status, exc, metadata)
-                log.exception("сбой подготовки запуска для %s", ticket.id)
+                log.exception("сбой подготовки запуска для %s (%s)", ticket.id, ticket.type)
                 continue
             ticket.status = candidate.target_status
             ticket.active_run = contract.run_id
@@ -130,7 +130,7 @@ class Orchestrator:
             self.store.save(ticket)
             task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace), name=ticket.id)
             self.running[ticket.id] = task
-            log.info("запущено %s -> %s", ticket.id, candidate.target_status)
+            log.info("запущено %s (%s) -> %s", ticket.id, ticket.type, candidate.target_status)
 
     def _read_worker_limit(self) -> int:
         worker_limit = self.worker_control.get_limit(self._last_worker_limit)
@@ -154,7 +154,7 @@ class Orchestrator:
             else:
                 result = await self.runner.run(ticket, stage, contract.run_id, contract=contract, workspace=workspace)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
-            log.info("завершено %s: %s -> %s", ticket_id, result.outcome, self.store.get(ticket_id).status)
+            log.info("завершено %s (%s): %s -> %s", ticket_id, self.store.get(ticket_id).type, result.outcome, self.store.get(ticket_id).status)
         except Exception as exc:
             ticket = self.store.get(ticket_id)
             if isinstance(contract, str):
@@ -164,7 +164,7 @@ class Orchestrator:
                 run_id = contract.run_id
                 metadata = metadata or self._run_traceability_metadata(ticket, run_id, stage, fallback=contract.history_metadata())
             self._record_failure(ticket, run_id, stage_id, exc, metadata)
-            log.exception("сбой воркера для %s", ticket_id)
+            log.exception("сбой воркера для %s (%s)", ticket_id, ticket.type)
 
     def _record_failure(self, ticket: Ticket, run_id: str, stage_id: str, exc: Exception, metadata: dict[str, str]) -> None:
         ticket.consecutive_failures += 1
@@ -407,7 +407,7 @@ class Orchestrator:
                 ticket.last_outcome = "integration_conflict"
                 ticket.last_summary = str(exc)
                 self.store.save(ticket)
-                log.error("конфликт интеграции для %s: %s", ticket.id, exc)
+                log.error("конфликт интеграции для %s (%s): %s", ticket.id, ticket.type, exc)
                 continue
             ticket.status = "done"
             ticket.last_outcome = "completed"
