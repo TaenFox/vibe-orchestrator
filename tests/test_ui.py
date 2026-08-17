@@ -211,21 +211,23 @@ def test_ui_browser_behaviour_uses_partial_refresh_and_guards_input():
 
     script = re.search(r"<script>(.*?)</script>", AUTO_REFRESH_SCRIPT, re.DOTALL).group(1)
     harness = f"""
-const assert = require('node:assert/strict');
+    (async () => {{
+    const assert = require('node:assert/strict');
 let timer;
     let fetches = 0;
     let openDetails = false;
     let active = null;
     globalThis.sessionStorage = {{ getItem: () => null, setItem: () => {{}} }};
     globalThis.location = {{ search: '?process=discovery' }};
-globalThis.setInterval = (callback, milliseconds) => {{ timer = {{callback, milliseconds}}; }};
+    globalThis.setInterval = (callback, milliseconds) => {{ timer = {{callback, milliseconds}}; }};
     globalThis.window = {{ scrollTo: () => {{}} }};
+    let changeHandler;
     globalThis.document = {{
       hidden: false,
       get activeElement() {{ return active; }},
       querySelector: (selector) => selector === 'details[open]' && openDetails ? {{}} : null,
       querySelectorAll: () => [],
-      addEventListener: () => {{}},
+      addEventListener: (event, handler) => {{ if (event === 'change') changeHandler = handler; }},
       scrollingElement: {{ scrollLeft: 0, scrollTop: 0 }}
     }};
     globalThis.fetch = async () => {{ fetches++; return {{ ok: true, text: async () => '<main class="board"></main>' }}; }};
@@ -246,9 +248,14 @@ active = input;
 timer.callback();
     assert.equal(fetches, 1);
 assert.equal(document.activeElement.value, 'введенный текст');
+changeHandler({{target: {{matches: (selector) => selector.includes('[data-board-search]'), value: 'поиск'}}}});
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(fetches, 2);
 active = null;
 timer.callback();
-assert.equal(fetches, 2);
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(fetches, 3);
+    }})();
 """
     completed = subprocess.run([node, "--eval", harness], capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stderr
