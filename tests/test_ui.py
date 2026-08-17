@@ -127,8 +127,10 @@ def test_ticket_api_exposes_latest_usage_and_confirmed_aggregate(http_server, pr
         payload = json.load(response)
     item = next(item for item in payload if item["id"] == ticket.id)
 
-    assert item["token_usage"]["total_tokens"] == 14
-    assert item["token_usage"]["captured_at"] == "2026-08-17T10:00:00+00:00"
+    assert item["token_usage"] == {
+        "input_tokens": None, "output_tokens": None, "total_tokens": None,
+        "source": "unknown", "captured_at": None,
+    }
     assert item["token_usage_aggregate"] == {
         "confirmed_runs": 1, "input_tokens": 10, "output_tokens": 4,
         "total_tokens": 14, "latest_captured_at": "2026-08-17T10:00:00+00:00",

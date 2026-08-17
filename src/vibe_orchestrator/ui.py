@@ -196,7 +196,8 @@ def _ticket_session_badge(ticket, session_store) -> str:
 def _ticket_usage(ticket) -> tuple[dict, dict]:
     terminal = [entry for entry in ticket.run_history if entry.get("event") in {"completed", "failed"}]
     confirmed = [entry.get("token_usage") for entry in terminal if is_confirmed_token_usage(entry.get("token_usage"))]
-    latest = next((usage for usage in reversed(confirmed)), unknown_token_usage())
+    latest_candidate = terminal[-1].get("token_usage") if terminal else None
+    latest = latest_candidate if is_confirmed_token_usage(latest_candidate) else unknown_token_usage()
     return latest, {
         "confirmed_runs": len(confirmed),
         "input_tokens": sum(usage["input_tokens"] for usage in confirmed),
