@@ -203,6 +203,10 @@ class SessionStore:
             raise ValueError("Completed sessions require completed_at")
         if session.status == "cancelled" and not expected[2]:
             raise ValueError("Cancelled sessions require cancelled_at")
+        if session.status == "completed" and session.cancelled_at:
+            raise ValueError("Completed sessions cannot have cancelled_at")
+        if session.status == "cancelled" and session.completed_at:
+            raise ValueError("Cancelled sessions cannot have completed_at")
         if session.status in {"draft", "active"} and (session.completed_at or session.cancelled_at):
             raise ValueError("Open sessions cannot have terminal timestamps")
         if session.status == "draft" and session.started_at:
