@@ -2,6 +2,8 @@ import json
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
@@ -292,6 +294,61 @@ def test_ui_delivery_input_persists_long_text_and_is_rendered_safely(project):
     assert "Новый тикет <безопасно>" not in html
 
 
+def _post_create(base_url, fields):
+    payload = urllib.parse.urlencode(fields).encode("utf-8")
+    request = urllib.request.Request(f"{base_url}/create", data=payload, method="POST")
+    try:
+        return urllib.request.urlopen(request)
+    except urllib.error.HTTPError as exc:
+        return exc
+
+
+def test_create_endpoint_validates_types_parent_and_special_characters(http_server, project):
+    store = TicketStore(project)
+    discovery = store.create("discovery", "idea", "Родитель <идея>")
+
+    response = _post_create(http_server, {
+        "process": "delivery", "type": "story", "title": "Задача <безопасно> & готово",
+        "description": "Описание с <script>alert(1)</script> и ёлочными кавычками",
+        "priority": "7", "parent": discovery.id,
+    })
+    assert response.status == 303
+    created = next(ticket for ticket in TicketStore(project).list("delivery") if ticket.title.startswith("Задача"))
+    assert created.description.startswith("Описание с <script>")
+    assert created.priority == 7
+    assert created.parent == discovery.id
+
+    invalid_type = _post_create(http_server, {
+        "process": "discovery", "type": "task", "title": "Недопустимый тип", "priority": "1",
+    })
+    assert invalid_type.code == 400
+    assert "Недопустимый тип" in invalid_type.read().decode("utf-8")
+
+    invalid_parent = _post_create(http_server, {
+        "process": "delivery", "type": "story", "title": "Неверный parent", "priority": "1", "parent": "DEL-MISSING",
+    })
+    assert invalid_parent.code == 400
+    assert "Parent тикет не найден" in invalid_parent.read().decode("utf-8")
+
+    invalid_priority = _post_create(http_server, {
+        "process": "delivery", "type": "task", "title": "Неверный приоритет", "priority": "-1",
+    })
+    assert invalid_priority.code == 400
+    assert "неотрицательным" in invalid_priority.read().decode("utf-8")
+
+
+def test_create_form_is_modal_and_offers_existing_compatible_parents(project):
+    store = TicketStore(project)
+    parent = store.create("discovery", "idea", "Parent <безопасно>")
+    page = render_board(store, load_all_workflows(), "delivery")
+
+    assert '<dialog id="create-ticket-dialog"' in page
+    assert '<select name="type"' in page
+    assert '<select name="parent"' in page
+    assert f'value="{parent.id}"' in page
+    assert 'data-process="delivery"' in page
+
+
 def test_board_compact_groups_queue_and_agent_and_flat_filters(project):
     store = TicketStore(project)
     queued = store.create("delivery", "task", "В очереди", status="selected_for_session")
@@ -331,6 +388,9 @@ def test_ticket_drawer_contains_context_history_artifacts_and_accessibility(proj
     assert "/artifacts/run-active" in page
     assert "aria-label=\"Контекст тикета\"" in page
     assert "Escape" in page and "data-drawer-close" in page
+    assert "fetch('/drawer?'" in page
+    assert "event.key !== 'Tab'" in page
+    assert "event.shiftKey" in page
 
 
 def test_active_ticket_filter_keeps_only_running_tickets(project):
@@ -357,3 +417,14 @@ def test_ui_fragment_endpoint_returns_only_board(http_server, project):
     assert fragment.startswith('<main class="board flat-list">')
     assert ticket.title in fragment
     assert "<!doctype html>" not in fragment
+
+
+def test_ui_drawer_endpoint_returns_fresh_ticket_panel(http_server, project):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Актуальный drawer", status="development")
+    with urllib.request.urlopen(f"{http_server}/drawer?process=delivery&ticket={ticket.id}") as response:
+        panel = response.read().decode("utf-8")
+    assert response.status == 200
+    assert panel.startswith('<section class="drawer-panel"')
+    assert ticket.title in panel
+    assert "<!doctype html>" not in panel

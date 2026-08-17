@@ -83,6 +83,8 @@ class GitTreeManager:
 
     def sync_with_main(self, handle: "TreeHandle") -> None:
         """Bring the current main branch into a ticket tree before coding starts."""
+        if self._has_unresolved_conflicts(handle.worktree_path):
+            return
         self.commit_workspace(handle.worktree_path, handle.record.ticket_id)
         self._ensure_main_worktree()
         try:
@@ -91,8 +93,13 @@ class GitTreeManager:
             if self._resolve_text_add_add_conflicts(handle.worktree_path):
                 self._run(["commit", "--no-edit"], cwd=handle.worktree_path)
                 return
+            if self._has_unresolved_conflicts(handle.worktree_path):
+                return
             self._run_optional(["merge", "--abort"], cwd=handle.worktree_path)
             raise
+
+    def _has_unresolved_conflicts(self, worktree: Path) -> bool:
+        return bool(self._run(["diff", "--name-only", "--diff-filter=U"], cwd=worktree).stdout.strip())
 
     def _resolve_text_add_add_conflicts(self, worktree: Path) -> bool:
         """Merge independently added text files without choosing either side."""
@@ -149,6 +156,8 @@ class GitTreeManager:
         return TreeHandle(record, self)
 
     def commit_workspace(self, worktree: Path, ticket_id: str) -> None:
+        if self._has_unresolved_conflicts(worktree):
+            raise GitTreeError(f"В дереве {ticket_id} остались неразрешенные Git-конфликты")
         status = self._run(["status", "--porcelain"], cwd=worktree).stdout.strip()
         if not status:
             return

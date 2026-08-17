@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from vibe_orchestrator.codex import AgentResult
-from vibe_orchestrator.git_trees import GitTreeManager
+from vibe_orchestrator.git_trees import GitTreeError, GitTreeManager
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.tickets import TicketStore
 
@@ -149,6 +149,35 @@ def test_development_sync_combines_independently_added_text_files(tmp_path: Path
     assert "ticket change" in content
     assert "main change" in content
     assert not git(workspace, "status", "--porcelain")
+
+
+def test_development_sync_leaves_content_conflict_for_agent(tmp_path: Path):
+    project = git_project(tmp_path)
+    (project / "shared.txt").write_text("base version\n", encoding="utf-8")
+    git(project, "add", "shared.txt")
+    git(project, "commit", "-m", "shared base")
+    git(project, "checkout", "-b", "stable")
+    store = TicketStore(project)
+    store.init()
+    manager = GitTreeManager(project, store)
+    ticket = store.create("delivery", "task", "Resolve content conflict")
+    workspace = manager.workspace_for(ticket)
+    (workspace / "shared.txt").write_text("ticket version\n", encoding="utf-8")
+    manager.commit_workspace(workspace, ticket.id)
+
+    main_worktree = manager._ensure_main_worktree()
+    (main_worktree / "shared.txt").write_text("main version\n", encoding="utf-8")
+    git(main_worktree, "add", "shared.txt")
+    git(main_worktree, "commit", "-m", "main conflicting change")
+
+    assert manager.workspace_for(ticket, stage_id="development") == workspace
+    assert git(workspace, "diff", "--name-only", "--diff-filter=U") == "shared.txt"
+    try:
+        manager.commit_workspace(workspace, ticket.id)
+    except GitTreeError as exc:
+        assert "неразрешенные Git-конфликты" in str(exc)
+    else:
+        raise AssertionError("Неразрешенный конфликт не должен попасть в коммит")
 
 
 def test_completed_rework_is_integrated_before_parent_is_unblocked(tmp_path: Path):

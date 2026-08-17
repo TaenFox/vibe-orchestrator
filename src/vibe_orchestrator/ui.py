@@ -11,10 +11,22 @@ from threading import Thread
 from .config import load_all_workflows
 from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
-from .tickets import TicketStore, automatic_retry_available, next_status_for_ticket, reset_failed_retry, retry_exhausted
+from .tickets import (
+    TICKET_TYPES_BY_PROCESS,
+    TicketStore,
+    automatic_retry_available,
+    next_status_for_ticket,
+    reset_failed_retry,
+    retry_exhausted,
+)
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 
+# Merge retained the drawer implementation from the ticket and the current main UI helpers.
 CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}body.drawer-open{overflow:hidden}header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}header button{margin-top:0}input,select,textarea{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px;max-width:100%;font:inherit}input[type=number]{width:52px}.create-form{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:12px 14px;border-bottom:1px solid #30363d}.create-form input[name=title],.create-form textarea[name=description]{min-width:220px}.create-form textarea{min-height:34px;resize:vertical}a{color:#58a6ff;text-decoration:none}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #f0c674;outline-offset:2px}.board-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid #30363d}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 120px)}.compact-group{display:flex;flex-direction:column;gap:8px;width:260px;min-width:260px}.compact-group>.column{width:100%;min-width:0}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0;overflow-wrap:anywhere}.card.active-run{border-color:#f0c674;box-shadow:0 0 0 1px #f0c67444}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}.active-badge{color:#f0c674;border-color:#f0c674}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap;overflow-wrap:anywhere}.details-row .meta{display:block;margin-bottom:2px}.flat-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-items:start;overflow-x:hidden}.flat-list .column{width:auto;min-width:0}.board-empty{padding:24px;color:#8b949e}.drawer-backdrop{position:fixed;inset:0;background:#0008;z-index:10}.ticket-drawer{position:fixed;top:0;right:0;width:min(560px,100vw);height:100vh;overflow-y:auto;background:#161b22;border-left:1px solid #30363d;padding:20px;z-index:11;box-shadow:-12px 0 30px #0008}.drawer-header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.drawer-header h2{margin:0;overflow-wrap:anywhere}.drawer-close{background:#30363d;margin:0}.drawer-section{border-top:1px solid #30363d;margin-top:16px;padding-top:12px}.drawer-section h3{font-size:12px;text-transform:uppercase;color:#8b949e;margin:0 0 8px}.drawer-description{white-space:pre-wrap;overflow-wrap:anywhere}.drawer-actions{display:flex;flex-wrap:wrap;gap:7px}.drawer-actions form{display:inline}.drawer-actions button{margin:0}.run-history{display:grid;gap:8px}.run-entry{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px}.run-entry.active-run{border-color:#f0c674}.run-entry a{display:inline-block;margin-top:4px}@media (max-width:700px){header{gap:10px;padding:10px}header form,.create-form,.board-toolbar{width:100%}.create-form input,.create-form select,.create-form textarea{flex:1 1 100%;min-width:0}.board{padding:10px;gap:8px}.compact-group{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}.column{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}}"""
+# Current main UI styling follows.
+CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}header button{margin-top:0}input,select,textarea{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px;max-width:100%;font:inherit}input[type=number]{width:72px}.create-form{display:grid;gap:10px}.create-form input[name=title],.create-form textarea[name=description]{min-width:220px}.create-form textarea{min-height:90px;resize:vertical}.create-dialog{width:min(560px,calc(100vw - 24px));color:#e6edf3;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px}.create-dialog::backdrop{background:rgb(0 0 0 / 65%)}.create-dialog h2{margin:0}.create-dialog .form-actions{display:flex;gap:8px;justify-content:flex-end}.create-dialog label{display:grid;gap:4px}.create-dialog .hint{color:#8b949e;font-size:12px}a{color:#58a6ff;text-decoration:none}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #f0c674;outline-offset:2px}.board-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid #30363d}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 120px)}.compact-group{display:flex;flex-direction:column;gap:8px;width:260px;min-width:260px}.compact-group>.column{width:100%;min-width:0}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0;overflow-wrap:anywhere}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap;overflow-wrap:anywhere}.details-row .meta{display:block;margin-bottom:2px}.flat-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-items:start;overflow-x:hidden}.flat-list .column{width:auto;min-width:0}.board-empty{padding:24px;color:#8b949e}@media (max-width:700px){header{gap:10px;padding:10px}header form,.board-toolbar{width:100%}.create-dialog{padding:14px}.board{padding:10px;gap:8px}.compact-group{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}.column{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}}"""
+# End merged UI styling.
+CSS += ".drawer-backdrop{position:fixed;inset:0;background:#0008;z-index:10}.ticket-drawer{position:fixed;top:0;right:0;width:min(560px,100vw);height:100vh;overflow-y:auto;background:#161b22;border-left:1px solid #30363d;padding:20px;z-index:11;box-shadow:-12px 0 30px #0008}.drawer-header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.drawer-header h2{margin:0;overflow-wrap:anywhere}.drawer-close{background:#30363d;margin:0}.drawer-section{border-top:1px solid #30363d;margin-top:16px;padding-top:12px}.drawer-section h3{font-size:12px;text-transform:uppercase;color:#8b949e;margin:0 0 8px}.drawer-description{white-space:pre-wrap;overflow-wrap:anywhere}.drawer-actions{display:flex;flex-wrap:wrap;gap:7px}.drawer-actions form{display:inline}.drawer-actions button{margin:0}.run-history{display:grid;gap:8px}.run-entry{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px}.run-entry.active-run{border-color:#f0c674}.run-entry a{display:inline-block;margin-top:4px}"
 AUTO_REFRESH_SECONDS = 5
 AUTO_REFRESH_SCRIPT = f"""<script>
 (() => {{
@@ -43,11 +55,26 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     if (document.hidden || document.querySelector('details[open]') || (!force && document.activeElement?.matches('input, select, textarea'))) return;
     remember(); const current = state();
     const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || '', active: current.active ? '1' : ''}});
+    const refreshDrawer = async (ticketId) => {{
+      const drawer = document.querySelector('[data-ticket-drawer]');
+      const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`);
+      if (!drawer || !panel || drawer.hidden) return;
+      try {{
+        const response = await fetch('/drawer?' + new URLSearchParams({{process: current.process || 'discovery', ticket: ticketId}}));
+        if (!response.ok) return;
+        const updated = document.createRange().createContextualFragment(await response.text()).firstElementChild;
+        if (!updated) return;
+        updated.hidden = false;
+        panel.replaceWith(updated);
+        updated.focus();
+      }} catch (_) {{ /* transient server/network failure: keep the current drawer */ }}
+    }};
     try {{ const response = await fetch('/fragment?' + params); if (!response.ok) return; const fragment = await response.text();
       const board = document.querySelector('.board'); if (!board) return; board.outerHTML = fragment;
       const restored = state(); restore();
       if (restored.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(restored.ticket)}}"]`)?.classList.add('selected');
       const refreshedBoard = document.querySelector('.board'); if (refreshedBoard && restored.boardScrollX != null) refreshedBoard.scrollLeft = restored.boardScrollX; if (restored.scrollY != null) window.scrollTo(0, restored.scrollY); if (restored.focus >= 0) controls()[restored.focus]?.focus();
+      if (restored.ticket) await refreshDrawer(restored.ticket);
     }} catch (_) {{ /* transient server/network failure: keep the current board */ }}
   }};
   document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) remember(); }});
@@ -56,7 +83,18 @@ AUTO_REFRESH_SCRIPT = f"""<script>
   const closeDrawer = () => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (!drawer) return; drawer.hidden = true; if (backdrop) backdrop.hidden = true; drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.hidden = true); drawer.setAttribute('aria-hidden', 'true'); document.body.classList.remove('drawer-open'); if (drawer.dataset.previousFocus) document.getElementById(drawer.dataset.previousFocus)?.focus(); }};
   const openDrawer = (ticketId, trigger) => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`); if (!drawer || !panel) return; drawer.querySelectorAll('[data-drawer-ticket]').forEach(item => item.hidden = item !== panel); panel.hidden = false; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.dataset.previousFocus = trigger?.id || ''; document.body.classList.add('drawer-open'); panel.focus(); save({{ticket: ticketId}}); }};
   document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }} const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); openDrawer(open.dataset.openTicket, open); return; }} if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) closeDrawer(); const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
-  document.addEventListener('keydown', event => {{ if (event.key === 'Escape') closeDrawer(); }});
+  document.addEventListener('keydown', event => {{
+    const drawer = document.querySelector('[data-ticket-drawer]');
+    const panel = drawer?.querySelector('[data-drawer-ticket]:not([hidden])');
+    if (!drawer || drawer.hidden || !panel) return;
+    if (event.key === 'Escape') {{ closeDrawer(); return; }}
+    if (event.key !== 'Tab') return;
+    const focusable = [...panel.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(item => !item.hidden && item.getAttribute('aria-hidden') !== 'true');
+    if (!focusable.length) {{ event.preventDefault(); panel.focus(); return; }}
+    const first = focusable[0]; const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {{ event.preventDefault(); last.focus(); }}
+    else if (!event.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {{ event.preventDefault(); first.focus(); }}
+  }});
   const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); const activeControl = document.querySelector('[data-board-active]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; if (activeControl && current.active) activeControl.value = '1'; restore(); if (current.ticket) {{ document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); openDrawer(current.ticket); }} const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
 }})();
 </script>"""
@@ -74,6 +112,13 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
             if parsed.path == "/fragment":
                 query = urllib.parse.parse_qs(parsed.query)
                 return self._html(render_board_fragment(store, workflows, query.get("process", ["discovery"])[0], worker_control, tree_manager, session_store, mode=query.get("mode", ["compact"])[0], search=query.get("search", [""])[0], status=query.get("status", [""])[0], active=query.get("active", [""])[0]))
+            if parsed.path == "/drawer":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    ticket = store.get(query.get("ticket", [""])[0])
+                except KeyError:
+                    return self.send_error(404)
+                return self._html(_ticket_drawer_panel_html(store, workflows, query.get("process", ["discovery"])[0], ticket, tree_manager, session_store))
             if parsed.path.startswith("/artifacts/"):
                 relative = urllib.parse.unquote(parsed.path.removeprefix("/artifacts/")).strip("/")
                 candidate = (store.runs_root / relative).resolve()
@@ -119,13 +164,14 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
                     ticket_type = data["type"][0].strip()
                     title = data["title"][0].strip()
                     description = data.get("description", [""])[0].strip()
-                    priority = int(data.get("priority", ["100"])[0])
+                    priority_raw = data.get("priority", ["100"])[0].strip()
+                    priority = int(priority_raw)
                     parent = data.get("parent", [""])[0].strip() or None
-                    if process not in workflows or not ticket_type or not title or priority < 0:
-                        raise ValueError
+                    _validate_ticket_creation(store, workflows, process, ticket_type, title, priority, parent)
                     ticket = store.create(process, ticket_type, title, description=description, priority=priority, parent=parent)
-                except (KeyError, ValueError):
-                    return self.send_error(400, "Некорректные данные тикета")
+                except (KeyError, ValueError) as exc:
+                    log_message = str(exc) or "Некорректные данные тикета"
+                    return self.send_error(400, log_message)
                 return self._redirect(f"/?process={urllib.parse.quote(ticket.process)}")
             if self.path == "/move":
                 ticket = store.get(data["id"][0]); workflow = workflows[ticket.process]; target = next_status_for_ticket(store, ticket); requested = data.get("target", [target])[0]
@@ -179,7 +225,70 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
     finally: server.server_close()
 
 
+# Main branch ticket-creation helpers are preserved above the renderer.
+def _parent_is_compatible(parent, process: str, ticket_type: str) -> bool:
+    if process == "discovery":
+        return ticket_type == "correction" and parent.process == "discovery" and parent.type == "idea"
+    if process == "delivery":
+        if ticket_type == "rework":
+            return parent.process == "delivery" and parent.type != "rework"
+        return (parent.process == "discovery" and parent.type == "idea") or (parent.process == "delivery" and parent.type != "rework")
+    return False
+
+
+def _validate_ticket_creation(store, workflows, process: str, ticket_type: str, title: str, priority: int, parent: str | None) -> None:
+    if process not in workflows or process not in TICKET_TYPES_BY_PROCESS:
+        raise ValueError("Неизвестный процесс")
+    if ticket_type not in TICKET_TYPES_BY_PROCESS[process]:
+        raise ValueError("Недопустимый тип тикета для процесса")
+    if not title:
+        raise ValueError("Заголовок обязателен")
+    if priority < 0:
+        raise ValueError("Приоритет должен быть неотрицательным")
+    if not parent:
+        if ticket_type in {"correction", "rework"}:
+            raise ValueError("Для корректирующего тикета нужен parent")
+        return
+    try:
+        parent_ticket = store.get(parent)
+    except KeyError as exc:
+        raise ValueError("Parent тикет не найден") from exc
+    if not _parent_is_compatible(parent_ticket, process, ticket_type):
+        raise ValueError("Parent несовместим с процессом и типом тикета")
+
+
+def _create_ticket_form(store, process: str, workflows) -> str:
+    process_options = "".join(
+        f'<option value="{html.escape(item.id)}"{(" selected" if item.id == process else "")}>{html.escape(item.title)}</option>'
+        for item in workflows.values()
+    )
+    type_options = "".join(
+        f'<option value="{html.escape(ticket_type)}" data-process="{html.escape(item.id)}"{(" selected" if item.id == process and ticket_type == TICKET_TYPES_BY_PROCESS[item.id][0] else "")}>{html.escape(ticket_type)}</option>'
+        for item in workflows.values()
+        for ticket_type in TICKET_TYPES_BY_PROCESS.get(item.id, ())
+    )
+    parent_options = ['<option value="">Без parent</option>']
+    for ticket in store.list():
+        if any(_parent_is_compatible(ticket, process, ticket_type) for ticket_type in TICKET_TYPES_BY_PROCESS[process]):
+            parent_options.append(f'<option value="{html.escape(ticket.id)}" data-parent-process="{html.escape(ticket.process)}" data-parent-type="{html.escape(ticket.type)}">{html.escape(ticket.id)}</option>')
+    return (
+        '<button type="button" onclick="document.getElementById(\'create-ticket-dialog\').showModal()">Новый тикет</button>'
+        '<dialog id="create-ticket-dialog" class="create-dialog"><form class="create-form" method="post" action="/create">'
+        '<h2>Новый тикет</h2><span class="hint">Выберите тип процесса и заполните обязательные поля.</span>'
+        f'<label>Процесс<select name="process">{process_options}</select></label>'
+        f'<label>Тип<select name="type" required>{type_options}</select></label>'
+        '<label>Заголовок<input name="title" required maxlength="500" autocomplete="off"></label>'
+        '<label>Описание<textarea name="description" rows="5" placeholder="Контекст, ожидаемый результат и ограничения"></textarea></label>'
+        '<label>Приоритет<input name="priority" type="number" min="0" value="100" required></label>'
+        f'<label>Parent<select name="parent">{"".join(parent_options)}</select></label>'
+        '<div class="form-actions"><button type="button" onclick="this.closest(\'dialog\').close()">Отмена</button><button type="submit">Создать</button></div>'
+        '</form></dialog>'
+        '<script>(function(){const dialog=document.getElementById("create-ticket-dialog");const form=dialog.querySelector("form");const process=form.elements.process;const type=form.elements.type;const parent=form.elements.parent;const sync=()=>{const selected=type.value;[...type.options].forEach(option=>option.hidden=option.dataset.process!==process.value);if(type.selectedOptions[0]?.hidden)type.value=[...type.options].find(option=>option.dataset.process===process.value)?.value||"";[...parent.options].forEach(option=>{if(!option.value){option.hidden=false;return;}const compatible=(process.value==="discovery"&&selected==="correction"&&option.dataset.parentProcess==="discovery"&&option.dataset.parentType==="idea")||(process.value==="delivery"&&((selected==="rework"&&option.dataset.parentProcess==="delivery"&&option.dataset.parentType!=="rework")||(selected!=="rework"&&((option.dataset.parentProcess==="discovery"&&option.dataset.parentType==="idea")||(option.dataset.parentProcess==="delivery"&&option.dataset.parentType!=="rework")))));option.hidden=!compatible;if(option.hidden&&option.selected)parent.value="";});};process.addEventListener("change",sync);type.addEventListener("change",sync);sync();})();</script>'
+    )
+
+
 def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None, session_store: DeliverySessionStore | None = None, *, mode: str = "compact", search: str = "", status: str = "", active: str | bool = "") -> str:
+# End merged renderer signature.
     workflow=workflows.get(process) or workflows["discovery"]; tickets=store.list(workflow.id)
     mode = mode if mode in {"compact", "flat"} else "compact"
     search = search.strip()
@@ -214,18 +323,7 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
     worker_limit = worker_control.get_limit()
     active_workers = sum(1 for ticket in store.list() if ticket.active_run)
     worker_form = f'<form method="post" action="/workers"><input type="hidden" name="process" value="{html.escape(workflow.id)}"><label class="meta">воркеры <input type="number" name="count" min="0" value="{worker_limit}"></label><button>Применить</button><span class="meta">активно {active_workers}</span></form>'
-    process_options = "".join(f'<option value="{html.escape(item.id)}"{(" selected" if item.id == workflow.id else "")}>{html.escape(item.title)}</option>' for item in workflows.values())
-    create_form = (
-        '<form class="create-form" method="post" action="/create">'
-        '<strong>Новый тикет</strong>'
-        f'<select name="process">{process_options}</select>'
-        '<input name="type" placeholder="тип, например idea" required>'
-        '<input name="title" placeholder="заголовок" required>'
-        '<textarea name="description" placeholder="описание" rows="1"></textarea>'
-        '<input name="priority" type="number" min="0" value="100" title="Приоритет">'
-        '<input name="parent" placeholder="родительский ID, необязательно">'
-        '<button>Создать</button></form>'
-    )
+    create_form = _create_ticket_form(store, workflow.id, workflows)
     sessions_html = _sessions_html(store, session_store) if process == "delivery" else ""
     drawer = _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store)
     return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}{toolbar}{board}{drawer}</body></html>'
@@ -408,40 +506,42 @@ def _ticket_action_html(store, workflow, ticket) -> str:
 
 
 def _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store) -> str:
-    panels = []
-    for ticket in tickets:
-        workflow = workflows.get(ticket.process) or workflows[process]
-        tree = tree_manager.trees.get(ticket.id) if tree_manager else None
-        session = next((item for item in session_store.list() if ticket.id in item.participants), None) if session_store and ticket.process == "delivery" else None
-        parent = ticket.parent or "нет"
-        blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
-        run_links = []
-        for entry in reversed(ticket.run_history):
-            run_id = entry.get("run_id")
-            if not run_id:
-                continue
-            artifact_path = entry.get("artifacts_path") or f".vibe/runs/{run_id}"
-            run_links.append(
-                f'<div class="run-entry{" active-run" if run_id == ticket.active_run else ""}"><span class="badge">{html.escape(str(entry.get("event", "run")))}</span> '
-                f'<span class="meta">{html.escape(str(entry.get("stage", "")))} · {html.escape(str(entry.get("timestamp", "")))}</span>'
-                f'<div>{html.escape(str(entry.get("summary", "")))}</div><a href="/artifacts/{urllib.parse.quote(str(run_id), safe="")}" target="_blank" rel="noopener">Артефакты: {html.escape(str(artifact_path))}</a></div>'
-            )
-        tree_html = ""
-        if tree:
-            tree_html = f'<div class="details-row"><span class="meta">Ветка</span>{html.escape(tree.branch)}</div><div class="details-row"><span class="meta">Worktree</span>{html.escape(tree.worktree)}</div><div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
-        session_html = f'<div class="details-row"><span class="meta">Сессия</span>{html.escape(session.id)} · {html.escape(session.status)}</div>' if session else '<div class="details-row"><span class="meta">Сессия</span>нет</div>'
-        action = _ticket_action_html(store, workflow, ticket)
-        panels.append(
-            f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
-            f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
-            f'<div class="drawer-actions">{action}</div><div class="drawer-section"><h3>Контекст тикета</h3>'
-            f'<div class="details-row"><span class="meta">Тип · статус · приоритет</span>{html.escape(ticket.type)} · {html.escape(ticket.status)} · {ticket.priority}</div>'
-            f'<div class="details-row"><span class="meta">Описание</span><div class="drawer-description">{html.escape(ticket.description or "(пусто)")}</div></div>'
-            f'<div class="details-row"><span class="meta">Summary</span>{html.escape(ticket.last_summary or "нет")}</div>'
-            f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
-            f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
-            f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
-            f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
-            f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
-        )
+    panels = [_ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store) for ticket in tickets]
     return f'<div class="drawer-backdrop" data-drawer-backdrop hidden></div><aside class="ticket-drawer" data-ticket-drawer role="dialog" aria-modal="true" aria-label="Контекст тикета" aria-hidden="true" hidden>{"".join(panels)}</aside>'
+
+
+def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store) -> str:
+    workflow = workflows.get(ticket.process) or workflows[process]
+    tree = tree_manager.trees.get(ticket.id) if tree_manager else None
+    session = next((item for item in session_store.list() if ticket.id in item.participants), None) if session_store and ticket.process == "delivery" else None
+    parent = ticket.parent or "нет"
+    blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
+    run_links = []
+    for entry in reversed(ticket.run_history):
+        run_id = entry.get("run_id")
+        if not run_id:
+            continue
+        artifact_path = entry.get("artifacts_path") or f".vibe/runs/{run_id}"
+        run_links.append(
+            f'<div class="run-entry{" active-run" if run_id == ticket.active_run else ""}"><span class="badge">{html.escape(str(entry.get("event", "run")))}</span> '
+            f'<span class="meta">{html.escape(str(entry.get("stage", "")))} · {html.escape(str(entry.get("timestamp", "")))}</span>'
+            f'<div>{html.escape(str(entry.get("summary", "")))}</div><a href="/artifacts/{urllib.parse.quote(str(run_id), safe="")}" target="_blank" rel="noopener">Артефакты: {html.escape(str(artifact_path))}</a></div>'
+        )
+    tree_html = ""
+    if tree:
+        tree_html = f'<div class="details-row"><span class="meta">Ветка</span>{html.escape(tree.branch)}</div><div class="details-row"><span class="meta">Worktree</span>{html.escape(tree.worktree)}</div><div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
+    session_html = f'<div class="details-row"><span class="meta">Сессия</span>{html.escape(session.id)} · {html.escape(session.status)}</div>' if session else '<div class="details-row"><span class="meta">Сессия</span>нет</div>'
+    action = _ticket_action_html(store, workflow, ticket)
+    return (
+        f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
+        f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
+        f'<div class="drawer-actions">{action}</div><div class="drawer-section"><h3>Контекст тикета</h3>'
+        f'<div class="details-row"><span class="meta">Тип · статус · приоритет</span>{html.escape(ticket.type)} · {html.escape(ticket.status)} · {ticket.priority}</div>'
+        f'<div class="details-row"><span class="meta">Описание</span><div class="drawer-description">{html.escape(ticket.description or "(пусто)")}</div></div>'
+        f'<div class="details-row"><span class="meta">Summary</span>{html.escape(ticket.last_summary or "нет")}</div>'
+        f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
+        f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
+        f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
+        f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
+        f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
+    )
