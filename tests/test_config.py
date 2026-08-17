@@ -14,7 +14,7 @@ stages:
   - id: review
     kind: agent
     prompt: broken/review.md
-    model: gpt-5.4
+    model: gpt-5.6-luna
 """,
         encoding="utf-8",
     )

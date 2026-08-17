@@ -149,7 +149,7 @@ run_history:
     artifacts_path: .vibe/runs/8f2d6d9f10b1493c80d4a9dfcb0d9f2f
     prompt_path: discovery/technical_analysis.md
     prompt_version: sha256:...
-    model: gpt-5.4
+    model: gpt-5.6-luna
     reasoning_effort: medium
     ticket_title: Add family graph import
     ticket_priority: "100"

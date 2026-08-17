@@ -9,7 +9,7 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/generation.md
-    model: gpt-5.4
+    model: gpt-5.6-luna
     reasoning_effort: medium
     outcomes: {completed: human}
   - {id: human, title: Человек, kind: human, next: ready_for_analysis}
@@ -19,7 +19,7 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/analysis.md
-    model: gpt-5.4
+    model: gpt-5.6-luna
     reasoning_effort: medium
     outcomes: {completed: ready_for_technical_analysis, needs_correction: analysis}
   - {id: ready_for_technical_analysis, title: Готово к техническому анализу, kind: queue, pull_to: technical_analysis}
@@ -28,7 +28,7 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/technical_analysis.md
-    model: gpt-5.4
+    model: gpt-5.6-luna
     reasoning_effort: medium
     outcomes: {completed: investment_decision, needs_correction: technical_analysis}
   - {id: investment_decision, title: Инвестиционное решение, kind: human, next: implementation}
@@ -39,7 +39,7 @@ stages:
     kind: agent
     wip: 2
     prompt: discovery/validation.md
-    model: gpt-5.4
+    model: gpt-5.6-luna
     reasoning_effort: low
     outcomes: {completed: done, needs_correction: validation}
   - {id: done, title: Готово, kind: done}

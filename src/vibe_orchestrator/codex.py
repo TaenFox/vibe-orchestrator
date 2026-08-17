@@ -60,7 +60,7 @@ class CodexRunner:
     ):
         self.store = store
         self.codex_binary = codex_binary
-        self.default_model = model or os.environ.get("VIBE_CODEX_MODEL", "gpt-5.4")
+        self.default_model = model or os.environ.get("VIBE_CODEX_MODEL", "gpt-5.6-luna")
         self.default_reasoning_effort = reasoning_effort or os.environ.get("VIBE_CODEX_REASONING_EFFORT", "medium")
 
     def available(self) -> bool:

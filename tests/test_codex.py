@@ -16,7 +16,7 @@ def test_stage_execution_profile_overrides_runner_defaults(tmp_path: Path):
 
     profile = runner.execution_profile(stage)
 
-    assert profile == {"model": "gpt-5.4", "reasoning_effort": "medium"}
+    assert profile == {"model": "gpt-5.6-luna", "reasoning_effort": "medium"}
 
 
 def test_runner_uses_medium_reasoning_effort_by_default_without_stage_override(tmp_path: Path):
@@ -27,7 +27,7 @@ def test_runner_uses_medium_reasoning_effort_by_default_without_stage_override(t
 
     profile = runner.execution_profile(stage)
 
-    assert profile == {"model": "gpt-5.4", "reasoning_effort": "medium"}
+    assert profile == {"model": "gpt-5.6-luna", "reasoning_effort": "medium"}
 
 
 def test_prompt_includes_run_id_and_execution_profile(tmp_path: Path):
@@ -96,7 +96,7 @@ def test_build_exec_args_exposes_model_and_reasoning_without_running_codex(tmp_p
 
     assert args[:2] == ["codex-bin", "exec"]
     assert "--model" in args
-    assert "gpt-5.4" in args
+    assert "gpt-5.6-luna" in args
     assert "-c" in args
     assert 'model_reasoning_effort="medium"' in args
     assert args[-1] == "-"
@@ -149,7 +149,7 @@ def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monk
     assert manifest["prompt_version"].startswith("sha256:")
     assert manifest["prompt_version"] == f"sha256:{sha256(prompt_contract.encode('utf-8')).hexdigest()}"
     assert manifest["prompt_version"] != runner.prompt_spec(stage).version
-    assert manifest["model"] == "gpt-5.4"
+    assert manifest["model"] == "gpt-5.6-luna"
     assert manifest["reasoning_effort"] == "medium"
     assert manifest["ticket_snapshot"] == {
         "ticket_title": "Replayable run",

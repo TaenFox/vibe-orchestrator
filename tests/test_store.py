@@ -85,8 +85,8 @@ def test_save_persists_run_history_with_artifact_path(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()
     ticket = store.create("delivery", "story", "Track runs")
-    store.record_run_event(ticket, run_id="run-123", stage_id="review", event="started", from_status="ready_for_review", prompt_path="delivery/review.md", prompt_version="sha256:abc", model="gpt-5.4", reasoning_effort="high", ticket_title="Track runs", ticket_priority="100", ticket_parent="none", ticket_description="(пусто)")
-    store.record_run_event(ticket, run_id="run-123", stage_id="review", event="completed", outcome="completed", summary="Проверка пройдена", prompt_path="delivery/review.md", prompt_version="sha256:abc", model="gpt-5.4", reasoning_effort="high", ticket_title="Track runs", ticket_priority="100", ticket_parent="none", ticket_description="(пусто)")
+    store.record_run_event(ticket, run_id="run-123", stage_id="review", event="started", from_status="ready_for_review", prompt_path="delivery/review.md", prompt_version="sha256:abc", model="gpt-5.6-luna", reasoning_effort="high", ticket_title="Track runs", ticket_priority="100", ticket_parent="none", ticket_description="(пусто)")
+    store.record_run_event(ticket, run_id="run-123", stage_id="review", event="completed", outcome="completed", summary="Проверка пройдена", prompt_path="delivery/review.md", prompt_version="sha256:abc", model="gpt-5.6-luna", reasoning_effort="high", ticket_title="Track runs", ticket_priority="100", ticket_parent="none", ticket_description="(пусто)")
     store.save(ticket)
 
     reloaded = store.get(ticket.id)
@@ -115,7 +115,7 @@ def test_children_of_returns_creation_order_instead_of_ticket_id_order(tmp_path:
 def test_run_history_is_persisted_with_artifacts_path(tmp_path: Path):
     store=TicketStore(tmp_path); store.init(); ticket=store.create("delivery","task","Traceability")
 
-    store.record_run_event(ticket,run_id="run-42",stage_id="development",event="started",model="gpt-5.4",reasoning_effort="high")
+    store.record_run_event(ticket,run_id="run-42",stage_id="development",event="started",model="gpt-5.6-luna",reasoning_effort="high")
     store.save(ticket)
 
     reloaded=store.get(ticket.id)
@@ -126,6 +126,6 @@ def test_run_history_is_persisted_with_artifacts_path(tmp_path: Path):
         "event":"started",
         "timestamp":reloaded.run_history[0]["timestamp"],
         "artifacts_path":".vibe/runs/run-42",
-        "model":"gpt-5.4",
+        "model":"gpt-5.6-luna",
         "reasoning_effort":"high",
     }]

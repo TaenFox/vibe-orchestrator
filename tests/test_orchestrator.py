@@ -40,7 +40,7 @@ class SuccessfulRunner:
 
 class FailingRunner:
     def __init__(self):
-        self.profile = {"model": "gpt-5.4", "reasoning_effort": "high"}
+        self.profile = {"model": "gpt-5.6-luna", "reasoning_effort": "high"}
         self.prompt = PromptSpec(path="delivery/review.md", body="", version="sha256:stub")
 
     def available(self):
@@ -163,7 +163,7 @@ def test_schedule_records_started_and_completed_run_history(tmp_path: Path):
     assert ticket.run_history[0]["artifacts_path"].endswith(ticket.run_history[0]["run_id"])
     assert ticket.run_history[0]["prompt_path"] == "delivery/review.md"
     assert ticket.run_history[0]["prompt_version"] == "sha256:stub"
-    assert ticket.run_history[0]["model"] == "gpt-5.4"
+    assert ticket.run_history[0]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[0]["reasoning_effort"] == "low"
     assert ticket.run_history[0]["ticket_title"] == "Ship durable history"
     assert ticket.run_history[0]["ticket_priority"] == "100"
@@ -312,7 +312,7 @@ def test_execute_records_failed_run_history_when_prompt_metadata_breaks(tmp_path
         stage_id="review",
         event="started",
         from_status="ready_for_review",
-        model="gpt-5.4",
+        model="gpt-5.6-luna",
         reasoning_effort="high",
     )
     orchestrator.store.save(ticket)
@@ -326,7 +326,7 @@ def test_execute_records_failed_run_history_when_prompt_metadata_breaks(tmp_path
     assert ticket.last_summary == "prompt file disappeared"
     assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
     assert ticket.run_history[-1]["summary"] == "prompt file disappeared"
-    assert ticket.run_history[-1]["model"] == "gpt-5.4"
+    assert ticket.run_history[-1]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
     assert "prompt_path" not in ticket.run_history[-1]
     assert "prompt_version" not in ticket.run_history[-1]
@@ -363,7 +363,7 @@ def test_completed_run_history_reuses_started_metadata_when_stage_definition_dri
         from_status="ready_for_review",
         prompt_path="delivery/review.md",
         prompt_version="sha256:stable",
-        model="gpt-5.4",
+        model="gpt-5.6-luna",
         reasoning_effort="high",
     )
     orchestrator.store.save(ticket)
@@ -384,7 +384,7 @@ def test_completed_run_history_reuses_started_metadata_when_stage_definition_dri
     ticket = orchestrator.store.get(ticket.id)
 
     assert [entry["event"] for entry in ticket.run_history] == ["started", "completed"]
-    assert ticket.run_history[-1]["model"] == "gpt-5.4"
+    assert ticket.run_history[-1]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
     assert ticket.run_history[-1]["prompt_path"] == "delivery/review.md"
     assert ticket.run_history[-1]["prompt_version"] == "sha256:stable"
@@ -404,7 +404,7 @@ def test_failed_run_history_reuses_started_metadata_when_stage_definition_drifts
         from_status="ready_for_review",
         prompt_path="delivery/review.md",
         prompt_version="sha256:stable",
-        model="gpt-5.4",
+        model="gpt-5.6-luna",
         reasoning_effort="high",
     )
     orchestrator.store.save(ticket)
@@ -416,7 +416,7 @@ def test_failed_run_history_reuses_started_metadata_when_stage_definition_drifts
     ticket = orchestrator.store.get(ticket.id)
 
     assert [entry["event"] for entry in ticket.run_history] == ["started", "failed"]
-    assert ticket.run_history[-1]["model"] == "gpt-5.4"
+    assert ticket.run_history[-1]["model"] == "gpt-5.6-luna"
     assert ticket.run_history[-1]["reasoning_effort"] == "high"
     assert ticket.run_history[-1]["prompt_path"] == "delivery/review.md"
     assert ticket.run_history[-1]["prompt_version"] == "sha256:stable"
