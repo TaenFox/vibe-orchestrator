@@ -6,6 +6,59 @@ from pathlib import Path
 from vibe_orchestrator.codex import CodexRunner
 from vibe_orchestrator.config import Stage, load_workflow
 from vibe_orchestrator.tickets import TicketStore
+from vibe_orchestrator.token_usage import is_confirmed_token_usage, parse_codex_usage, unknown_token_usage
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_parser_reads_supported_codex_turn_completed_fixture():
+    events = (FIXTURES / "codex_turn_completed.jsonl").read_bytes()
+
+    assert parse_codex_usage(events) == {
+        "input_tokens": 1234,
+        "output_tokens": 567,
+        "total_tokens": 1801,
+        "source": "codex_cli.turn.completed",
+        "captured_at": "2026-08-17T10:11:12+00:00",
+    }
+
+
+def test_parser_keeps_captured_at_unknown_when_timestamp_is_missing():
+    events = (FIXTURES / "codex_turn_completed_missing_timestamp.jsonl").read_bytes()
+
+    usage = parse_codex_usage(events)
+
+    assert usage == {
+        "input_tokens": 1234,
+        "output_tokens": 567,
+        "total_tokens": 1801,
+        "source": "codex_cli.turn.completed",
+        "captured_at": None,
+    }
+    assert is_confirmed_token_usage(usage)
+
+
+def test_parser_sums_all_supported_turn_completed_events():
+    events = (FIXTURES / "codex_turn_completed_multiple.jsonl").read_bytes()
+
+    assert parse_codex_usage(events) == {
+        "input_tokens": 1434,
+        "output_tokens": 647,
+        "total_tokens": 2081,
+        "source": "codex_cli.turn.completed",
+        "captured_at": "2026-08-17T10:11:15+00:00",
+    }
+
+
+def test_parser_does_not_estimate_unknown_or_legacy_output():
+    events = '\n'.join([
+        '{"type":"turn.completed","usage":{"input_tokens":"1234","output_tokens":567}}',
+        '{"event":"done","input_tokens":1234,"output_tokens":567}',
+        'plain output with 1234 input tokens',
+    ])
+
+    assert parse_codex_usage(events) == unknown_token_usage()
 
 
 def test_stage_execution_profile_overrides_runner_defaults(tmp_path: Path):
@@ -144,7 +197,7 @@ def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monk
                 json.dumps({"outcome": "completed", "summary": "ok", "details": "trace"}),
                 encoding="utf-8",
             )
-            return (b'{"event":"done"}\n', None)
+            return (b'{"type":"turn.completed","timestamp":"2026-08-17T10:11:12+00:00","usage":{"input_tokens":12,"output_tokens":3}}\n', None)
 
     captured = {}
 
@@ -183,6 +236,9 @@ def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monk
     }
     assert manifest["version"]
     assert manifest["command"] == captured["args"]
+    assert manifest["token_usage"]["total_tokens"] == 15
+    result_payload = json.loads((tmp_path / ".vibe" / "runs" / "run-123" / "result.json").read_text(encoding="utf-8"))
+    assert result_payload["token_usage"] == manifest["token_usage"]
 
 
 def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(tmp_path: Path, monkeypatch):
