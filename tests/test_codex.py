@@ -24,6 +24,20 @@ def test_parser_reads_supported_codex_turn_completed_fixture():
     }
 
 
+def test_parser_keeps_captured_at_unknown_when_timestamp_is_missing():
+    events = (FIXTURES / "codex_turn_completed_missing_timestamp.jsonl").read_bytes()
+
+    usage = parse_codex_usage(events)
+
+    assert usage == {
+        "input_tokens": 1234,
+        "output_tokens": 567,
+        "total_tokens": 1801,
+        "source": "codex_cli.turn.completed",
+        "captured_at": None,
+    }
+
+
 def test_parser_does_not_estimate_unknown_or_legacy_output():
     events = '\n'.join([
         '{"type":"turn.completed","usage":{"input_tokens":"1234","output_tokens":567}}',

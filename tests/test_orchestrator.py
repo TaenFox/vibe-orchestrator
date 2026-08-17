@@ -11,6 +11,15 @@ from vibe_orchestrator.scheduler import select_candidates
 from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
 
 
+CONFIRMED_USAGE = {
+    "input_tokens": 12,
+    "output_tokens": 3,
+    "total_tokens": 15,
+    "source": "codex_cli.turn.completed",
+    "captured_at": "2026-08-17T10:11:12+00:00",
+}
+
+
 class SuccessfulRunner:
     def available(self):
         return True
@@ -609,6 +618,33 @@ delivery_tickets: []
     assert idea.last_outcome == "needs_correction"
     assert idea.blocked_by == [corrections[0].id]
     assert "implementation_required" in corrections[0].description
+
+
+def test_invalid_technical_analysis_plan_preserves_token_usage_in_run_history(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Ambiguous implementation", status="technical_analysis")
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    workflow = load_workflow("discovery")
+    orchestrator._apply_result(
+        workflow,
+        idea.id,
+        workflow.by_id["technical_analysis"],
+        AgentResult(
+            outcome="completed",
+            summary="Готово",
+            details="""```yaml
+delivery_tickets: []
+```""",
+            token_usage=CONFIRMED_USAGE,
+        ),
+    )
+
+    updated = orchestrator.store.get(idea.id)
+
+    assert updated.last_outcome == "needs_correction"
+    assert updated.run_history[0]["token_usage"] == CONFIRMED_USAGE
 
 
 def test_technical_analysis_retry_reuses_existing_delivery_children(tmp_path: Path):
