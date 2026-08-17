@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ import yaml
 from .config import load_workflow
 
 RETRY_BACKOFF_SECONDS = (5, 30)
+log = logging.getLogger("vibe")
 
 
 def now_iso() -> str:
@@ -127,18 +129,21 @@ class TicketStore:
         self,
         ticket: Ticket,
         *,
-        run_id: str,
-        stage_id: str,
+        run_id: str | None,
+        stage_id: str | None,
         event: str,
         **extra: Any,
     ) -> None:
         entry = {
-            "run_id": run_id,
-            "stage": stage_id,
             "event": event,
             "timestamp": now_iso(),
-            "artifacts_path": f".vibe/runs/{run_id}",
+            "ticket_type": ticket.type,
         }
+        if run_id is not None:
+            entry["run_id"] = run_id
+            entry["artifacts_path"] = f".vibe/runs/{run_id}"
+        if stage_id is not None:
+            entry["stage"] = stage_id
         entry.update({key: value for key, value in extra.items() if value is not None})
         ticket.run_history.append(entry)
 
@@ -170,7 +175,9 @@ class TicketStore:
         if wip_exempt is None:
             wip_exempt = ticket_type in {"rework", "correction"}
         ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, correction_stage=correction_stage, rework_stage=rework_stage, mandatory=mandatory, wip_exempt=wip_exempt)
+        self.record_run_event(ticket, run_id=None, stage_id=ticket.status, event="created")
         self.save(ticket)
+        log.info("создан тикет %s (%s): %s", ticket.id, ticket.type, ticket.title)
         return ticket
 
 
