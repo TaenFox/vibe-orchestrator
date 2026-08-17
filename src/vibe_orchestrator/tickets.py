@@ -29,6 +29,7 @@ class Ticket:
     parent: str | None = None
     blocked_by: list[str] = field(default_factory=list)
     mandatory: bool = True
+    implementation_required: bool | None = None
     wip_exempt: bool = False
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
@@ -52,6 +53,8 @@ class Ticket:
         payload = {name: getattr(self, name) for name in self.__dataclass_fields__}
         if not payload["run_history"]:
             payload.pop("run_history")
+        if payload["implementation_required"] is None:
+            payload.pop("implementation_required")
         return payload
 
 
@@ -150,3 +153,16 @@ class TicketStore:
         ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, mandatory=mandatory, wip_exempt=wip_exempt)
         self.save(ticket)
         return ticket
+
+
+def next_status_for_ticket(store: TicketStore, ticket: Ticket) -> str | None:
+    workflow = load_workflow(ticket.process)
+    stage = workflow.by_id[ticket.status]
+    if ticket.process != "discovery" or stage.id != "investment_decision":
+        return stage.next
+    if ticket.implementation_required is not None:
+        return "implementation" if ticket.implementation_required else "ready_for_validation"
+
+    # Legacy tickets predate the explicit technical-analysis decision.
+    linked = store.children_of(ticket.id, process="delivery")
+    return "implementation" if linked else "ready_for_validation"

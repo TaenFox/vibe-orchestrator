@@ -26,6 +26,16 @@ def test_delivery_child_mandatory_flag_is_persisted(tmp_path: Path):
     assert store.get(ticket.id).mandatory is False
 
 
+def test_discovery_implementation_decision_is_persisted(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("discovery", "idea", "No implementation")
+    ticket.implementation_required = False
+    store.save(ticket)
+
+    assert store.get(ticket.id).implementation_required is False
+
+
 def test_loads_legacy_ticket_without_run_history(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()

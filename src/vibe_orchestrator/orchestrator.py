@@ -117,6 +117,15 @@ class Orchestrator:
     ) -> None:
         if result.outcome not in (stage.outcomes or {}):
             raise ValueError(f"Outcome {result.outcome!r} is not allowed for {workflow.id}/{stage.id}")
+        if workflow.id == "discovery" and stage.id == "technical_analysis" and result.outcome == "completed":
+            try:
+                _technical_analysis_plan(result.details)
+            except ValueError as exc:
+                result = AgentResult(
+                    outcome="needs_correction",
+                    summary="Технический анализ вернул некорректный план реализации",
+                    details=str(exc),
+                )
         ticket = self.store.get(ticket_id)
         active_run = contract.run_id if contract else run_id or ticket.active_run
         metadata = self._run_traceability_metadata(
@@ -151,10 +160,14 @@ class Orchestrator:
             ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
             return
         if workflow.id == "discovery" and result.outcome == "needs_correction":
+            if stage.id == "technical_analysis":
+                ticket.implementation_required = None
             child = self._create_corrective_child(ticket, child_type="correction", status="ready", stage=stage, summary=result.summary, details=result.details)
             ticket.blocked_by = sorted({*ticket.blocked_by, child.id})
             return
         if workflow.id == "discovery" and stage.id == "technical_analysis" and result.outcome == "completed":
+            implementation_required, _ = _technical_analysis_plan(result.details)
+            ticket.implementation_required = implementation_required
             self._create_delivery_children(ticket, result.details)
 
     def _create_corrective_child(self, parent: Ticket, *, child_type: str, status: str, stage: Stage, summary: str, details: str) -> Ticket:
@@ -271,7 +284,8 @@ class Orchestrator:
             if ticket.status != "implementation" or ticket.active_run or ticket.blocked_by:
                 continue
             linked = self.store.children_of(ticket.id, process="delivery")
-            if any(child.mandatory and not self.store.is_done(child) for child in linked):
+            mandatory = [child for child in linked if child.mandatory]
+            if ticket.implementation_required is not False and mandatory and any(not self.store.is_done(child) for child in mandatory):
                 continue
             if next_status and ticket.status != next_status:
                 ticket.status = next_status
@@ -354,3 +368,34 @@ def _extract_structured_payload(details: str) -> dict[str, object]:
         if isinstance(payload, dict):
             return payload
     return {}
+
+
+def _technical_analysis_plan(details: str) -> tuple[bool, list[dict[str, object]]]:
+    payload = _extract_structured_payload(details)
+    implementation_required = payload.get("implementation_required")
+    if not isinstance(implementation_required, bool):
+        raise ValueError("Укажите implementation_required: true или implementation_required: false.")
+
+    delivery_tickets = payload.get("delivery_tickets")
+    if not isinstance(delivery_tickets, list):
+        raise ValueError("Укажите delivery_tickets как YAML-список, даже если он пуст.")
+    if any(not isinstance(item, dict) for item in delivery_tickets):
+        raise ValueError("Каждый элемент delivery_tickets должен быть YAML-объектом.")
+
+    typed_tickets = [dict(item) for item in delivery_tickets]
+    for item in typed_tickets:
+        if str(item.get("type", "")).lower() not in {"story", "task", "bug"}:
+            raise ValueError("Каждый Delivery-тикет должен иметь type: story, task или bug.")
+        if not str(item.get("title", "")).strip():
+            raise ValueError("Каждый Delivery-тикет должен иметь непустой title.")
+        if "mandatory" in item and not isinstance(item["mandatory"], bool):
+            raise ValueError("Поле mandatory каждого Delivery-тикета должно быть true или false.")
+        if "priority" in item and (not isinstance(item["priority"], int) or isinstance(item["priority"], bool)):
+            raise ValueError("Поле priority каждого Delivery-тикета должно быть целым числом.")
+    if not implementation_required and typed_tickets:
+        raise ValueError("При implementation_required: false список delivery_tickets должен быть пустым.")
+    if implementation_required:
+        mandatory = [item for item in typed_tickets if item.get("mandatory", True) is True]
+        if not mandatory:
+            raise ValueError("При implementation_required: true нужен хотя бы один тикет с mandatory: true.")
+    return implementation_required, typed_tickets

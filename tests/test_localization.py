@@ -60,3 +60,16 @@ def test_ui_board_uses_russian_labels(tmp_path: Path):
     assert "DEL-LOCK" in html
     assert "Последний outcome" in html
     assert "failed" in html
+
+
+def test_ui_skips_implementation_when_technical_analysis_requires_no_delivery(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("discovery", "idea", "Без реализации", status="investment_decision")
+    ticket.implementation_required = False
+    store.save(ticket)
+
+    html = render_board(store, load_all_workflows(), "discovery")
+
+    assert 'name="target" value="ready_for_validation"' in html
+    assert "Переместить → Готово к валидации" in html

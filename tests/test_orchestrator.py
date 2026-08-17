@@ -5,6 +5,7 @@ from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.scheduler import select_candidates
+from vibe_orchestrator.tickets import next_status_for_ticket
 
 
 class SuccessfulRunner:
@@ -430,6 +431,7 @@ def test_technical_analysis_creates_delivery_children_and_waits_for_completion(t
             details="""Рекомендуем продолжить.
 
 ```yaml
+implementation_required: true
 delivery_tickets:
   - type: story
     title: "Story onboarding shell"
@@ -452,6 +454,8 @@ delivery_tickets:
     assert [child.type for child in children] == ["story", "task"]
     assert all(child.status == "selected_for_session" for child in children)
     assert all(child.mandatory is True for child in children)
+    assert idea.implementation_required is True
+    assert next_status_for_ticket(orchestrator.store, idea) == "implementation"
     assert [entry["event"] for entry in idea.run_history] == ["completed"]
     assert idea.run_history[0]["run_id"] == "run-ta"
 
@@ -468,6 +472,61 @@ delivery_tickets:
     assert orchestrator.store.get(idea.id).status == "ready_for_validation"
 
 
+def test_technical_analysis_without_implementation_skips_implementation(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Configuration-only decision", status="technical_analysis")
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    workflow = load_workflow("discovery")
+    orchestrator._apply_result(
+        workflow,
+        idea.id,
+        workflow.by_id["technical_analysis"],
+        AgentResult(
+            outcome="completed",
+            summary="Реализация не требуется",
+            details="""```yaml
+implementation_required: false
+delivery_tickets: []
+```""",
+        ),
+    )
+
+    idea = orchestrator.store.get(idea.id)
+
+    assert idea.status == "investment_decision"
+    assert idea.implementation_required is False
+    assert orchestrator.store.children_of(idea.id, process="delivery") == []
+    assert next_status_for_ticket(orchestrator.store, idea) == "ready_for_validation"
+
+
+def test_invalid_technical_analysis_plan_requests_correction(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Ambiguous implementation", status="technical_analysis")
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    workflow = load_workflow("discovery")
+    orchestrator._apply_result(
+        workflow,
+        idea.id,
+        workflow.by_id["technical_analysis"],
+        AgentResult(outcome="completed", summary="Готово", details="""```yaml
+delivery_tickets: []
+```"""),
+    )
+
+    idea = orchestrator.store.get(idea.id)
+    corrections = orchestrator.store.children_of(idea.id, process="discovery")
+
+    assert idea.status == "technical_analysis"
+    assert idea.implementation_required is None
+    assert idea.last_outcome == "needs_correction"
+    assert idea.blocked_by == [corrections[0].id]
+    assert "implementation_required" in corrections[0].description
+
+
 def test_technical_analysis_retry_reuses_existing_delivery_children(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     idea = orchestrator.store.create("discovery", "idea", "New onboarding", status="technical_analysis")
@@ -477,6 +536,7 @@ def test_technical_analysis_retry_reuses_existing_delivery_children(tmp_path: Pa
     details = """Рекомендуем продолжить.
 
 ```yaml
+implementation_required: true
 delivery_tickets:
   - type: story
     title: "Story onboarding shell"
@@ -553,6 +613,7 @@ def test_technical_analysis_retry_removes_stale_delivery_children_from_implement
     initial_details = """Рекомендуем продолжить.
 
 ```yaml
+implementation_required: true
 delivery_tickets:
   - type: story
     title: "Story onboarding shell"
@@ -567,6 +628,7 @@ delivery_tickets:
     revised_details = """Рекомендуем продолжить.
 
 ```yaml
+implementation_required: true
 delivery_tickets:
   - type: story
     title: "Story onboarding shell"
@@ -647,6 +709,20 @@ def test_implementation_waits_only_for_mandatory_delivery_children(tmp_path: Pat
 def test_implementation_without_delivery_children_advances_to_validation(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     idea = orchestrator.store.create("discovery", "idea", "No delivery split", status="implementation")
+    idea.implementation_required = True
+    orchestrator.store.save(idea)
+
+    orchestrator._reconcile_tickets()
+
+    assert orchestrator.store.get(idea.id).status == "ready_for_validation"
+
+
+def test_implementation_marked_unnecessary_ignores_stale_delivery_children(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "No longer needs delivery", status="implementation")
+    idea.implementation_required = False
+    orchestrator.store.save(idea)
+    orchestrator.store.create("delivery", "story", "Stale work", parent=idea.id, status="review", mandatory=True)
 
     orchestrator._reconcile_tickets()
 

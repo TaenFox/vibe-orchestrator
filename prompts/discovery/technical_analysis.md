@@ -7,6 +7,7 @@
 Если технический анализ завершен, верните `completed` и завершите `details` машинно-читаемым блоком YAML:
 
 ```yaml
+implementation_required: true
 delivery_tickets:
   - type: story|task|bug
     title: "Короткий заголовок"
@@ -17,5 +18,14 @@ delivery_tickets:
 ```
 
 `mandatory: true` означает, что Discovery-идея на стадии `implementation` будет ждать завершения этого Delivery-тикета. Для необязательных задач укажите `mandatory: false`.
+
+Если реализация не требуется, явно верните:
+
+```yaml
+implementation_required: false
+delivery_tickets: []
+```
+
+При `implementation_required: true` укажите хотя бы один тикет с `mandatory: true`. Не используйте пустой список для обозначения ошибки или незавершенного анализа: в таком случае верните `needs_correction`.
 
 Оркестратор автоматически создаст эти связанные Delivery-тикеты, сохранит признак обязательности и привяжет их к Discovery-идее.

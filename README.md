@@ -18,7 +18,7 @@
 - Для активных стадий действуют лимиты WIP.
 - Оркестратор забирает тикет, перемещая его в активную стадию **до** запуска Codex.
 - Outcomes `needs_rework` и `needs_correction` автоматически создают дочерние тикеты Rework/Correction, не учитываемые в WIP; родитель остается на своей текущей стадии, заблокирован дочерними тикетами и продолжает занимать WIP.
-- Discovery `technical_analysis` может автоматически создать связанные Delivery-тикеты `story` / `task` / `bug`; Discovery-идея на стадии `implementation` ждет завершения только обязательных (`mandatory: true`) связанных Delivery-тикетов и только затем переходит в `ready_for_validation`.
+- Discovery `technical_analysis` явно указывает `implementation_required` и может автоматически создать связанные Delivery-тикеты `story` / `task` / `bug`. После инвестиционного решения идея без реализации сразу направляется в `ready_for_validation`; идея с реализацией ждет в `implementation` завершения обязательных (`mandatory: true`) Delivery-тикетов.
 - Агенты возвращают `outcome`; сами статусы workflow они не меняют.
 
 ## Требования
@@ -172,9 +172,9 @@ Source of truth для аудита разделен на два слоя:
 
 ## Известные ограничения прототипа
 
-- Переходы, выполняемые человеком, намеренно упрощены: кнопки UI следуют только настроенному переходу `next`.
+- Переходы, выполняемые человеком, намеренно упрощены: обычно кнопки UI следуют настроенному `next`; для Discovery `investment_decision` цель выбирается по `implementation_required`.
 - Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.
-- `technical_analysis` создает Delivery-тикеты только из YAML-блока `delivery_tickets` в `details`; поле `mandatory` управляет блокировкой Discovery `implementation`, дедупликация похожих тикетов пока не реализована.
+- `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Дедупликация похожих тикетов пока не реализована.
 - Traceability MVP хранит `run_history` в самом тикете и локальные артефакты в `.vibe/runs/`; централизованного аудиторского хранилища, retention policy и защиты от ручного редактирования YAML пока нет.
 - Если процесс Codex завершается с ошибкой, родительский тикет остается на активной стадии, чтобы сбой оставался видимым в WIP.
 - UI намеренно минималистичен и не имеет зависимостей.
