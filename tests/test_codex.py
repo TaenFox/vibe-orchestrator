@@ -54,6 +54,30 @@ def test_prompt_includes_run_id_and_execution_profile(tmp_path: Path):
     assert "Обновить traceability контракт." in prompt
 
 
+def test_prompt_includes_completed_correction_context(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    parent = store.create("discovery", "idea", "Group delivery work", status="analysis")
+    correction = store.create(
+        "discovery",
+        "correction",
+        "Clarify delivery group",
+        parent=parent.id,
+        status="done",
+        description="Нужно определить границы группы.",
+    )
+    correction.last_summary = "Принято: группа только для аудита, тикеты независимы."
+    store.save(correction)
+    runner = CodexRunner(store)
+    stage = load_workflow("discovery").by_id["analysis"]
+
+    prompt = runner._build_prompt(parent, stage, runner.prepare_execution_contract(stage, "run-123"))
+
+    assert "Контекст завершённых Correction" in prompt
+    assert correction.id in prompt
+    assert "тикеты независимы" in prompt
+
+
 def test_execution_contract_versions_full_prompt_template(tmp_path: Path, monkeypatch):
     store = TicketStore(tmp_path)
     store.init()

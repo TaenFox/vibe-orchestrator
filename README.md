@@ -111,7 +111,7 @@ vibe release-retry /path/to/your-project DEL-XXXXXX  # повторить merge 
 Оркестратор перечитывает лимит перед каждым циклом планирования. Снижение лимита не прерывает уже запущенных агентов: новые запуски начнутся только после того, как число активных воркеров станет меньше заданного лимита.
 Последний лимит сохраняется между перезапусками. Явный `--max-agents N` при старте переопределяет сохранённое значение.
 
-Для запуска из отдельного checkout `stable` укажите целевой checkout ветки `main` через `VIBE_MAIN_WORKTREE`. Worktree тикета создаётся в `.vibe/tmp/worktrees/`; состояние тикетов остаётся только в `stable`. При конфликте release-операция делает `merge --abort`, оставляет тикет на `ready_for_release` и ждёт ручного разрешения перед `vibe release-retry`.
+При запуске из `stable` оркестратор автоматически находит checkout ветки `main` или создаёт временный worktree в `.vibe/tmp/worktrees/__main__`. `VIBE_MAIN_WORKTREE` и `VIBE_MAIN_BRANCH` можно использовать как override. Worktree тикета создаётся в `.vibe/tmp/worktrees/`; состояние тикетов остаётся только в `stable`. При конфликте release-операция делает `merge --abort`, оставляет тикет на `ready_for_release` и ждёт ручного разрешения перед `vibe release-retry`.
 
 ## Хранение тикетов
 
