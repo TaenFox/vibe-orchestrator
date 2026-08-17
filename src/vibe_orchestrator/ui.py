@@ -144,7 +144,11 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
                 if self.path == "/session/create":
                     session_store.create(data.get("title", [""])[0]); return self._redirect("/?process=delivery")
                 if self.path == "/session/add":
-                    session_store.add(data["session"][0], data["ticket"][0], store); return self._redirect("/?process=delivery")
+                    session_id = data.get("session", [""])[0]
+                    ticket_id = data.get("ticket", [""])[0]
+                    if not session_id or not ticket_id:
+                        return self.send_error(400, "Тикет для добавления не выбран")
+                    session_store.add(session_id, ticket_id, store); return self._redirect("/?process=delivery")
                 if self.path == "/session/remove":
                     session_store.remove(data["session"][0], data["ticket"][0]); return self._redirect("/?process=delivery")
                 if self.path == "/session/activate":
@@ -445,12 +449,18 @@ def _sessions_html(store, session_store) -> str:
             participants.append(f'<div class="details-row"><span class="meta">{html.escape(ticket_id)}</span>{html.escape(title)}{remove}</div>')
         actions = ""
         if session.status == "draft":
+            available_tickets = [
+                ticket for ticket in store.list("delivery")
+                if not store.is_done(ticket) and ticket.id not in session.participants
+            ]
             options = "".join(
                 f'<option value="{html.escape(ticket.id)}">{html.escape(ticket.id)} · {html.escape(ticket.title)}</option>'
-                for ticket in store.list("delivery")
-                if not store.is_done(ticket) and ticket.id not in session.participants
+                for ticket in available_tickets
             )
-            actions = f'<form method="post" action="/session/add"><input type="hidden" name="session" value="{html.escape(session.id)}"><select name="ticket">{options}</select><button>Добавить тикет</button></form><form method="post" action="/session/activate"><input type="hidden" name="session" value="{html.escape(session.id)}"><button>Активировать</button></form>'
+            if not options:
+                options = '<option value="" selected disabled>Нет доступных тикетов</option>'
+            add_disabled = " disabled" if not available_tickets else ""
+            actions = f'<form method="post" action="/session/add"><input type="hidden" name="session" value="{html.escape(session.id)}"><select name="ticket" required>{options}</select><button{add_disabled}>Добавить тикет</button></form><form method="post" action="/session/activate"><input type="hidden" name="session" value="{html.escape(session.id)}"><button>Активировать</button></form>'
         elif session.status == "active":
             actions = f'<form method="post" action="/session/complete"><input type="hidden" name="session" value="{html.escape(session.id)}"><input name="override" placeholder="Причина override, если неполна"><button>Завершить</button></form><form method="post" action="/session/cancel"><input type="hidden" name="session" value="{html.escape(session.id)}"><input name="override" placeholder="Причина override, если неполна"><button>Отменить</button></form>'
         cards.append(f'<article class="card"><strong>{html.escape(session.title)}</strong><span class="badge">{html.escape(session.id)}</span><span class="badge">{html.escape(session.status)}</span><div class="meta">mandatory {aggregate["mandatory"]} · optional {aggregate["optional"]} · done {aggregate["done"]} · blocked {aggregate["blocked"]} · active_run {aggregate["active_run"]}</div><div class="details-body">{"".join(participants) or "<span class=meta>Состав пуст</span>"}</div>{actions}</article>')

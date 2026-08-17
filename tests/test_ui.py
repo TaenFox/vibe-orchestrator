@@ -128,6 +128,26 @@ def test_ui_api_payload_covers_discovery_delivery_and_active_session(http_server
     assert session_payload["tickets"][0]["active_run"] == "run-active"
 
 
+def test_empty_delivery_session_ticket_selector_disables_add_action(http_server, project):
+    sessions = DeliverySessionStore(project)
+    session = sessions.create("Пустая сессия")
+
+    page = render_board(TicketStore(project), load_all_workflows(), "delivery", session_store=sessions)
+
+    assert 'value="" selected disabled>Нет доступных тикетов</option>' in page
+    assert '<button disabled>Добавить тикет</button>' in page
+
+    missing_ticket = urllib.request.Request(
+        f"{http_server}/session/add",
+        data=urllib.parse.urlencode({"session": session.id}).encode("utf-8"),
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(missing_ticket)
+    assert error.value.code == 400
+    assert "Тикет для добавления не выбран" in error.value.read().decode("utf-8")
+
+
 def test_ticket_api_exposes_latest_usage_and_confirmed_aggregate(http_server, project):
     store = TicketStore(project)
     ticket = store.create("delivery", "task", "Token telemetry", status="done")
