@@ -127,6 +127,30 @@ def test_development_tree_is_synced_with_current_main(tmp_path: Path):
     assert (workspace / "main-change.txt").read_text(encoding="utf-8") == "current main\n"
 
 
+def test_development_sync_combines_independently_added_text_files(tmp_path: Path):
+    project = git_project(tmp_path)
+    git(project, "checkout", "-b", "stable")
+    store = TicketStore(project)
+    store.init()
+    manager = GitTreeManager(project, store)
+    ticket = store.create("delivery", "task", "Resolve add-add")
+    workspace = manager.workspace_for(ticket)
+    (workspace / "shared.txt").write_text("ticket change\n", encoding="utf-8")
+    manager.commit_workspace(workspace, ticket.id)
+
+    main_worktree = manager._ensure_main_worktree()
+    (main_worktree / "shared.txt").write_text("main change\n", encoding="utf-8")
+    git(main_worktree, "add", "shared.txt")
+    git(main_worktree, "commit", "-m", "main shared change")
+
+    manager.workspace_for(ticket, stage_id="development")
+
+    content = (workspace / "shared.txt").read_text(encoding="utf-8")
+    assert "ticket change" in content
+    assert "main change" in content
+    assert not git(workspace, "status", "--porcelain")
+
+
 def test_completed_rework_is_integrated_before_parent_is_unblocked(tmp_path: Path):
     project = git_project(tmp_path)
     orchestrator = Orchestrator(project, max_agents=0)
