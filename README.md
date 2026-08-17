@@ -154,6 +154,21 @@ participants:
 `wip_exempt`-тикеты (например, rework) сохраняют прежнее поведение. При отсутствии
 активного файла старые тикеты работают в legacy-режиме без миграции.
 
+Управляемые сессии можно создавать и изменять через CLI:
+
+```bash
+vibe session create /path/to/your-project "Релиз 1"
+vibe session add /path/to/your-project SES-XXXXXX DEL-XXXXXX
+vibe session activate /path/to/your-project SES-XXXXXX
+vibe session show /path/to/your-project SES-XXXXXX
+vibe session complete /path/to/your-project SES-XXXXXX
+vibe session cancel /path/to/your-project SES-XXXXXX --override "Состав устарел"
+```
+
+Сессия активируется только с непустым составом Delivery-тикетов. Завершение или
+отмена неполной сессии требуют `--override` (также поддерживается `--reason`) с
+причиной. Состав черновика изменяется командами `session add` и `session remove`.
+
 Для запуска из отдельного checkout `stable` укажите целевой checkout ветки `main` через `VIBE_MAIN_WORKTREE`. Worktree тикета создаётся в `.vibe/tmp/worktrees/`; состояние тикетов остаётся только в `stable`. При конфликте release-операция делает `merge --abort`, оставляет тикет на `ready_for_release` и ждёт ручного разрешения перед `vibe release-retry`.
 
 ## Хранение тикетов
