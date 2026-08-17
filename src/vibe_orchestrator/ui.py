@@ -307,7 +307,7 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
             continue
         related = [stage]
         if mode == "compact" and stage.kind == "queue" and stage.pull_to and stage.pull_to in workflow.by_id:
-            related.append(workflow.by_id[stage.pull_to])
+            related.insert(0, workflow.by_id[stage.pull_to])
         rendered.update(item.id for item in related)
         group = []
         for item in related:
@@ -346,7 +346,7 @@ def render_board_fragment(store, workflows, process: str, worker_control=None, t
         for stage in stages:
             if stage.id in rendered: continue
             related=[stage]
-            if stage.kind == "queue" and stage.pull_to and stage.pull_to in workflow.by_id: related.append(workflow.by_id[stage.pull_to])
+            if stage.kind == "queue" and stage.pull_to and stage.pull_to in workflow.by_id: related.insert(0, workflow.by_id[stage.pull_to])
             rendered.update(item.id for item in related)
             columns.append(f'<div class="compact-group" data-stage-group="{html.escape(stage.id)}">{"".join(_stage_column(store, workflow, item, tickets, tree_manager, session_store) for item in related)}</div>')
     else:
