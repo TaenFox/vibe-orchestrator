@@ -88,8 +88,33 @@ class GitTreeManager:
         try:
             self._run(["merge", "--no-edit", self.main_branch], cwd=handle.worktree_path)
         except GitTreeError:
+            if self._resolve_text_add_add_conflicts(handle.worktree_path):
+                self._run(["commit", "--no-edit"], cwd=handle.worktree_path)
+                return
             self._run_optional(["merge", "--abort"], cwd=handle.worktree_path)
             raise
+
+    def _resolve_text_add_add_conflicts(self, worktree: Path) -> bool:
+        """Merge independently added text files without choosing either side."""
+        conflicted = self._run(["diff", "--name-only", "--diff-filter=U"], cwd=worktree).stdout.splitlines()
+        if not conflicted:
+            return False
+        for relative_path in conflicted:
+            stages = self._run(["ls-files", "-u", "--", relative_path], cwd=worktree).stdout.splitlines()
+            if {line.split()[2] for line in stages} != {"2", "3"}:
+                return False
+            try:
+                ours = self._run(["show", f":2:{relative_path}"], cwd=worktree).stdout
+                theirs = self._run(["show", f":3:{relative_path}"], cwd=worktree).stdout
+            except GitTreeError:
+                return False
+            if ours != theirs:
+                merged = ours.rstrip() + "\n\n" + theirs.lstrip()
+                if not merged.endswith("\n"):
+                    merged += "\n"
+                (worktree / relative_path).write_text(merged, encoding="utf-8")
+            self._run(["add", "--", relative_path], cwd=worktree)
+        return True
 
     def ensure_tree(self, ticket: Ticket) -> "TreeHandle":
         if ticket.process != "delivery":
