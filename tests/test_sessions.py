@@ -179,3 +179,33 @@ def test_invalid_type_duplicate_and_legacy_reload(tmp_path: Path):
     assert loaded.schema_version == 1
     assert loaded.audit_events == []
     assert loaded.created_at == loaded.updated_at
+
+
+@pytest.mark.parametrize(
+    "session_id", ["", "SESSION-", "../outside", "SESSION-abc", "SESSION-A/B", "SESSION-A\\B"]
+)
+def test_session_ids_are_safe_tokens(tmp_path: Path, session_id: str):
+    _, store = stores(tmp_path)
+    session = DeliverySession(id=session_id)
+
+    with pytest.raises(ValueError, match="Session ID"):
+        store.session_path(session_id)
+    with pytest.raises(ValueError, match="Session ID"):
+        store.save(session)
+    with pytest.raises(ValueError, match="Session ID"):
+        store.get(session_id)
+
+
+def test_session_paths_cannot_escape_sessions_directory(tmp_path: Path):
+    _, store = stores(tmp_path)
+    outside = tmp_path / ".vibe" / "outside.yaml"
+    outside.write_text("id: SESSION-OUTSIDE\nstatus: draft\nticket_ids: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inside .vibe/sessions"):
+        store.load_path(outside)
+
+    malicious = DeliverySession(id="SESSION-VALID")
+    malicious.id = "../outside"
+    with pytest.raises(ValueError, match="Session ID"):
+        store.save(malicious)
+    assert outside.read_text(encoding="utf-8").startswith("id: SESSION-OUTSIDE")

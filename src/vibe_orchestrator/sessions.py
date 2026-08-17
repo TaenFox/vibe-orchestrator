@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ SCHEMA_VERSION = 1
 SESSION_STATUSES = {"draft", "active", "completed", "cancelled"}
 OPEN_STATUSES = {"draft", "active"}
 DELIVERY_TICKET_TYPES = {"story", "task", "bug", "rework"}
+SESSION_ID_PATTERN = re.compile(r"SESSION-[A-Z0-9]+\Z")
 
 
 def now_iso() -> str:
@@ -78,6 +80,7 @@ class SessionStore:
 
     def session_path(self, session: DeliverySession | str) -> Path:
         session_id = session.id if isinstance(session, DeliverySession) else session
+        self._validate_session_id(session_id)
         return self.sessions_root / f"{session_id}.yaml"
 
     def create(self, ticket_ids: list[str] | None = None) -> DeliverySession:
@@ -98,16 +101,21 @@ class SessionStore:
         return self.load_path(path)
 
     def load_path(self, path: Path) -> DeliverySession:
+        path = self._validate_session_path(path)
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if not isinstance(data, dict):
             raise ValueError(f"Invalid session document: {path}")
-        return DeliverySession.from_dict(data)
+        session = DeliverySession.from_dict(data)
+        self._validate_session_id(session.id)
+        if path.stem != session.id:
+            raise ValueError(f"Session ID does not match file name: {path}")
+        return session
 
     def list(self) -> list[DeliverySession]:
         return [self.load_path(path) for path in sorted(self.sessions_root.glob("*.yaml"))]
 
     def save(self, session: DeliverySession) -> None:
-        path = self.session_path(session)
+        path = self._validate_session_path(self.session_path(session))
         with self._save_lock():
             persisted = self.load_path(path) if path.exists() else None
             if persisted is not None:
@@ -169,6 +177,7 @@ class SessionStore:
         self.save(session)
 
     def _validate_session(self, session: DeliverySession) -> None:
+        self._validate_session_id(session.id)
         if session.schema_version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported session schema version: {session.schema_version!r}")
         if session.status not in SESSION_STATUSES:
@@ -315,3 +324,21 @@ class SessionStore:
         entry = {"event": event, "timestamp": now_iso()}
         entry.update(extra)
         session.audit_events.append(entry)
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> None:
+        if not isinstance(session_id, str) or SESSION_ID_PATTERN.fullmatch(session_id) is None:
+            raise ValueError("Session ID must match SESSION-[A-Z0-9]+")
+
+    def _validate_session_path(self, path: Path) -> Path:
+        candidate = Path(path)
+        root = self.sessions_root.resolve()
+        resolved = candidate.resolve(strict=False)
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Session path must be inside .vibe/sessions") from exc
+        if len(relative.parts) != 1 or relative.suffix != ".yaml":
+            raise ValueError("Session path must be a session YAML file")
+        self._validate_session_id(relative.stem)
+        return resolved
