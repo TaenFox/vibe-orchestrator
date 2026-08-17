@@ -55,11 +55,26 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     if (document.hidden || document.querySelector('details[open]') || (!force && document.activeElement?.matches('input, select, textarea'))) return;
     remember(); const current = state();
     const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || '', active: current.active ? '1' : ''}});
+    const refreshDrawer = async (ticketId) => {{
+      const drawer = document.querySelector('[data-ticket-drawer]');
+      const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`);
+      if (!drawer || !panel || drawer.hidden) return;
+      try {{
+        const response = await fetch('/drawer?' + new URLSearchParams({{process: current.process || 'discovery', ticket: ticketId}}));
+        if (!response.ok) return;
+        const updated = document.createRange().createContextualFragment(await response.text()).firstElementChild;
+        if (!updated) return;
+        updated.hidden = false;
+        panel.replaceWith(updated);
+        updated.focus();
+      }} catch (_) {{ /* transient server/network failure: keep the current drawer */ }}
+    }};
     try {{ const response = await fetch('/fragment?' + params); if (!response.ok) return; const fragment = await response.text();
       const board = document.querySelector('.board'); if (!board) return; board.outerHTML = fragment;
       const restored = state(); restore();
       if (restored.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(restored.ticket)}}"]`)?.classList.add('selected');
       const refreshedBoard = document.querySelector('.board'); if (refreshedBoard && restored.boardScrollX != null) refreshedBoard.scrollLeft = restored.boardScrollX; if (restored.scrollY != null) window.scrollTo(0, restored.scrollY); if (restored.focus >= 0) controls()[restored.focus]?.focus();
+      if (restored.ticket) await refreshDrawer(restored.ticket);
     }} catch (_) {{ /* transient server/network failure: keep the current board */ }}
   }};
   document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) remember(); }});
@@ -68,7 +83,18 @@ AUTO_REFRESH_SCRIPT = f"""<script>
   const closeDrawer = () => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (!drawer) return; drawer.hidden = true; if (backdrop) backdrop.hidden = true; drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.hidden = true); drawer.setAttribute('aria-hidden', 'true'); document.body.classList.remove('drawer-open'); if (drawer.dataset.previousFocus) document.getElementById(drawer.dataset.previousFocus)?.focus(); }};
   const openDrawer = (ticketId, trigger) => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`); if (!drawer || !panel) return; drawer.querySelectorAll('[data-drawer-ticket]').forEach(item => item.hidden = item !== panel); panel.hidden = false; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.dataset.previousFocus = trigger?.id || ''; document.body.classList.add('drawer-open'); panel.focus(); save({{ticket: ticketId}}); }};
   document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }} const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); openDrawer(open.dataset.openTicket, open); return; }} if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) closeDrawer(); const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
-  document.addEventListener('keydown', event => {{ if (event.key === 'Escape') closeDrawer(); }});
+  document.addEventListener('keydown', event => {{
+    const drawer = document.querySelector('[data-ticket-drawer]');
+    const panel = drawer?.querySelector('[data-drawer-ticket]:not([hidden])');
+    if (!drawer || drawer.hidden || !panel) return;
+    if (event.key === 'Escape') {{ closeDrawer(); return; }}
+    if (event.key !== 'Tab') return;
+    const focusable = [...panel.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(item => !item.hidden && item.getAttribute('aria-hidden') !== 'true');
+    if (!focusable.length) {{ event.preventDefault(); panel.focus(); return; }}
+    const first = focusable[0]; const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {{ event.preventDefault(); last.focus(); }}
+    else if (!event.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {{ event.preventDefault(); first.focus(); }}
+  }});
   const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); const activeControl = document.querySelector('[data-board-active]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; if (activeControl && current.active) activeControl.value = '1'; restore(); if (current.ticket) {{ document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); openDrawer(current.ticket); }} const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
 }})();
 </script>"""
@@ -86,6 +112,13 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
             if parsed.path == "/fragment":
                 query = urllib.parse.parse_qs(parsed.query)
                 return self._html(render_board_fragment(store, workflows, query.get("process", ["discovery"])[0], worker_control, tree_manager, session_store, mode=query.get("mode", ["compact"])[0], search=query.get("search", [""])[0], status=query.get("status", [""])[0], active=query.get("active", [""])[0]))
+            if parsed.path == "/drawer":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    ticket = store.get(query.get("ticket", [""])[0])
+                except KeyError:
+                    return self.send_error(404)
+                return self._html(_ticket_drawer_panel_html(store, workflows, query.get("process", ["discovery"])[0], ticket, tree_manager, session_store))
             if parsed.path.startswith("/artifacts/"):
                 relative = urllib.parse.unquote(parsed.path.removeprefix("/artifacts/")).strip("/")
                 candidate = (store.runs_root / relative).resolve()
@@ -473,40 +506,42 @@ def _ticket_action_html(store, workflow, ticket) -> str:
 
 
 def _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store) -> str:
-    panels = []
-    for ticket in tickets:
-        workflow = workflows.get(ticket.process) or workflows[process]
-        tree = tree_manager.trees.get(ticket.id) if tree_manager else None
-        session = next((item for item in session_store.list() if ticket.id in item.participants), None) if session_store and ticket.process == "delivery" else None
-        parent = ticket.parent or "нет"
-        blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
-        run_links = []
-        for entry in reversed(ticket.run_history):
-            run_id = entry.get("run_id")
-            if not run_id:
-                continue
-            artifact_path = entry.get("artifacts_path") or f".vibe/runs/{run_id}"
-            run_links.append(
-                f'<div class="run-entry{" active-run" if run_id == ticket.active_run else ""}"><span class="badge">{html.escape(str(entry.get("event", "run")))}</span> '
-                f'<span class="meta">{html.escape(str(entry.get("stage", "")))} · {html.escape(str(entry.get("timestamp", "")))}</span>'
-                f'<div>{html.escape(str(entry.get("summary", "")))}</div><a href="/artifacts/{urllib.parse.quote(str(run_id), safe="")}" target="_blank" rel="noopener">Артефакты: {html.escape(str(artifact_path))}</a></div>'
-            )
-        tree_html = ""
-        if tree:
-            tree_html = f'<div class="details-row"><span class="meta">Ветка</span>{html.escape(tree.branch)}</div><div class="details-row"><span class="meta">Worktree</span>{html.escape(tree.worktree)}</div><div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
-        session_html = f'<div class="details-row"><span class="meta">Сессия</span>{html.escape(session.id)} · {html.escape(session.status)}</div>' if session else '<div class="details-row"><span class="meta">Сессия</span>нет</div>'
-        action = _ticket_action_html(store, workflow, ticket)
-        panels.append(
-            f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
-            f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
-            f'<div class="drawer-actions">{action}</div><div class="drawer-section"><h3>Контекст тикета</h3>'
-            f'<div class="details-row"><span class="meta">Тип · статус · приоритет</span>{html.escape(ticket.type)} · {html.escape(ticket.status)} · {ticket.priority}</div>'
-            f'<div class="details-row"><span class="meta">Описание</span><div class="drawer-description">{html.escape(ticket.description or "(пусто)")}</div></div>'
-            f'<div class="details-row"><span class="meta">Summary</span>{html.escape(ticket.last_summary or "нет")}</div>'
-            f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
-            f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
-            f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
-            f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
-            f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
-        )
+    panels = [_ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store) for ticket in tickets]
     return f'<div class="drawer-backdrop" data-drawer-backdrop hidden></div><aside class="ticket-drawer" data-ticket-drawer role="dialog" aria-modal="true" aria-label="Контекст тикета" aria-hidden="true" hidden>{"".join(panels)}</aside>'
+
+
+def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store) -> str:
+    workflow = workflows.get(ticket.process) or workflows[process]
+    tree = tree_manager.trees.get(ticket.id) if tree_manager else None
+    session = next((item for item in session_store.list() if ticket.id in item.participants), None) if session_store and ticket.process == "delivery" else None
+    parent = ticket.parent or "нет"
+    blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
+    run_links = []
+    for entry in reversed(ticket.run_history):
+        run_id = entry.get("run_id")
+        if not run_id:
+            continue
+        artifact_path = entry.get("artifacts_path") or f".vibe/runs/{run_id}"
+        run_links.append(
+            f'<div class="run-entry{" active-run" if run_id == ticket.active_run else ""}"><span class="badge">{html.escape(str(entry.get("event", "run")))}</span> '
+            f'<span class="meta">{html.escape(str(entry.get("stage", "")))} · {html.escape(str(entry.get("timestamp", "")))}</span>'
+            f'<div>{html.escape(str(entry.get("summary", "")))}</div><a href="/artifacts/{urllib.parse.quote(str(run_id), safe="")}" target="_blank" rel="noopener">Артефакты: {html.escape(str(artifact_path))}</a></div>'
+        )
+    tree_html = ""
+    if tree:
+        tree_html = f'<div class="details-row"><span class="meta">Ветка</span>{html.escape(tree.branch)}</div><div class="details-row"><span class="meta">Worktree</span>{html.escape(tree.worktree)}</div><div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
+    session_html = f'<div class="details-row"><span class="meta">Сессия</span>{html.escape(session.id)} · {html.escape(session.status)}</div>' if session else '<div class="details-row"><span class="meta">Сессия</span>нет</div>'
+    action = _ticket_action_html(store, workflow, ticket)
+    return (
+        f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
+        f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
+        f'<div class="drawer-actions">{action}</div><div class="drawer-section"><h3>Контекст тикета</h3>'
+        f'<div class="details-row"><span class="meta">Тип · статус · приоритет</span>{html.escape(ticket.type)} · {html.escape(ticket.status)} · {ticket.priority}</div>'
+        f'<div class="details-row"><span class="meta">Описание</span><div class="drawer-description">{html.escape(ticket.description or "(пусто)")}</div></div>'
+        f'<div class="details-row"><span class="meta">Summary</span>{html.escape(ticket.last_summary or "нет")}</div>'
+        f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
+        f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
+        f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
+        f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
+        f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
+    )

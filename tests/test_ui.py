@@ -388,6 +388,9 @@ def test_ticket_drawer_contains_context_history_artifacts_and_accessibility(proj
     assert "/artifacts/run-active" in page
     assert "aria-label=\"Контекст тикета\"" in page
     assert "Escape" in page and "data-drawer-close" in page
+    assert "fetch('/drawer?'" in page
+    assert "event.key !== 'Tab'" in page
+    assert "event.shiftKey" in page
 
 
 def test_active_ticket_filter_keeps_only_running_tickets(project):
@@ -414,3 +417,14 @@ def test_ui_fragment_endpoint_returns_only_board(http_server, project):
     assert fragment.startswith('<main class="board flat-list">')
     assert ticket.title in fragment
     assert "<!doctype html>" not in fragment
+
+
+def test_ui_drawer_endpoint_returns_fresh_ticket_panel(http_server, project):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Актуальный drawer", status="development")
+    with urllib.request.urlopen(f"{http_server}/drawer?process=delivery&ticket={ticket.id}") as response:
+        panel = response.read().decode("utf-8")
+    assert response.status == 200
+    assert panel.startswith('<section class="drawer-panel"')
+    assert ticket.title in panel
+    assert "<!doctype html>" not in panel
