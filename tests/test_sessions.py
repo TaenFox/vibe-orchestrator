@@ -81,6 +81,31 @@ def test_cancel_draft_has_consistent_timestamps(tmp_path: Path):
     assert loaded.cancelled_at
 
 
+@pytest.mark.parametrize("field_name", ["started_at", "completed_at"])
+def test_cancel_draft_rejects_lifecycle_timestamps(tmp_path: Path, field_name: str):
+    _, store = stores(tmp_path)
+    session = store.create()
+    session.status = "cancelled"
+    session.cancelled_at = "2020-01-01T00:00:00+00:00"
+    setattr(session, field_name, "2020-01-01T00:00:00+00:00")
+
+    with pytest.raises(ValueError, match="Cancelled draft sessions"):
+        store.save(session)
+
+
+def test_cancel_active_rejects_completed_timestamp(tmp_path: Path):
+    tickets, store = stores(tmp_path)
+    ticket = tickets.create("delivery", "story", "Active session")
+    session = store.create([ticket.id])
+    store.activate(session)
+    session.status = "cancelled"
+    session.cancelled_at = "2020-01-01T00:00:00+00:00"
+    session.completed_at = "2020-01-01T00:00:00+00:00"
+
+    with pytest.raises(ValueError, match="Cancelled active sessions"):
+        store.save(session)
+
+
 def test_invalid_type_duplicate_and_legacy_reload(tmp_path: Path):
     tickets, store = stores(tmp_path)
     discovery_ticket = tickets.create("discovery", "idea", "Wrong process")

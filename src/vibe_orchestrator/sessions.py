@@ -210,6 +210,12 @@ class SessionStore:
             if any(getattr(session, field_name) for field_name in ("started_at", "completed_at", "cancelled_at")):
                 raise ValueError("Draft sessions cannot have lifecycle timestamps")
 
+        if session.status == "cancelled" and persisted.status == "draft":
+            if session.started_at is not None or session.completed_at is not None:
+                raise ValueError("Cancelled draft sessions cannot have started_at or completed_at")
+        if session.status == "cancelled" and persisted.status == "active" and session.completed_at is not None:
+            raise ValueError("Cancelled active sessions cannot have completed_at")
+
         if session.status == "draft":
             expected = (None, None, None)
         elif session.status == "active":
