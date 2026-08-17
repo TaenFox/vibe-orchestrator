@@ -78,5 +78,5 @@ def is_confirmed_token_usage(usage: Any) -> bool:
         and _non_negative_int(usage.get("input_tokens"))
         and _non_negative_int(usage.get("output_tokens"))
         and _non_negative_int(usage.get("total_tokens"))
-        and isinstance(usage.get("captured_at"), str)
+        and (usage.get("captured_at") is None or isinstance(usage.get("captured_at"), str))
     )
