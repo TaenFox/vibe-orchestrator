@@ -179,6 +179,57 @@ def test_invalid_type_duplicate_and_legacy_missing_updated_at(tmp_path: Path):
         store.get("SESSION-LEGACY")
 
 
+def test_legacy_updated_at_is_restored_from_created_at(tmp_path: Path):
+    _, store = stores(tmp_path)
+    path = tmp_path / ".vibe" / "sessions" / "SESSION-LEGACY.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "id": "SESSION-LEGACY",
+                "status": "draft",
+                "ticket_ids": [],
+                "created_at": "2020-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session = store.get("SESSION-LEGACY")
+
+    assert session.updated_at == session.created_at
+    store.save(session)
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["updated_at"]
+
+
+def test_legacy_aggregate_store_is_migrated_to_versioned_session_files(tmp_path: Path):
+    _, store = stores(tmp_path)
+    legacy_root = tmp_path / ".vibe" / "tmp"
+    legacy_root.mkdir(parents=True)
+    legacy_root.joinpath("delivery-sessions.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "sessions": [
+                    {
+                        "id": "SES-ABC123",
+                        "title": "Release",
+                        "status": "draft",
+                        "participants": [],
+                        "created_at": "2020-01-01T00:00:00+00:00",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = store.list()
+
+    assert [session.id for session in migrated] == ["SESSION-ABC123"]
+    assert migrated[0].title == "Release"
+    assert (tmp_path / ".vibe" / "sessions" / "SESSION-ABC123.yaml").exists()
+
+
 @pytest.mark.parametrize("updated_at", [None, "not-a-date"])
 def test_load_rejects_missing_or_invalid_updated_at(tmp_path: Path, updated_at: object):
     _, store = stores(tmp_path)

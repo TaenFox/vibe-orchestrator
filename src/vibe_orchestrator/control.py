@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from .sessions import SessionStore
+
 
 class WorkerControl:
     def __init__(self, project: Path):
@@ -41,10 +43,12 @@ class WorkerControl:
 
 
 class DeliverySessionControl:
-    """Read the optional active Delivery session selected by process management."""
+    """Read active participants from the persistent session model."""
 
     def __init__(self, project: Path):
-        self.path = project.resolve() / ".vibe" / "tmp" / "delivery-session.yaml"
+        self.project = project.resolve()
+        self.path = self.project / ".vibe" / "tmp" / "delivery-session.yaml"
+        self.store = SessionStore(self.project)
 
     def get_participants(self) -> set[str] | None:
         """Return participant IDs, or ``None`` when no active session exists.
@@ -52,6 +56,14 @@ class DeliverySessionControl:
         A missing file and an explicitly inactive session use legacy mode. An
         active but malformed session fails closed by returning no participants.
         """
+        try:
+            active = next((session for session in self.store.list() if session.status == "active"), None)
+            if active is not None:
+                return set(active.ticket_ids)
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+            return set()
+        # Keep reading the marker for projects that have not yet got a
+        # versioned session document; it is only a migration fallback.
         try:
             payload = yaml.safe_load(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -73,103 +85,53 @@ class SessionError(ValueError):
     """Ошибка проверки операции Delivery-сессии."""
 
 
-def _session_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass
-class DeliverySession:
-    id: str
-    title: str
-    status: str = "draft"
-    participants: list[str] = field(default_factory=list)
-    created_at: str = field(default_factory=_session_now)
-    updated_at: str = field(default_factory=_session_now)
-    override_reason: str | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DeliverySession":
-        allowed = {name for name in cls.__dataclass_fields__}
-        payload = {key: value for key, value in data.items() if key in allowed}
-        participants = payload.get("participants", [])
-        payload["participants"] = list(participants) if isinstance(participants, list) else []
-        return cls(**payload)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__ if getattr(self, name) is not None}
-
-
 class DeliverySessionStore:
-    """Хранилище и lifecycle-проверки управляемых Delivery-сессий."""
-
-    STATUSES = {"draft", "active", "completed", "cancelled"}
+    """Compatibility adapter backed exclusively by the persistent SessionStore."""
 
     def __init__(self, project: Path):
         self.project = project.resolve()
+        self.store = SessionStore(self.project)
         self.root = self.project / ".vibe" / "tmp"
-        self.path = self.root / "delivery-sessions.yaml"
         self.active_path = self.root / "delivery-session.yaml"
 
-    def _load(self) -> list[DeliverySession]:
+    def list(self):
         try:
-            payload = yaml.safe_load(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return []
-        except (OSError, UnicodeError, yaml.YAMLError) as exc:
-            raise SessionError(f"Не удалось прочитать хранилище сессий: {exc}") from exc
-        items = payload.get("sessions", []) if isinstance(payload, dict) else []
-        if not isinstance(items, list):
-            raise SessionError("Хранилище сессий повреждено: sessions должен быть списком")
-        return [DeliverySession.from_dict(item) for item in items if isinstance(item, dict)]
+            return self.store.list()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError(str(exc)) from exc
 
-    def _save(self, sessions: list[DeliverySession]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        payload = yaml.safe_dump({"sessions": [session.to_dict() for session in sessions]}, sort_keys=False, allow_unicode=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name, dir=self.root)
+    def get(self, session_id: str):
+        if session_id.startswith("SES-"):
+            session_id = f"SESSION-{session_id[4:]}"
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-            os.replace(tmp_name, self.path)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+            return self.store.get(session_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError(f"Сессия не найдена: {session_id}") from exc
 
-    def list(self) -> list[DeliverySession]:
-        return self._load()
-
-    def get(self, session_id: str) -> DeliverySession:
-        for session in self._load():
-            if session.id == session_id:
-                return session
-        raise SessionError(f"Сессия не найдена: {session_id}")
-
-    def create(self, title: str) -> DeliverySession:
-        title = title.strip()
-        if not title:
+    def create(self, title: str):
+        if not isinstance(title, str) or not title.strip():
             raise SessionError("Название сессии не может быть пустым")
-        sessions = self._load()
-        session = DeliverySession(id=f"SES-{uuid.uuid4().hex[:6].upper()}", title=title)
-        sessions.append(session)
-        self._save(sessions)
-        return session
+        return self.store.create(title=title.strip())
 
-    def _replace(self, changed: DeliverySession) -> DeliverySession:
-        sessions = self._load()
-        for index, session in enumerate(sessions):
-            if session.id == changed.id:
-                changed.updated_at = _session_now()
-                sessions[index] = changed
-                self._save(sessions)
+    def _replace(self, changed):
+        try:
+            self.store.save(changed)
+            return changed
+        except (KeyError, TypeError, ValueError) as exc:
+            # Keep the adapter able to inspect malformed legacy membership so
+            # activation can fail closed without changing ticket state.
+            if "Unknown ticket:" in str(exc):
+                self.store.session_path(changed).write_text(
+                    yaml.safe_dump(changed.to_dict(), sort_keys=False, allow_unicode=True), encoding="utf-8"
+                )
                 return changed
-        raise SessionError(f"Сессия не найдена: {changed.id}")
+            raise SessionError(str(exc)) from exc
 
-    def _active(self) -> DeliverySession | None:
-        return next((session for session in self._load() if session.status == "active"), None)
+    def _active(self):
+        return next((session for session in self.list() if session.status == "active"), None)
 
-    def add(self, session_id: str, ticket_id: str, ticket_store: Any) -> DeliverySession:
+    def add(self, session_id: str, ticket_id: str, ticket_store: Any):
         session = self.get(session_id)
-        if session.status != "draft":
-            raise SessionError("Участников можно менять только у черновика сессии")
         try:
             ticket = ticket_store.get(ticket_id)
         except KeyError as exc:
@@ -179,75 +141,78 @@ class DeliverySessionStore:
         if ticket_store.is_done(ticket):
             raise SessionError("Завершенный тикет нельзя добавить в сессию")
         active = self._active()
-        if active and ticket_id in active.participants:
+        if active and ticket_id in active.ticket_ids:
             raise SessionError(f"Тикет уже входит в активную сессию {active.id}")
-        if ticket_id not in session.participants:
-            session.participants.append(ticket_id)
-        return self._replace(session)
-
-    def remove(self, session_id: str, ticket_id: str) -> DeliverySession:
-        session = self.get(session_id)
-        if session.status != "draft":
-            raise SessionError("Участников можно менять только у черновика сессии")
-        if ticket_id not in session.participants:
-            raise SessionError(f"Тикет не входит в сессию: {ticket_id}")
-        session.participants.remove(ticket_id)
-        return self._replace(session)
-
-    def activate(self, session_id: str, ticket_store: Any) -> DeliverySession:
-        session = self.get(session_id)
-        if session.status != "draft":
-            raise SessionError("Активировать можно только черновик сессии")
-        if not session.participants:
-            raise SessionError("Нельзя активировать пустую сессию")
-        active = self._active()
-        if active:
-            raise SessionError(f"Уже есть активная сессия: {active.id}")
-        participants = []
-        for ticket_id in session.participants:
-            try:
-                ticket = ticket_store.get(ticket_id)
-            except KeyError as exc:
-                raise SessionError(f"Участник не найден: {ticket_id}") from exc
-            if ticket.process != "delivery" or ticket_store.is_done(ticket):
-                raise SessionError(f"Некорректный состав сессии: {ticket_id}")
-            participants.append(ticket)
-
-        for ticket in participants:
-            if ticket.status == "todo":
-                ticket.status = "selected_for_session"
-                ticket_store.save(ticket)
-        session.status = "active"
-        self._replace(session)
-        self.active_path.parent.mkdir(parents=True, exist_ok=True)
-        self.active_path.write_text(yaml.safe_dump({"active": True, "session_id": session.id, "participants": session.participants}, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        try:
+            self.store.add_ticket(session, ticket_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError(str(exc)) from exc
         return session
 
-    def _finish(self, session_id: str, status: str, ticket_store: Any, reason: str | None) -> DeliverySession:
+    def remove(self, session_id: str, ticket_id: str):
+        session = self.get(session_id)
+        try:
+            self.store.remove_ticket(session, ticket_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError(str(exc)) from exc
+        return session
+
+    def activate(self, session_id: str, ticket_store: Any):
+        session = self.get(session_id)
+        if self._active() is not None:
+            raise SessionError("Уже есть активная сессия")
+        try:
+            participants = []
+            for ticket_id in session.ticket_ids:
+                try:
+                    ticket = ticket_store.get(ticket_id)
+                except KeyError as exc:
+                    raise SessionError(f"Участник не найден: {ticket_id}") from exc
+                if ticket.process != "delivery" or ticket_store.is_done(ticket):
+                    raise SessionError(f"Некорректный состав сессии: {ticket_id}")
+                participants.append(ticket)
+            for ticket in participants:
+                if ticket.status == "todo":
+                    ticket.status = "selected_for_session"
+                    ticket_store.save(ticket)
+            self.store.activate(session)
+        except SessionError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            message = str(exc)
+            if message == "Cannot activate an empty session":
+                message = "Нельзя активировать пустую сессию"
+            raise SessionError(message) from exc
+        self.active_path.parent.mkdir(parents=True, exist_ok=True)
+        self.active_path.write_text(
+            yaml.safe_dump({"active": True, "session_id": session.id, "participants": session.ticket_ids}, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        return session
+
+    def _finish(self, session_id: str, status: str, ticket_store: Any, reason: str | None):
         session = self.get(session_id)
         if session.status != "active":
             raise SessionError(f"Завершить можно только активную сессию (сейчас: {session.status})")
         incomplete = []
-        for ticket_id in session.participants:
+        for ticket_id in session.ticket_ids:
             try:
-                ticket = ticket_store.get(ticket_id)
+                if not ticket_store.is_done(ticket_store.get(ticket_id)):
+                    incomplete.append(ticket_id)
             except KeyError:
-                incomplete.append(ticket_id)
-                continue
-            if not ticket_store.is_done(ticket):
                 incomplete.append(ticket_id)
         reason = reason.strip() if isinstance(reason, str) else None
         if incomplete and not reason:
             raise SessionError("Сессия неполная; укажите --override с причиной")
-        session.status = status
-        session.override_reason = reason
-        self._replace(session)
-        if status == "completed" or status == "cancelled":
-            self.active_path.unlink(missing_ok=True)
+        try:
+            (self.store.complete if status == "completed" else self.store.cancel)(session)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError(str(exc)) from exc
+        self.active_path.unlink(missing_ok=True)
         return session
 
-    def complete(self, session_id: str, ticket_store: Any, reason: str | None = None) -> DeliverySession:
+    def complete(self, session_id: str, ticket_store: Any, reason: str | None = None):
         return self._finish(session_id, "completed", ticket_store, reason)
 
-    def cancel(self, session_id: str, ticket_store: Any, reason: str | None = None) -> DeliverySession:
+    def cancel(self, session_id: str, ticket_store: Any, reason: str | None = None):
         return self._finish(session_id, "cancelled", ticket_store, reason)

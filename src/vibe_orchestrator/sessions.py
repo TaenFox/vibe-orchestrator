@@ -34,6 +34,7 @@ def now_iso() -> str:
 @dataclass
 class DeliverySession:
     id: str
+    title: str = ""
     schema_version: int = SCHEMA_VERSION
     status: str = "draft"
     ticket_ids: list[str] = field(default_factory=list)
@@ -51,10 +52,15 @@ class DeliverySession:
         payload.setdefault("schema_version", 1)
         payload.setdefault("status", "draft")
         payload.setdefault("ticket_ids", [])
+        had_created_at = bool(payload.get("created_at"))
         payload.setdefault("created_at", now_iso())
-        # ``updated_at`` is part of the persistent contract. Keep a missing
-        # value visible so validation can reject corrupt session documents.
-        payload.setdefault("updated_at", None)
+        # Legacy documents used ``created_at`` as their only lifecycle
+        # timestamp. Treat them as an explicit migration rather than as
+        # corrupt documents; the next save writes the complete schema.
+        if "updated_at" not in payload and had_created_at:
+            payload["updated_at"] = payload["created_at"]
+        else:
+            payload.setdefault("updated_at", None)
         payload.setdefault("started_at", None)
         payload.setdefault("completed_at", None)
         payload.setdefault("cancelled_at", None)
@@ -62,6 +68,15 @@ class DeliverySession:
         payload["audit_events"] = [dict(item) for item in events if isinstance(item, dict)] if isinstance(events, list) else []
         allowed = {name for name in cls.__dataclass_fields__}
         return cls(**{key: value for key, value in payload.items() if key in allowed})
+
+    @property
+    def participants(self) -> list[str]:
+        """Compatibility name used by the delivery UI and API."""
+        return self.ticket_ids
+
+    @participants.setter
+    def participants(self, value: list[str]) -> None:
+        self.ticket_ids = value
 
     def to_dict(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
@@ -76,17 +91,19 @@ class SessionStore:
         self.sessions_root = self.root / "sessions"
         self.lock_path = self.root / "sessions.lock"
         self.ticket_store = ticket_store or TicketStore(self.project)
+        self._migrating = False
 
     def init(self) -> None:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy()
 
     def session_path(self, session: DeliverySession | str) -> Path:
         session_id = session.id if isinstance(session, DeliverySession) else session
         self._validate_session_id(session_id)
         return self.sessions_root / f"{session_id}.yaml"
 
-    def create(self, ticket_ids: list[str] | None = None) -> DeliverySession:
-        session = DeliverySession(id=f"SESSION-{uuid.uuid4().hex[:12].upper()}")
+    def create(self, ticket_ids: list[str] | None = None, *, title: str = "") -> DeliverySession:
+        session = DeliverySession(id=f"SESSION-{uuid.uuid4().hex[:12].upper()}", title=title)
         if ticket_ids is not None:
             if not isinstance(ticket_ids, list):
                 raise TypeError("ticket_ids must be a list")
@@ -115,6 +132,7 @@ class SessionStore:
         return session
 
     def list(self) -> list[DeliverySession]:
+        self.init()
         return [self.load_path(path) for path in sorted(self.sessions_root.glob("*.yaml"))]
 
     def save(self, session: DeliverySession) -> None:
@@ -137,6 +155,63 @@ class SessionStore:
             finally:
                 if os.path.exists(tmp_name):
                     os.unlink(tmp_name)
+
+    def _migrate_legacy(self) -> None:
+        """Import the pre-versioned aggregate store once into session files."""
+        legacy_path = self.root / "tmp" / "delivery-sessions.yaml"
+        if self._migrating or not legacy_path.exists() or any(self.sessions_root.glob("*.yaml")):
+            return
+        self._migrating = True
+        try:
+            self._migrate_legacy_documents(legacy_path)
+        finally:
+            self._migrating = False
+
+    def _migrate_legacy_documents(self, legacy_path: Path) -> None:
+        try:
+            payload = yaml.safe_load(legacy_path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise ValueError(f"Unable to migrate legacy sessions: {exc}") from exc
+        items = payload.get("sessions", []) if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            raise ValueError("Unable to migrate legacy sessions: sessions must be a list")
+        active_payload = {}
+        active_path = self.root / "tmp" / "delivery-session.yaml"
+        if active_path.exists():
+            try:
+                active_payload = yaml.safe_load(active_path.read_text(encoding="utf-8")) or {}
+            except (OSError, UnicodeError, yaml.YAMLError) as exc:
+                raise ValueError(f"Unable to migrate legacy active session: {exc}") from exc
+        active_id = active_payload.get("session_id") if isinstance(active_payload, dict) else None
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            old_id = item["id"]
+            suffix = old_id.removeprefix("SES-")
+            session_id = f"SESSION-{suffix}" if old_id.startswith("SES-") else old_id
+            if not SESSION_ID_PATTERN.fullmatch(session_id):
+                continue
+            created_at = item.get("created_at") or now_iso()
+            status = item.get("status", "draft")
+            if old_id == active_id and status == "draft":
+                status = "active"
+            session = DeliverySession(
+                id=session_id,
+                title=str(item.get("title", "")),
+                status=status,
+                ticket_ids=list(item.get("participants", [])) if isinstance(item.get("participants", []), list) else [],
+                created_at=created_at,
+                updated_at=item.get("updated_at") or created_at,
+                audit_events=[{"event": "migrated", "timestamp": now_iso(), "legacy_id": old_id}],
+            )
+            if status == "active":
+                session.started_at = session.updated_at
+            elif status == "completed":
+                session.started_at = session.updated_at
+                session.completed_at = session.updated_at
+            elif status == "cancelled":
+                session.cancelled_at = session.updated_at
+            self.save(session)
 
     def add_ticket(self, session: DeliverySession, ticket_id: str) -> None:
         self._require_draft(session)
