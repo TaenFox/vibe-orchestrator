@@ -8,6 +8,7 @@ from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.scheduler import Candidate, select_candidates
+from vibe_orchestrator.technical_debt import TechnicalDebtError
 from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
 
 
@@ -94,6 +95,22 @@ class FailingRunner:
 
     async def run(self, ticket, stage, run_id=None, *, contract=None):
         raise RuntimeError("agent crashed")
+
+
+class ContractErrorRunner(SuccessfulRunner):
+    async def run(self, ticket, stage, run_id=None, *, contract=None):
+        return AgentResult(
+            outcome="completed",
+            summary="Технический анализ завершен",
+            details="""```yaml
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates: []
+  unexpected: true
+```""",
+        )
 
 
 class BrokenPromptRunner(FailingRunner):
@@ -525,6 +542,55 @@ def test_execute_records_failed_run_history(tmp_path: Path):
     assert ticket.run_history[-1]["artifacts_path"] == ".vibe/runs/run-failed"
     assert ticket.run_history[-1]["consecutive_failures"] == 1
     assert ticket.run_history[-1]["retry_after"] == ticket.retry_after
+
+
+def test_technical_debt_contract_error_does_not_enter_correction_flow(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Reject malformed debt", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    idea.blocked_by = ["existing-child"]
+    idea.context = {"unchanged": True}
+    idea.context_revision = 3
+    orchestrator.store.save(idea)
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        orchestrator._apply_result(
+            load_workflow("discovery"),
+            idea.id,
+            load_workflow("discovery").by_id["technical_analysis"],
+            AgentResult(
+                outcome="completed",
+                summary="Технический анализ завершен",
+                details="""```yaml
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates: []
+  unexpected: true
+```""",
+            ),
+        )
+
+    assert caught.value.envelope["contract_version"] == "orchestrator.errors.v1"
+    assert caught.value.code == "TECH_DEBT_INVALID"
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
+
+
+def test_execute_does_not_record_technical_debt_contract_error(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = ContractErrorRunner()
+    idea = orchestrator.store.create("discovery", "idea", "Reject malformed debt", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    orchestrator.store.save(idea)
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    asyncio.run(orchestrator._execute(load_workflow("discovery"), idea.id, "technical_analysis", "run-contract-error"))
+
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
 
 
 def test_agent_failure_stops_after_three_attempts_and_can_be_reset(tmp_path: Path):

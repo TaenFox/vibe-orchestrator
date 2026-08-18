@@ -265,6 +265,16 @@ class Orchestrator:
                 self.ledger.start(contract.run_id)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
             log.info("завершено %s (%s): %s -> %s", ticket_id, self.store.get(ticket_id).type, result.outcome, self.store.get(ticket_id).status)
+        except TechnicalDebtError as exc:
+            # Contract rejection is deliberately not an agent failure: recording it
+            # would mutate the source ticket and route it through correction flow.
+            # Keep the envelope intact for the caller/operator and only release
+            # bookkeeping that has not crossed the subprocess boundary.
+            if not isinstance(contract, str):
+                ledger_run = self.ledger.get_run(contract.run_id)
+                if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                    self.ledger.release(contract.run_id)
+            log.error("отклонен tech_debt_candidates контракт для %s: %s", ticket_id, yaml.safe_dump(exc.envelope, allow_unicode=True, sort_keys=False))
         except Exception as exc:
             ticket = self.store.get(ticket_id)
             if isinstance(contract, str):
@@ -338,11 +348,13 @@ class Orchestrator:
                         ticket_store=self.store,
                         session_store=self.session_store,
                     )
+            except TechnicalDebtError:
+                raise
             except ValueError as exc:
                 result = AgentResult(
                     outcome="needs_correction",
                     summary="Технический анализ вернул некорректный план реализации",
-                    details=str(exc) if not isinstance(exc, TechnicalDebtError) else yaml.safe_dump(exc.envelope, allow_unicode=True, sort_keys=False),
+                    details=str(exc),
                     token_usage=result.token_usage,
                 )
         ticket = self.store.get(ticket_id)
