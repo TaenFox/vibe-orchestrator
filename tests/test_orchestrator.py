@@ -1676,3 +1676,24 @@ def test_deferred_technical_debt_is_not_scheduled_without_active_session(tmp_pat
     assert scheduled.active_run is None
     assert [entry["event"] for entry in scheduled.run_history] == ["created"]
     assert orchestrator.runner.contracts == []
+
+
+def test_deferred_technical_debt_is_non_blocking_for_other_delivery_work(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = CapturingRunner()
+    orchestrator.worker_control.set_limit(1)
+
+    debt = orchestrator.store.create("delivery", "task", "Deferred debt", status="selected_for_session")
+    debt.technical_debt_deferred = True
+    orchestrator.store.save(debt)
+    regular = orchestrator.store.create("delivery", "task", "Regular work", status="selected_for_session")
+
+    asyncio.run(orchestrator._schedule_once())
+
+    assert orchestrator.store.get(debt.id).status == "selected_for_session"
+    assert orchestrator.store.get(debt.id).active_run is None
+    regular_after = orchestrator.store.get(regular.id)
+    assert [contract.run_id for contract in orchestrator.runner.contracts] == [
+        entry["run_id"] for entry in regular_after.run_history if entry["event"] == "started"
+    ]
+    assert regular_after.status != "selected_for_session"

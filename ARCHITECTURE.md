@@ -140,6 +140,30 @@ technical analysis и safe agent create используют этот едины
 matching ticket; обычные отсутствующие delivery children деактивируются по
 прежним правилам.
 
+### Контракт technical debt и non-blocking правило
+
+`tech_debt_candidates.v1` — необязательный root-level YAML с точными полями
+`problem`, `evidence(path, identifier, observation)`, `impact`, `suggested_scope`,
+`source_ticket`, `source_stage`, `source_run`, `type=task`, `urgency` и
+неотрицательным `priority`. Весь список валидируется до mutation; preflight
+проверяет source/workflow, точную identity запуска в history или существующем
+`run.json`, безопасный путь и содержимое evidence. Отсутствующий блок равен
+пустому списку.
+
+Materialization создает независимый Delivery `task` в `todo` с `parent=null`,
+`mandatory=false` и `technical_debt_deferred=true`; source/evidence сохраняются
+в context. Canonical basis из problem/scope/evidence хешируется в
+`tech_debt.v1:<sha256>`. Exact active match — no-op, ambiguous match — ответ без
+mutation, exact replay не участвует в обычной deactivation reconciliation.
+
+Lifecycle gate: `todo -> selected_for_session -> system_analysis`, причем выбор в
+сессию выполняет человек. Без active Delivery-сессии deferred marker исключает
+задачу до execution contract, reservation и runner; это non-blocking правило для
+других очередей и legacy-текетов. При active-сессии проходят только effective
+members, затем обычные `active_run`, blocked-by, WIP, budget и retry checks.
+Agent tools дают read-запросы, metadata writes и draft membership writes; lifecycle,
+materialization и scheduler transitions остаются privileged.
+
 Рекомендованный порядок расследования:
 
 1. Найти нужный `run_id` в `ticket.run_history`.
