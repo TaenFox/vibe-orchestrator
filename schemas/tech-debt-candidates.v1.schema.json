@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tech_debt_candidates.v1",
+  "type": "object",
+  "required": ["version", "candidates"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": "tech_debt_candidates.v1"},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["problem", "evidence", "impact", "suggested_scope", "source_ticket", "source_stage", "source_run", "type", "urgency", "priority"],
+        "properties": {
+          "problem": {"type": "string", "minLength": 1},
+          "evidence": {"type": "object", "required": ["path", "identifier", "observation"], "additionalProperties": false, "properties": {"path": {"type": "string", "minLength": 1}, "identifier": {"type": "string", "minLength": 1}, "observation": {"type": "string", "minLength": 1}}},
+          "impact": {"type": "string", "minLength": 1},
+          "suggested_scope": {"type": "string", "minLength": 1},
+          "source_ticket": {"type": "string", "minLength": 1},
+          "source_stage": {"type": "string", "minLength": 1},
+          "source_run": {"type": "string", "minLength": 1},
+          "type": {"const": "task"},
+          "urgency": {"enum": ["low", "medium", "high"]},
+          "priority": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}
