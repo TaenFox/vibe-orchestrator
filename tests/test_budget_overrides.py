@@ -20,6 +20,60 @@ def test_increase_limit_is_audited_and_applies_only_to_future_admission(tmp_path
     assert ledger.list_decisions()[0]["consumed_at"] is not None
 
 
+def test_effective_limit_is_materialized_in_reads_and_expires(tmp_path):
+    current = ["2026-08-18T00:00:00+00:00"]
+    ledger = BudgetLedger(tmp_path, clock=lambda: current[0], authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"tokens": 5, "runs": 3})
+    ledger.increase_limit(actor="a", target_scope="ticket", target_id="T", dimension="tokens", delta=5,
+                          reason="temporary", reference="ref", expires_at="2026-08-18T01:00:00+00:00")
+    assert ledger.get_budget("ticket:T")["limits"]["tokens"] == 10
+    assert ledger.get_budget("ticket:T")["available"]["tokens"] == 10
+    current[0] = "2026-08-18T02:00:00+00:00"
+    assert ledger.get_budget("ticket:T")["limits"]["tokens"] == 5
+
+
+def test_consumed_one_shot_resolve_does_not_unblock_unknown_again(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
+    ledger.reserve("run-a", "T", None, {"runs": 1})
+    ledger.start("run-a")
+    ledger.finalize("run-a", "unknown", {"points": None})
+    ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
+                          estimate={"points": 1}, confidence=0.8, one_shot=True, decision_id="resolve-1")
+    assert ledger.list_decisions(operation="resolve-unknown")[0]["consumed_at"] is not None
+    assert ledger.get_budget("ticket:T")["status"] == "blocked_unknown"
+
+
+def test_resolve_unknown_rejects_non_unknown_without_audit_row(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
+    ledger.reserve("run-a", "T", None, {"runs": 1})
+    with pytest.raises(ValueError, match="unknown run"):
+        ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
+                              evidence={"ticket": "operator"}, expires_at="2999-01-01T00:00:00+00:00")
+    assert ledger.list_decisions() == []
+
+
+def test_consumed_decision_replay_skips_authorizer_and_preserves_state(tmp_path):
+    calls = []
+
+    def counting_authorizer(**kwargs):
+        calls.append(kwargs)
+        return authorizer(**kwargs)
+
+    ledger = BudgetLedger(tmp_path, authorizer=counting_authorizer)
+    ledger.create_budget("ticket", "T", limits={"tokens": 5, "runs": 2})
+    kwargs = dict(actor="a", target_scope="ticket", target_id="T", dimension="tokens", delta=5,
+                  reason="r", reference="ref", one_shot=True, decision_id="once")
+    first = ledger.increase_limit(**kwargs)
+    ledger.reserve("run-a", "T", None, {"tokens": 10, "runs": 1})
+    consumed = ledger.list_decisions()[0]["consumed_at"]
+    second = ledger.increase_limit(**kwargs)
+    assert second["timestamp"] == first["timestamp"]
+    assert second["consumed_at"] == consumed
+    assert len(calls) == 1
+
+
 def test_permission_isolated_and_failed_decision_is_not_recorded(tmp_path):
     def deny_increase(**kwargs):
         return kwargs["permission"] != "budget.increase_limit", "policy/1"

@@ -428,6 +428,31 @@ dimensions и ticket/session/run target; wildcard scope запрещён, лим
 подтверждаемое evidence/reference либо отдельную accepted estimate с confidence;
 raw provider usage остаётся unknown и immutable.
 
+### Изменения DEL-640D25
+
+Для каждого ticket/session budget исходные `base_limit_*` и вычисленное
+`effective_limit_*` разделены schema version `budget.v2`. Effective limit —
+единственный источник для `get_budget().limits`, `available`, status и admission:
+для finite dimension он равен base limit плюс active `increase-limit`; для `null`
+сохраняется unlimited semantics. Active решение имеет одновременно
+`consumed_at IS NULL` и отсутствующий либо будущий `expires_at`. Expiry и
+one-shot consumption пересчитывают effective limit/status транзакционно, уже
+созданные reservations не изменяются.
+
+`allow-overrun` не меняет лимит и лишь bypass-ит перечисленные dimensions для
+конкретного target; `resolve-unknown` проверяет в write-транзакции, что run
+существует и находится именно в `unknown`. Run и actual остаются immutable.
+Replay сначала читает решение по `decision_id`, сравнивает полный immutable
+request fingerprint и возвращает текущий `consumed_at` без повторной
+авторизации, target validation или побочного эффекта. Любое расхождение
+отклоняется без новой audit row.
+
+Ошибки missing/non-unknown run, expired/consumed decision и conflicting
+`decision_id` не изменяют ledger. Ошибка authorization или операции находится
+до commit; append-only audit и status/effective-limit refresh откатываются
+вместе с транзакцией. CLI/API authorization boundary и retention policy
+остаются прежними; browser UI в текущем backend-only тикете отсутствует.
+
 CLI: `vibe budget increase-limit|allow-overrun|resolve-unknown` принимает
 `--actor`, `--reason`, `--reference` и `--expires-at` либо `--one-shot`; чтение
 audit trail выполняется через `vibe budget decisions`. Programmatic API —
