@@ -22,7 +22,8 @@ from .tickets import (
     retry_exhausted,
 )
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
-from .agent_tools import ReadOnlyAgentTools
+from .agent_tools import AgentTicketTools, ReadOnlyAgentTools
+from .tickets import TicketWriteConflict, TicketWriteError, _parent_is_compatible as ticket_parent_is_compatible
 
 
 @dataclass
@@ -115,7 +116,7 @@ AUTO_REFRESH_SCRIPT = f"""<script>
 
 
 def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project); agent_tools = ReadOnlyAgentTools(project)
+    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project); agent_tools = AgentTicketTools(project, actor="http-agent")
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -190,6 +191,8 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
                     return self.send_error(404, str(exc))
             self.send_error(404)
         def do_POST(self):
+            if self.path == "/api/agent/tickets":
+                return self._agent_ticket_write(create=True)
             length = int(self.headers.get("content-length", "0")); data = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
             try:
                 if self.path == "/session/create":
@@ -250,13 +253,37 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
                 ticket.last_outcome = None; ticket.last_summary = None; store.save(ticket)
                 return self._redirect(f"/?process={ticket.process}")
             self.send_error(404)
+        def do_PATCH(self):
+            if self.path.startswith("/api/agent/tickets/"):
+                return self._agent_ticket_write(create=False)
+            self.send_error(404)
+        def _agent_ticket_write(self, *, create: bool):
+            try:
+                length = int(self.headers.get("content-length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(body, dict):
+                    raise TicketWriteError("JSON body must be an object")
+                actor = self.headers.get("X-Agent-Id", "http-agent").strip() or "http-agent"
+                write_tools = AgentTicketTools(project, actor=actor)
+                if create:
+                    payload = write_tools.create_ticket(**body)
+                else:
+                    ticket_id = urllib.parse.unquote(self.path.rsplit("/", 1)[-1])
+                    payload = write_tools.update_ticket(ticket_id, **body)
+                return self._json(payload, status=200 if not create else 201)
+            except KeyError:
+                return self._json({"error": "ticket not found"}, status=404)
+            except TicketWriteConflict as exc:
+                return self._json({"error": str(exc)}, status=409)
+            except (TicketWriteError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                return self._json({"error": str(exc) or "invalid ticket request"}, status=400)
         def log_message(self, fmt, *args): return
         def _html(self, text):
             payload=text.encode("utf-8"); self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(payload))); self.end_headers()
             try: self.wfile.write(payload)
             except BrokenPipeError: pass
-        def _json(self,obj):
-            payload=json.dumps(obj,ensure_ascii=False,indent=2).encode("utf-8"); self.send_response(200); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload)
+        def _json(self,obj, status=200):
+            payload=json.dumps(obj,ensure_ascii=False,indent=2).encode("utf-8"); self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload)
         def _redirect(self,location): self.send_response(303); self.send_header("Location",location); self.end_headers()
 
     return ThreadingHTTPServer((host, port), Handler)
@@ -284,13 +311,7 @@ def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser
 
 # Main branch ticket-creation helpers are preserved above the renderer.
 def _parent_is_compatible(parent, process: str, ticket_type: str) -> bool:
-    if process == "discovery":
-        return ticket_type == "correction" and parent.process == "discovery" and parent.type == "idea"
-    if process == "delivery":
-        if ticket_type == "rework":
-            return parent.process == "delivery" and parent.type != "rework"
-        return (parent.process == "discovery" and parent.type == "idea") or (parent.process == "delivery" and parent.type != "rework")
-    return False
+    return ticket_parent_is_compatible(parent, process, ticket_type)
 
 
 def _validate_ticket_creation(store, workflows, process: str, ticket_type: str, title: str, priority: int, parent: str | None) -> None:

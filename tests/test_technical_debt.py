@@ -75,6 +75,39 @@ def test_preflight_rejects_mismatched_or_missing_run_id(tmp_path: Path, manifest
         assert caught.value.envelope["details"] == {"expected": "run-1"}
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("ticket_id", None),
+        ("ticket_id", ""),
+        ("ticket_id", "   "),
+        ("ticket_id", 123),
+        ("stage", None),
+        ("stage", ""),
+        ("stage", "   "),
+        ("stage", 123),
+    ],
+)
+def test_preflight_rejects_incomplete_manifest_identity(tmp_path: Path, field, value):
+    store = TicketStore(tmp_path)
+    store.init()
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    source = store.create("discovery", "idea", "Источник", status="technical_analysis")
+    source.run_history.append({"run_id": "run-1", "ticket_id": source.id, "stage": "technical_analysis", "event": "completed"})
+    store.save(source)
+    run_dir = tmp_path / ".vibe" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    metadata = {"run_id": "run-1", "ticket_id": source.id, "stage": "technical_analysis"}
+    metadata[field] = value
+    (run_dir / "run.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        preflight_technical_debt(parse_technical_debt(_details(source_ticket=source.id)), project=tmp_path, ticket_store=store)
+
+    assert caught.value.code == "TECH_DEBT_SOURCE_MISMATCH"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].source_run"
+
+
 def test_preflight_uses_history_only_when_manifest_is_absent(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()

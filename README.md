@@ -276,7 +276,7 @@ run_history:
     ticket_description: ...
 ```
 
-Прототип намеренно **не** реализует базу данных, интеграцию с Jira, пользователей, права доступа и полный журнал событий.
+Прототип намеренно **не** реализует базу данных, интеграцию с Jira, пользователей и полную permission-систему.
 
 ## Traceability и аудит
 
@@ -289,8 +289,8 @@ Source of truth для аудита разделен на два слоя:
 
 - `active_run` — только указатель на текущий незавершенный запуск. После завершения или ошибки поле очищается.
 - `run_history[].run_id` — единый идентификатор запуска, одинаковый для тикета, prompt и каталога `.vibe/runs/<run_id>`.
-- Для `tech_debt_candidates.v1` source metadata считается согласованной только при совпадении `ticket_id`, `stage` и `run_id == candidate.source_run`; это предотвращает принятие evidence из другого запуска.
-- Если `.vibe/runs/<source_run>/run.json` существует, его metadata используется напрямую: даже пустой или неполный manifest не заменяется matching history и отклоняется при отсутствии либо несовпадении `run_id`.
+- Для `tech_debt_candidates.v1` source metadata считается согласованной только при наличии непустых строковых `ticket_id` и `stage`, их точном совпадении с source ticket/stage и совпадении `run_id == candidate.source_run`; это предотвращает принятие evidence из другого запуска.
+- Если `.vibe/runs/<source_run>/run.json` существует, его metadata используется напрямую: даже пустой или неполный manifest не заменяется matching history и отклоняется с `TECH_DEBT_SOURCE_MISMATCH`.
 - `run_history[].event` — durable timeline (`created`, `started`, `completed`, `failed`) для тикета; именно она нужна для ретроспективы после очистки `active_run`.
 - `run_history[].ticket_type` — тип тикета, к которому относится событие.
 - `run_history[].artifacts_path` — относительный путь к локальным артефактам этого запуска.
@@ -298,6 +298,33 @@ Source of truth для аудита разделен на два слоя:
 - `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
 - `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.
 - `ticket_title`, `ticket_priority`, `ticket_parent`, `ticket_description` в `run_history`/`run.json` — durable snapshot mutable ticket-полей, которые реально были встроены в prompt этого запуска.
+- `audit_events[]` — append-only журнал успешных `create_ticket`/`update_ticket`; legacy YAML без этого поля читается как пустой список.
+
+### Write tools
+
+Агенты изменяют тикеты только через `create_ticket`/`update_ticket` из
+`agent_tools` либо через `POST /api/agent/tickets` и `PATCH
+/api/agent/tickets/<id>`. Разрешены только metadata-поля; неизвестные и
+lifecycle-поля отвергаются целиком. Все новые тикеты получают
+`workflow.initial_status` (для Delivery — `todo`). `priority` — целое число от
+нуля, title обрезается по краям, parent/blocked_by проверяются на существование,
+совместимость, self-reference и циклы.
+
+Успешные операции сохраняют actor, origin, before/after, changed_fields и
+timestamp в audit event. `expected_updated_at` защищает от stale update,
+а `idempotency_key` делает повтор create безопасным: тот же payload возвращает
+исходный тикет без нового события, другой payload дает conflict. Delivery
+tech-debt в текущей модели представляется как обычный `task`; агент не может
+сразу выбрать queue или agent status.
+
+При `create_ticket` новый тикет сначала полностью формируется в памяти: в него
+попадают `run_history.created` и обязательное событие `ticket_created`, после
+чего выполняется одна atomic-замена YAML. Тикет без соответствующего audit event
+не считается опубликованным результатом. Если commit завершается ошибкой,
+исключение передается вызывающему коду, а временный файл очищается существующим
+контрактом `TicketStore.save()`. Это гарантия атомарности одной записи control
+plane, а не `fsync`-гарантия после отключения питания и не транзакция между
+несколькими файлами.
 
 Практическое правило для расследований: сначала смотрите `run_history` в тикете как индекс запусков, затем открывайте `.vibe/runs/<run_id>/run.json` и `result.json`, и только после этого при необходимости углубляйтесь в `events.jsonl`.
 
@@ -332,11 +359,20 @@ bounds, не вызывают init/save/migration и не меняют ticket YA
 
 ## Безопасность
 
-Песочница Codex по умолчанию — `workspace-write`, а не `danger-full-access`. Оркестратор не коммитит файлы аутентификации Codex. Храните `.codex/auth.json` и другие учетные данные вне проектных репозиториев.
+Песочница Codex по умолчанию — `workspace-write`, а не `danger-full-access`.
+Агентский contract не предоставляет `TicketStore.save` и прямую запись
+`.vibe/tickets/**`; lifecycle остается у UI и оркестратора. `origin` фиксирует
+источник операции, но не заменяет авторизацию. Оркестратор не коммитит файлы
+аутентификации Codex. Храните `.codex/auth.json` и другие учетные данные вне
+проектных репозиториев.
 
 Это экспериментальный прототип локальной автоматизации. Запускайте его только на репозиториях, которые можно восстановить через Git.
 
 ## Известные ограничения прототипа
+
+HTTP/API contract покрыт unit/API тестами; browser-level проверка DOM, focus,
+keyboard и viewport в worker-контексте недоступна и требует ручного или внешнего
+прогона.
 
 ## Ограничения UI, telemetry и performance
 
@@ -359,8 +395,9 @@ confidence и fresh/stale/unavailable metadata. Card, drawer и session panel
 - Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.
 - `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Дедупликация похожих тикетов пока не реализована.
 - В том же верхнеуровневом YAML `details` можно передать `tech_debt_candidates` версии `tech_debt_candidates.v1`. Каждый кандидат обязан содержать непустые `problem`, `impact`, `suggested_scope`, `source_ticket`, `source_stage`, `source_run`, `type: task`, `urgency: low|medium|high`, неотрицательный целочисленный `priority` и `evidence` с `path`, `identifier`, `observation`. Отсутствующий ключ означает пустой список; неизвестная версия, поле или malformed payload — ошибка.
-- Preflight отклоняет кандидата с отсутствующим или отличающимся `run.json.run_id` ошибкой `TECH_DEBT_SOURCE_MISMATCH` по пути `tech_debt_candidates.candidates[N].source_run`; при этом source ticket, session и Delivery children не изменяются.
+- Preflight отклоняет кандидата с отсутствующим или отличающимся `run.json.run_id`, а также с отсутствующими, нестроковыми, пустыми или whitespace-only `ticket_id`/`stage`, ошибкой `TECH_DEBT_SOURCE_MISMATCH` по пути `tech_debt_candidates.candidates[N].source_run`; при этом source ticket, session и Delivery children не изменяются.
 - При отсутствии manifest допускается legacy fallback на последнюю matching-запись `run_history`, но выбранный `run_id` всё равно обязан совпадать с `source_run` кандидата.
+- Accepted manifest metadata: `{"run_id":"run-1","ticket_id":"DISC-ABC123","stage":"technical_analysis"}` при соответствующих `source_run`, source ticket и source stage кандидата. Rejected: `{ "run_id": "run-1" }`, `ticket_id: null`, `stage: "   "` или любое нестроковое значение; matching history не используется, если такой `run.json` уже существует.
 - Перед любым созданием Delivery-тикета выполняется read-only preflight: проверяются source ticket, stage, run artifact, согласованность run metadata, активные Delivery-сессии и безопасный путь evidence. Единый error envelope имеет `contract_version: orchestrator.errors.v1`, `code`, `path`, `message`; ошибки `TECH_DEBT_INVALID`, `TECH_DEBT_SOURCE_NOT_FOUND`, `TECH_DEBT_SOURCE_MISMATCH` и `TECH_DEBT_PREFLIGHT_UNAVAILABLE` блокируют mutation. Такие contract errors не являются `needs_correction`: source ticket и session остаются без изменений, `_record_failure` и follow-up не вызываются, corrective или Delivery children не создаются. Кандидат автоматически в сессию не добавляется.
 - Для legacy Discovery-тикета без поля `implementation_required` на ручном переходе из `investment_decision` решение выводится из membership: наличие хотя бы одного Delivery-ребенка ведет в `implementation`, отсутствие — в `ready_for_validation`. Это режим совместимости, а не миграция данных; существующие YAML не переписываются автоматически.
 - После входа в `implementation` scheduler gate ждет завершения только детей с `mandatory: true`; `done` означает завершенный Delivery-агрегат после release-интеграции. Необязательные дети и legacy-дети, если они помечены `mandatory: false`, не удерживают Discovery.
