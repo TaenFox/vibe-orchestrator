@@ -143,15 +143,18 @@ def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path,
             raise _error(f"{base}.source_stage", "Стадия отсутствует в workflow исходного тикета.", code="TECH_DEBT_SOURCE_NOT_FOUND") from exc
         matching_history = [entry for entry in source.run_history if entry.get("run_id") == candidate["source_run"]]
         manifest = store.run_path(candidate["source_run"]) / "run.json"
-        manifest_data = None
         if manifest.exists():
             try:
                 manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
                 raise _error(f"{base}.source_run", "Артефакт запуска недоступен.", code="TECH_DEBT_PREFLIGHT_UNAVAILABLE") from exc
-        if not matching_history and not isinstance(manifest_data, dict):
-            raise _error(f"{base}.source_run", "Запуск не найден.", code="TECH_DEBT_SOURCE_NOT_FOUND")
-        metadata = manifest_data or (matching_history[-1] if matching_history else {})
+            if not isinstance(manifest_data, dict):
+                raise _error(f"{base}.source_run", "Артефакт запуска имеет недопустимый формат.", code="TECH_DEBT_PREFLIGHT_UNAVAILABLE")
+            metadata = manifest_data
+        else:
+            if not matching_history:
+                raise _error(f"{base}.source_run", "Запуск не найден.", code="TECH_DEBT_SOURCE_NOT_FOUND")
+            metadata = matching_history[-1]
         if metadata.get("run_id") != candidate["source_run"]:
             raise _error(
                 f"{base}.source_run",
