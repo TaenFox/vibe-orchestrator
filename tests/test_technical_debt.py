@@ -1,0 +1,49 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+from vibe_orchestrator.technical_debt import CONTRACT_VERSION, TechnicalDebtError, parse_technical_debt, preflight_technical_debt
+from vibe_orchestrator.tickets import TicketStore
+
+
+def _details(**overrides):
+    fields = {"problem": "Сложная ветка", "evidence": {"path": "README.md", "identifier": "Traceability MVP", "observation": "Наблюдение"}, "impact": "Дорого сопровождать", "suggested_scope": "Выделить adapter", "source_ticket": "DISC-ABC123", "source_stage": "technical_analysis", "source_run": "run-1", "type": "task", "urgency": "medium", "priority": 10}
+    fields.update(overrides)
+    return yaml.safe_dump({"tech_debt_candidates": {"version": CONTRACT_VERSION, "candidates": [fields]}}, allow_unicode=True)
+
+
+def test_missing_key_and_empty_list_are_noops():
+    assert parse_technical_debt("summary only") == []
+    assert parse_technical_debt(yaml.safe_dump({"tech_debt_candidates": {"version": CONTRACT_VERSION, "candidates": []}})) == []
+
+
+@pytest.mark.parametrize("field", ["problem", "impact", "suggested_scope", "source_ticket", "source_stage", "source_run"])
+def test_required_fields_have_deterministic_paths(field):
+    with pytest.raises(TechnicalDebtError) as caught:
+        parse_technical_debt(_details(**{field: "  "}))
+    assert caught.value.path == f"tech_debt_candidates.candidates[0].{field}"
+
+
+@pytest.mark.parametrize("field,value", [("type", "bug"), ("urgency", "urgent"), ("priority", True), ("priority", -1)])
+def test_enums_and_priority_are_strict(field, value):
+    with pytest.raises(TechnicalDebtError) as caught:
+        parse_technical_debt(_details(**{field: value}))
+    assert caught.value.code == "TECH_DEBT_INVALID"
+
+
+def test_preflight_checks_source_and_evidence_read_only(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    source = store.create("discovery", "idea", "Источник", status="technical_analysis")
+    source.run_history.append({"run_id": "run-1", "stage": "technical_analysis", "event": "completed"})
+    store.save(source)
+    run_dir = tmp_path / ".vibe" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text('{"run_id":"run-1","ticket_id":"%s","stage":"technical_analysis"}' % source.id, encoding="utf-8")
+    candidates = parse_technical_debt(_details(source_ticket=source.id))
+    assert preflight_technical_debt(candidates, project=tmp_path, ticket_store=store) == candidates
+    with pytest.raises(TechnicalDebtError) as caught:
+        preflight_technical_debt(parse_technical_debt(_details(source_ticket="DISC-MISSING")), project=tmp_path, ticket_store=store)
+    assert caught.value.code == "TECH_DEBT_SOURCE_NOT_FOUND"

@@ -19,6 +19,7 @@ from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
+from .technical_debt import TechnicalDebtError, parse_technical_debt, preflight_technical_debt
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 
@@ -329,11 +330,19 @@ class Orchestrator:
         if workflow.id == "discovery" and stage.id == "technical_analysis" and result.outcome == "completed":
             try:
                 _technical_analysis_plan(result.details)
+                debt_candidates = parse_technical_debt(result.details)
+                if debt_candidates:
+                    preflight_technical_debt(
+                        debt_candidates,
+                        project=self.store.project,
+                        ticket_store=self.store,
+                        session_store=self.session_store,
+                    )
             except ValueError as exc:
                 result = AgentResult(
                     outcome="needs_correction",
                     summary="Технический анализ вернул некорректный план реализации",
-                    details=str(exc),
+                    details=str(exc) if not isinstance(exc, TechnicalDebtError) else yaml.safe_dump(exc.envelope, allow_unicode=True, sort_keys=False),
                     token_usage=result.token_usage,
                 )
         ticket = self.store.get(ticket_id)
