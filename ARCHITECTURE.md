@@ -28,10 +28,11 @@
   отдельного бюджета child rework;
 - состояния `active`, `stop_new_runs`, `exhausted`, `over_budget`,
   `blocked_unknown` и `completed` с фиксированным precedence;
-- версионирование normalization/rate card и immutable adjustments.
+- версионирование normalization/rate card, immutable adjustments и append-only
+  `budget_decisions` с отдельными permissions/policies.
 
-Контракт принят, но enforcement в текущем MVP не реализован: scheduler не
-проверяет лимит и не резервирует ресурс. Бюджетный ledger не является частью
+Контракт принят; Delivery scheduler проверяет лимиты и резервирует ресурс через
+ledger. Бюджетный ledger не является частью
 текущей модели `Ticket` и не подменяет `run_history` или каталог
 `.vibe/runs/<run_id>`; при реализации он должен ссылаться на них через тот же
 `run_id`. Legacy migration не переписывает lifecycle-поля или `run_history`.

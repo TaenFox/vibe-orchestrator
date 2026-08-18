@@ -118,6 +118,7 @@ def test_unknown_blocks_zero_point_limit(tmp_path: Path):
     ledger = BudgetLedger(tmp_path)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 100, "points": 0, "runs": 3})
     ledger.reserve("run-1", "DEL-1", None, {"tokens": 10, "runs": 1})
+    assert ledger.get_budget("ticket:DEL-1")["status"] == "active"
     ledger.start("run-1")
     ledger.finalize("run-1", "unknown", {"points": None, "points_status": "unavailable"})
 

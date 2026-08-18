@@ -45,8 +45,8 @@ legacy или incomplete output получает `source=unknown`; значен�
 
 `BudgetLedger` открывает `.vibe/budgets/ledger.sqlite3`, включает foreign keys,
 WAL, busy timeout и использует `BEGIN IMMEDIATE` для операций записи. Таблицы
-`budgets`, `runs`, `adjustments` и `metadata` хранят scope aggregates, immutable
-run state и append-only corrections. Отсутствующий budget record или
+`budgets`, `runs`, `adjustments`, `reconciliation_facts` и `metadata` хранят scope aggregates, immutable
+run state и append-only corrections/evidence facts. Отсутствующий budget record или
 `mode=legacy` означает bypass без synthetic ledger run.
 
 ## Термины, scopes и ownership
@@ -378,6 +378,11 @@ unknown runs с precedence `over_budget` → `blocked_unknown` → `stop_new_run
 6. Ненулевые planned/actual points требуют normalization version; при null
    points version null и status unavailable, а активный point limit приводит к
    unknown, не к финализации нулём.
+7. Успешный one-shot `resolve_unknown` фиксирует `consumed_at`, но сохраняет
+   разрешение для своего target run после status refresh/recompute и не
+   блокирует последующую reservation; другой unknown run в том же scope
+   продолжает блокировать admission. Expiry-based resolve действует до
+   `expires_at`, затем scope снова получает `blocked_unknown`.
 7. Actual выше planned сохраняется полностью, с версиями нормализации и rate
    card, и даёт `over_budget` без остановки уже запущенного процесса.
 8. Изменение policy/rate card не меняет прошлые planned/actual; исправление —
@@ -406,3 +411,81 @@ upstream-поле stable event/snapshot ref и гарантию его уник�
 override для `over_budget` и `blocked_unknown` требует audit actor/reason и
 отдельного решения о полномочиях.
 Срок хранения ledger и UI/CLI ролей также остаются вне этого контракта.
+
+## Manual overrides and audit trail
+
+Baseline MVP сохраняет immutable `runs` и их `actual`, а reservations и
+finalization выполняются транзакционно. Ручные решения хранятся отдельно в
+append-only таблице `budget_decisions`; они не редактируют `run`, `run_history`
+или уже накопленные aggregates.
+
+Доступны три операции с независимыми permissions: `budget.increase_limit`,
+`budget.allow_overrun` и `budget.resolve_unknown`. Каждое решение содержит
+`decision_id`, actor, системный UTC timestamp, reason, target scope/id,
+reference, versioned policy, permission, payload и ровно одну семантику
+`expires_at` или `one_shot`. Повтор того же ID с тем же payload идемпотентен;
+конфликтующий payload отклоняется.
+
+`increase-limit` увеличивает effective limit только для будущего admission и
+не освобождает reservation. Нулевой `delta` разрешён как обычное аудируемое
+no-op решение: оно не меняет effective limit, available или aggregates.
+Отрицательный, boolean или нецелый delta отклоняется до создания audit row.
+`allow-overrun` принимает только явно названные
+dimensions и ticket/session/run target; wildcard scope запрещён, лимит не
+увеличивается. `resolve-unknown` адресует только конкретный run и принимает
+подтверждаемое evidence/reference либо отдельную accepted estimate с confidence;
+raw provider usage остаётся unknown и immutable.
+
+Evidence-resolution дополнительно создаёт в той же транзакции ровно один
+append-only `reconciliation_facts` для `decision_id`. Fact содержит `run_id`,
+`decision_id`, actor, reference, timestamp, `mode=evidence`, неизменяемый
+`evidence_json` и нормализованный `usage_json` с dimensions `tokens`, `points`,
+`runs` (либо null, если evidence не содержит normalized usage). Ненулевой
+normalized usage увеличивает `finalized` агрегаты, но не переписывает `runs.state`
+или `runs.actual_json`: исходный unknown остаётся raw audit fact. Уникальность
+`decision_id` делает повтор authorization/replay идемпотентным и не допускает
+повторного применения aggregate delta; ошибка валидации откатывает decision и fact
+вместе.
+
+### Изменения DEL-640D25
+
+Для каждого ticket/session budget исходные `base_limit_*` и вычисленное
+`effective_limit_*` разделены schema version `budget.v2`. Effective limit —
+единственный источник для `get_budget().limits`, `available`, status и admission:
+для finite dimension он равен base limit плюс active `increase-limit`; для `null`
+сохраняется unlimited semantics. Active решение имеет одновременно
+`consumed_at IS NULL` и отсутствующий либо будущий `expires_at`. Expiry и
+one-shot consumption пересчитывают effective limit/status транзакционно, уже
+созданные reservations не изменяются.
+
+Для `resolve-unknown` expiry-based решение считается применимым только при
+`consumed_at IS NULL` и отсутствии либо будущем `expires_at`. One-shot решение
+после успешной policy-check операции получает `consumed_at`, остаётся
+append-only audit record и продолжает представлять применённое разрешение
+строго для своего target unknown run при последующих refresh/recompute.
+Поэтому этот run не возвращается в `blocked_unknown`, но другие unknown runs
+остаются блокирующими до собственного решения. Новое one-shot решение не
+распространяется на другие `run_id`; сам run и его actual не изменяются.
+
+`allow-overrun` не меняет лимит и лишь bypass-ит перечисленные dimensions для
+конкретного target; `resolve-unknown` проверяет в write-транзакции, что run
+существует и находится именно в `unknown`. Run и actual остаются immutable.
+Replay сначала читает решение по `decision_id`, сравнивает полный immutable
+request fingerprint и возвращает текущий `consumed_at` без повторной
+авторизации, target validation или побочного эффекта. Любое расхождение
+отклоняется без новой audit row.
+
+Ошибки missing/non-unknown run, expired decision и conflicting
+`decision_id` не изменяют ledger. Ошибка authorization или операции находится
+до commit; append-only audit и status/effective-limit refresh откатываются
+вместе с транзакцией. CLI/API authorization boundary и retention policy
+остаются прежними; browser UI в текущем backend-only тикете отсутствует.
+
+CLI: `vibe budget increase-limit|allow-overrun|resolve-unknown` принимает
+`--actor`, `--reason`, `--reference` и `--expires-at` либо `--one-shot`; чтение
+audit trail выполняется через `vibe budget decisions`. Programmatic API —
+одноимённые методы `BudgetLedger` и `list_decisions`. Внешняя authentication
+система ещё не подключена: CLI явно фиксирует actor только как audit identity,
+использует injectable authorizer и применяет default-deny при отсутствии policy;
+API сохраняет то же требование. Browser-level проверка override UI не
+выполнялась, поскольку UI/API actions для неё не предоставлены в этом контексте.
