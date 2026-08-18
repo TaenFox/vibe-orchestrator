@@ -1,198 +1,272 @@
-# Контракт будущего бюджетирования
+# Версионируемый контракт budget control plane
 
-Статус: спецификация для последующей реализации. В текущем MVP бюджетирование
-не включается в планировщик, модель `Ticket`, workflow или артефакты запуска.
+Статус: принятый контракт `budget.v1`; runtime enforcement в текущем MVP не
+реализован. Этот документ фиксирует модель и границы, которые должны быть
+соблюдены при последующей реализации Delivery.
 
-## Цель и границы
+## Назначение и границы
 
-Бюджет ограничивает ресурсное потребление агентными запусками процесса Delivery.
-Единица учёта — целое неотрицательное число `budget_points`. Это нормализованные
-пункты, а не деньги; сравнение между проектами допустимо только при одинаковой
-версии таблицы нормализации провайдера. Денежный rate card и биллинг в контракт
-не входят.
+Budget control plane ограничивает нормализованное ресурсное потребление
+агентными запусками Delivery. В контракт входят token- и point-измерения,
+лимит количества запусков, резервирование до старта, подтверждение факта после
+завершения, traceability и аудит корректировок.
 
-В контракт входят:
+В контракт не входят Discovery и process_management budgets, денежный биллинг,
+фактические цены провайдера, остановка уже запущенного Codex, изменение WIP,
+retry-backoff, workflow-статусов и UI/CLI авторизация. Эти решения могут быть
+потребителями API бюджета, но не частью данного контракта.
 
-- общий лимит родительского Delivery-тикета и его `rework`;
-- `planned` до запуска и `actual` после запуска каждой попытки;
-- источник факта, ссылка на него и возможность аудита;
-- автоматический retry после технического `failed`;
-- `needs_rework` как отдельная попытка с отдельным резервом;
-- резервирование до старта и правила превышения.
+## Baseline текущего MVP
 
-В контракт не входят: бюджет Discovery, лимит параллелизма, изменение текущих
-workflow, остановка уже запущенного Codex, финансовый учёт и автоматическое
-изменение лимита. Реализация не должна добавлять эти функции в рамках данного
-тикета.
+Budget enforcement отсутствует: текущий scheduler не проверяет лимиты и не
+создаёт reservations. `BUDGETING.md` ранее описывал предварительный
+ticket-level `budget_points`, но runtime его не читает.
 
-## Модель бюджета
+Traceability остаётся за существующими источниками: подтверждённые
+`codex_cli.turn.completed` события суммируются в `token_usage`, а malformed,
+legacy или incomplete output получает `source=unknown`; значение сохраняется в
+`.vibe/runs/<run_id>/run.json` и terminal `run_history`. `active_run`,
+`run_history` и каталог `.vibe/runs/<run_id>` используют общий `run_id`.
 
-Бюджет доступен для родительского Delivery-тикета. Его лимит покрывает весь
-жизненный цикл тикета: исходные попытки, retry и дочерние `rework`.
+`DeliverySession` хранит `ticket_ids`, lifecycle и `audit_events` и ограничивает
+выбор Delivery-тикетов. Сейчас `needs_rework` создаёт child типа `rework` с
+`parent` и `blocked_by`; `wip_exempt` относится только к WIP и пока не имеет
+бюджетной связи.
 
-```yaml
-budget:
-  limit_points: 100
-  spent_points: 0
-  reserved_points: 0
-  status: active # active | exhausted | over_budget | blocked
-```
+Новый ledger не подменяет эти источники и не реконструирует старое потребление.
+История запусков не является budget ledger.
 
-`limit_points` — утверждённый лимит, который не меняется сам по себе.
-`spent_points` — сумма финализированных `actual_points`. `reserved_points` —
-сумма планов активных попыток. Доступный остаток:
+## Термины, scopes и ownership
 
-`available = limit_points - spent_points - reserved_points`.
+Контракт вводит три scope:
 
-Для `rework` можно хранить отдельную квоту, но она является выделением из
-лимита родителя, а не дополнительным лимитом. Факт ребёнка включается в
-родительский агрегат ровно один раз: запись ledger ребёнка не должна повторно
-списываться как запись родителя. `wip_exempt` влияет только на WIP и не
-освобождает `rework` от бюджетной проверки.
+- `session` владеет лимитом всей активной Delivery-сессии и агрегирует
+  effective cost всех входящих ticket/run, включая rework;
+- `ticket` владеет лимитом исходного Delivery-тикета; лимит распространяется
+  на initial, retry и все его rework;
+- `run` владеет одной immutable reservation/finalization записью и никогда не
+  создаёт самостоятельный общий лимит.
 
-Состояния бюджета:
+Для каждого Delivery run обязателен `ticket_budget_id`. Если исходный ticket
+входит в активную сессию, устанавливается `session_budget_id`. Retry получает
+`parent_run_id`, rework — `parent_ticket_id`. Один run учитывается в каждом
+применимом агрегате ровно один раз.
 
-- `active` — запуск допустим при достаточном остатке;
-- `exhausted` — остаток равен нулю, запуск с положительным планом запрещён;
-- `over_budget` — `spent_points > limit_points`, новые запуски запрещены;
-- `blocked` — продолжение невозможно до ручного решения, например при
-  неизвестном факте или отсутствии доступного лимита для `rework`.
+Rework расходуется из бюджета исходного ticket и, при активной сессии, из
+бюджета этой session; child budget не создаётся. Это правило действует даже при
+`wip_exempt=true`.
 
-## Ledger попыток
+## Схема `budget.v1`
 
-Для каждой попытки создаётся отдельная запись до старта Codex:
+Budget record содержит обязательные поля:
 
 ```yaml
-- run_id: <uuid>
-  ticket_id: DEL-XXXXXX
-  parent_budget_id: DEL-XXXXXX
-  stage: development
-  attempt_kind: initial # initial | retry | rework
-  planned_points: 20
-  reserved_points: 20
-  state: reserved # reserved | finalized | released | unknown
+contract_version: budget.v1
+budget_id: <stable-id>
+scope: session # session | ticket
+owner_id: <session.id-or-ticket.id>
+mode: enforced # enforced | legacy
+status: active
+limits:
+  limit_tokens: 100000 # non-negative integer or null
+  limit_points: 100 # non-negative integer or null
+  limit_runs: 10 # non-negative integer or null
+aggregates:
+  planned: {tokens: 0, points: 0, runs: 0} # незарезервированные obligations
+  reserved: {tokens: 0, points: 0, runs: 0}
+  finalized: {tokens: 0, points: 0, runs: 0}
+  available: {tokens: 100000, points: 100, runs: 10}
+created_at: <timestamp>
+updated_at: <timestamp>
 ```
 
-После завершения к записи добавляются:
+`limit_tokens`, `limit_points` и `limit_runs` — независимые неотрицательные
+целые либо `null`; `null` означает отсутствие enforcement по этому измерению,
+а не нулевой лимит. `planned` — только сумма зафиксированных будущих
+обязательств, для которых ещё нет active reservation. `reserved` — удержанное
+значение active reservations незавершённых runs. `finalized` — подтверждённый
+actual terminal runs; каждый run учитывается один раз.
+
+Для каждого измерения едины определения:
+
+`committed = finalized + planned + reserved`
+
+`available = limit - committed`.
+
+При отсутствии лимита `available` равен `null`, и измерение не участвует в gate.
+Для нового обязательства reservation допустима, если
+`finalized + planned + reserved + requested_planned <= limit` по каждому
+enforced измерению. `requested_planned` — только новая стоимость, ещё не
+включённая в `planned`; после успешной операции она сразу попадает в
+`reserved`, а не остаётся одновременно в `planned`.
+
+Если reservation принимает уже существующее planned obligation, операция
+атомарно уменьшает `planned` на held value и увеличивает `reserved` на ту же
+величину. Для такого transfer gate проверяет текущий `committed` (новая
+стоимость не прибавляется второй раз), поэтому `available` не меняется. При
+прямом запуске obligation создаётся и сразу переводится в `reserved`, без
+промежуточного увеличения `planned`. Проверки session и ticket выполняются
+атомарно под общим lock/transaction.
+
+## Run ledger
+
+Каждый run получает одну запись до запуска:
 
 ```yaml
-  actual_points: 17
-  actual_source: provider_usage # provider_usage | runner_fallback
-  usage_ref: <provider-event-id-or-artifact-path>
-  normalization_version: <version>
+contract_version: budget.v1
+run_id: <uuid>
+ticket_id: <id>
+ticket_budget_id: <id>
+scope_links:
+  session_budget_id: <id-or-null>
+  parent_run_id: <id-or-null>
+  parent_ticket_id: <id-or-null>
+attempt_kind: initial # initial | retry | rework
+planned: {tokens: 10000, points: 10, runs: 1, normalization_version: v1, points_status: available}
+reserved: {tokens: 10000, points: 10, runs: 1}
+state: reserved # reserved | finalized | released | unknown
+reserved_at: <timestamp>
 ```
 
-`run_id` — ключ идемпотентности резерва и обязательная связь с
-`.vibe/runs/<run_id>/` и `ticket.run_history`. Ledger создаётся и резерв
-переводится в активное состояние атомарно с точки зрения control plane.
-Повторный polling не может создать вторую запись для того же `run_id`.
+`planned` в записи run — immutable estimate, зафиксированный до запуска
+политикой stage/model/reasoning effort. `planned.normalization_version` обязана
+быть непустой при `planned.points != null`; при `planned.points: null` она
+обязана быть `null`, а `planned.points_status` обязан быть `unavailable`.
+`null` не означает нулевое потребление и не может тихо пройти gate для
+`limit_points`. `reserved` — immutable held value, принятый из planned при
+reservation; он освобождается только terminal transition.
 
-Бюджетная запись не меняет жизненный цикл тикета: `active_run`, `status` и
-`run_history` по-прежнему ведутся оркестратором. Резерв должен быть связан с
-запуском до вызова Codex, а финализация — с его единственным терминальным
-результатом; повторная обработка одного результата не должна повторно менять
-агрегаты бюджета.
+Для `finalized` обязательно `actual` с raw tokens, normalized points,
+`usage_source`, `usage_ref`, `normalization_version`, `rate_card_version` и
+`points_status`:
 
-После `finalized` или `released` запись неизменяема. Исправление факта — новая
-корректировочная запись с `adjusts_run_id`; пересчёт истории изменением только
-агрегатов запрещён.
+```yaml
+actual:
+  tokens_raw: 17000
+  points: 17
+  points_status: available # available | unavailable
+  usage_source: provider
+  usage_ref: <provider-event-id>
+  normalization_version: v1 # required iff points != null; otherwise null
+  rate_card_version: v1
+```
 
-## Planned и actual
+При `actual.points: null` `actual.normalization_version` обязана быть `null`,
+а `points_status` — `unavailable`. Если для scope задан ненулевой
+`limit_points`, такая finalization не подтверждает usage: run получает
+`unknown`, scope — `blocked_unknown`, и actual не увеличивает `finalized` как
+ноль. Если `limit_points: null`, остальные измерения могут быть финализированы.
+`run_id` — уникальный ключ reservation/finalization: повторный polling или
+обработка результата не меняет агрегаты повторно.
 
-`planned_points` вычисляется политикой стадии с учётом модели, reasoning effort и
-вида попытки. План фиксируется до создания подпроцесса. Изменение политики после
-этого не меняет существующий план.
+После `finalized`, `released` или `unknown` запись immutable. Исправление не
+редактирует её, а добавляет отдельный immutable adjustment record с
+`adjusts_run_id`, `reason`, `author` и `timestamp`.
 
-`actual_points` фиксируется не более одного раза после завершения подпроцесса:
+## Состояния и precedence
 
-1. основной источник — подтверждённое usage-событие провайдера, коррелированное
-   с `run_id`;
-2. если оно недоступно, допускается только явно помеченный
-   `runner_fallback` с версией таблицы нормализации;
-3. если источника нет, запись получает `state: unknown`.
+- `active` — новые runs разрешены при доступном лимите и отсутствии unknown;
+- `stop_new_runs` — ручной или policy gate запрещает новые runs, но существующие
+  reservations могут завершиться;
+- `exhausted` — available равен нулю хотя бы по одному enforced измерению,
+  поэтому положительный новый planned запрещён;
+- `over_budget` — finalized превышает лимит хотя бы по одному измерению;
+- `blocked_unknown` — есть run `state=unknown`; usage не считается нулём;
+- `completed` — scope явно закрыт, новые reservations запрещены, история и
+  adjustments доступны для чтения.
 
-`unknown` не означает нулевое потребление: резерв снимается, `spent_points` не
-увеличивается, а следующий запуск бюджета блокируется до ручного разрешения.
-Факт нельзя финализировать частичным или неподтверждённым значением.
+При вычислении статуса действует детерминированный порядок:
 
-При обычном завершении `spent_points` увеличивается на `actual_points`, а
-`reserved_points` уменьшается на исходный `reserved_points`. Списывается факт,
-не план.
+`over_budget` → `blocked_unknown` → `stop_new_runs` → `completed` → `exhausted` → `active`.
 
-Технический `failed` после создания подпроцесса считается потребившим ресурс и
-финализируется по тем же правилам. Ошибка подготовки до создания подпроцесса не
-создаёт `actual`, а резерв полностью освобождается. При любом варианте
-`run_history` и артефакты запуска остаются источниками traceability; ledger их
-не заменяет.
+## Lifecycle, usage и overrun
 
-## Retry и rework
+Перед вызовом Codex control plane атомарно создаёт reservation. При отказе по
+лимиту Codex не запускается, `failed` run не создаётся и зависший reservation
+не остаётся. Ошибка до создания подпроцесса освобождает reservation без actual.
+Ошибка после старта финализируется по тем же правилам, что и обычный terminal
+result.
 
-Каждый retry получает новый `run_id`, новую запись ledger и
-`attempt_kind: retry`; запись содержит ссылку на предыдущий `run_id`. Резерв и
-факт предыдущей попытки не переиспользуются. Текущие задержки автоматического
-retry (`5` и `30` секунд) бюджетом не меняются. Если лимита не хватает, retry не
-стартует и не записывается как `failed`.
+Подтверждённый provider usage, коррелированный с `run_id`, становится actual.
+Fallback допустим только с явными `source=runner_fallback`,
+`normalization_version` и `rate_card_version`. При отсутствии подтверждённого
+или разрешённого fallback reservation снимается, finalized не увеличивается,
+run получает `unknown`, а scope — `blocked_unknown`; следующий run запрещён до
+ручного решения.
 
-Retry не является новым лимитом: его planned и actual входят в тот же
-`parent_budget_id`, что и исходная попытка. Для дочернего Rework действует тот
-же принцип, даже если сам тикет исключён из WIP; `wip_exempt` не создаёт
-бюджетного исключения.
+Если actual больше planned, сохраняется весь actual, Codex не прерывается, а
+после финализации scope становится `over_budget` при превышении лимита.
 
-Результат `needs_rework` создаёт существующий дочерний Delivery-тикет типа
-`rework`. Его попытки имеют `attempt_kind: rework`, собственные `run_id` и
-резервы, но расходуются из общего лимита родителя. Если доступного остатка нет,
-дочерний тикет всё равно создаётся, переводится в `blocked`, а автоматический
-старт откладывается до увеличения лимита или ручного разрешения overrun.
+Raw token counts хранятся отдельно от normalized budget points. Каждая ненулевая
+planned/actual point value обязана иметь `normalization_version`; при null
+conversion версия null и status `unavailable`. Rate card фиксирует версию
+таблицы стоимости/пересчёта и не пересчитывает прошлые записи. Отсутствие
+конверсии в points не превращается в подтверждённый ноль.
 
-## Резервирование и превышение
+## Retry, rework и membership
 
-Перед каждым запуском проверяется:
+Retry получает новый `run_id`, отдельную reservation и тот же ticket budget;
+предыдущая reservation не переиспользуется. Rework получает child ticket и
+`attempt_kind: rework`, но его cost входит в budget исходного ticket и active
+session ровно один раз. `wip_exempt` не обходит budget gate. Один ticket может
+принадлежать не более чем одной active Delivery session; membership после
+активации сессии не изменяется.
 
-`spent_points + reserved_points + planned_points <= limit_points`.
+## Legacy и миграция
 
-При успехе сначала создаётся резерв, затем запускается Codex. При нехватке
-остатка Codex не запускается, `failed` не создаётся, зависший резерв не
-остаётся, а тикет получает ожидающее бюджетное состояние (`exhausted` или
-`blocked` по причине).
+Если budget record отсутствует или `mode=legacy`, scheduler не блокирует запуск
+по бюджету и автоматически не создаёт reservation. Существующие ticket/session
+и `run_history` остаются читаемыми. Старый `token_usage` не переносится в
+finalized без доказуемого `usage_ref` и версий нормализации.
 
-Если `actual_points > planned_points`, уже запущенный Codex не прерывается.
-Весь actual сохраняется; после финализации бюджет получает `over_budget`, если
-агрегат превышает лимит, и новые запуски запрещаются. Продолжение возможно
-только после увеличения лимита или явного разрешения overrun с пользователем и
-причиной. Разрешение не изменяет прошлый факт.
+Переход `legacy` → `enforced` выполняется явной миграцией конкретного scope с
+заданными лимитами. Прошлые runs остаются historical/excluded, если их нельзя
+надёжно нормализовать.
 
-## Приёмочные сценарии для будущей реализации
+Миграция ticket добавляет только budget metadata и стабильно связывает budget с
+исходным Delivery ticket; `parent`, `status`, `blocked_by`, `active_run` и
+`run_history` не меняются. Session budget связывается с `session.id`; сохраняются
+`ticket_ids`, lifecycle timestamps и `audit_events`. Старые
+`.vibe/tickets/**/run_history` не переписываются и synthetic run records без
+проверяемого источника не создаются. Для rework вычисляется `parent_ticket_id`,
+отдельный лимит не появляется. Откат metadata не меняет lifecycle и
+`run_history`; ledger records остаются доступными для аудита.
 
-1. При остатке 30 и плане 20 создаётся один резерв 20; повторный polling его
-   не дублирует, а запуск использует тот же `run_id`.
-2. Запуск с планом 20 и actual 17 финализируется, увеличивает `spent_points` на
-   17 и освобождает резерв.
-3. `failed` после старта учитывает provider usage; ошибка до старта полностью
-   освобождает резерв и не создаёт actual.
-4. Retry имеет новый `run_id`, отдельный planned/actual и учитывается в общем
-   расходе вместе с первой попыткой.
-5. `needs_rework` создаёт дочерний `rework`; его расход включается в агрегат
-   родителя ровно один раз и не обходится через `wip_exempt`.
-6. При остатке 10 и плане 20 Codex не запускается, `failed` не появляется и
-   резерв не зависает.
-7. Actual 25 при плане 20 сохраняется целиком, переводит агрегат в
-   `over_budget` и запрещает следующую попытку.
-8. Отсутствие usage даёт `unknown`, не начисляет ноль и блокирует следующий
-   запуск до ручного решения.
-9. Изменение политики после резервирования не меняет сохранённый planned;
-   корректировка исторического actual создаётся отдельной записью.
+Предлагаемое хранилище: `.vibe/budgets/<budget_id>.yaml`, append-only
+`.vibe/budgets/ledger.jsonl` и `.vibe/budgets.lock`. Конкретный authoritative
+layout должен быть подтверждён до enforcement; append/update reservation и
+finalization обязаны быть atomic, с lock и recovery для сбоя между reservation
+и стартом процесса.
+
+## Acceptance scenarios
+
+1. Если до нового запуска `available=30`, а `requested_planned=20`, gate
+   принимает reservation: `reserved` увеличивается на 20, новая стоимость не
+   попадает в `planned`, а post-reservation `available=10`. Повторная операция
+   с тем же `run_id` возвращает существующую запись и не меняет aggregates.
+2. Если существующее planned obligation равно 20, его transfer в reservation
+   уменьшает `planned` на 20 и увеличивает `reserved` на 20; `committed` и
+   `available` остаются неизменными. Затем actual 17 уменьшает reserved на held
+   value, увеличивает finalized на 17 и пересчитывает available.
+3. `limit_tokens`, `limit_points` и `limit_runs` проверяются независимо;
+   превышение любого enforced измерения запрещает новый run.
+4. Retry и rework используют существующие ticket/session budgets и не дают
+   двойного списания; child rework не получает отдельный лимит.
+5. Unknown usage даёт `blocked_unknown`, а completed scope не принимает новые
+   reservations.
+6. Ненулевые planned/actual points требуют normalization version; при null
+   points version null и status unavailable, а активный point limit приводит к
+   unknown, не к финализации нулём.
+7. Actual выше planned сохраняется полностью, с версиями нормализации и rate
+   card, и даёт `over_budget` без остановки уже запущенного процесса.
+8. Изменение policy/rate card не меняет прошлые planned/actual; исправление —
+   отдельный immutable adjustment.
+9. Legacy migration сохраняет lifecycle и `run_history` без их переписывания.
 
 ## Зависимости и открытые решения
 
-До реализации нужны:
-
-- формат usage event и гарантированная корреляция с `run_id` в Codex/provider;
-- версионируемая таблица нормализации и владелец её изменений;
-- атомарное хранилище ledger и recovery-политика для сбоя между резервом и
-  стартом процесса;
-- UI/CLI для изменения лимита и разрешения `over_budget`/`unknown`.
-
-Открыты срок хранения ledger, роли, которым разрешено повышать лимит или
-разрешать overrun/unknown, и способ агрегации нескольких независимых бюджетов
-проекта. До принятия этих решений применяется данный контракт; денежный учёт
-и автоматическое расширение лимита не вводятся.
+До enforcement нужно подтвердить гарантию корреляции provider usage с каждым
+`run_id`, владельца normalization table и формат `rate_card_version`, а также
+authoritative persistence layout. Manual override для `over_budget` и
+`blocked_unknown` требует audit actor/reason и отдельного решения о полномочиях.
+Срок хранения ledger и UI/CLI ролей также остаются вне этого контракта.

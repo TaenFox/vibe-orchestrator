@@ -19,18 +19,23 @@
 - версионируемые промпты и политики, доступные по API
 - замена файлового провайдера промптов без изменений scheduler/tickets
 
-**Будущий budget control plane**
-- лимит и агрегаты бюджета родительского Delivery-тикета;
-- атомарный ledger резервов и фактов по каждому `run_id`, включая retry и
-  дочерний Rework;
-- политики нормализации planned/actual и ручные решения по `unknown` и
-  `over_budget`.
+**Budget control plane (`budget.v1`)**
+- scopes `session`, `ticket` и `run` с ownership и связями через `run_id`;
+- независимые `limit_tokens`, `limit_points` и `limit_runs`, агрегаты
+  `planned` (только незарезервированные obligations), `reserved` (active holds),
+  `finalized`/`available`, где `committed = finalized + planned + reserved`;
+- atomic ledger reservations/finalizations для initial, retry и rework без
+  отдельного бюджета child rework;
+- состояния `active`, `stop_new_runs`, `exhausted`, `over_budget`,
+  `blocked_unknown` и `completed` с фиксированным precedence;
+- версионирование normalization/rate card и immutable adjustments.
 
-Бюджетный ledger не является частью текущей модели `Ticket` и не подменяет
-`run_history` или каталог `.vibe/runs/<run_id>`. При будущей реализации он
-должен ссылаться на эти источники через тот же `run_id`; текущий scheduler не
-проверяет лимит и не резервирует ресурс. Контракт границ и поведения описан в
-[`BUDGETING.md`](BUDGETING.md).
+Контракт принят, но enforcement в текущем MVP не реализован: scheduler не
+проверяет лимит и не резервирует ресурс. Бюджетный ledger не является частью
+текущей модели `Ticket` и не подменяет `run_history` или каталог
+`.vibe/runs/<run_id>`; при реализации он должен ссылаться на них через тот же
+`run_id`. Legacy migration не переписывает lifecycle-поля или `run_history`.
+Границы и полная схема описаны в [`BUDGETING.md`](BUDGETING.md).
 
 ## Терминология и membership
 
@@ -164,6 +169,7 @@ release), Discovery Correction — только в `done`. После разре
 
 - `.vibe/runs/` намеренно остается локальным и игнорируется Git, поэтому для долгого хранения аудит опирается на `run_history` в YAML тикета.
 - Протокол traceability не защищает от ручного редактирования файлов `.vibe/tickets/**`; доверие к аудиту опирается на дисциплину репозитория и Git history.
-- Не реализованы бюджет, cost model, capacity planning и агрегированные
-  финансовые/трудовые показатели; `priority`, `wip`, `mandatory` и статусы не
-  следует интерпретировать как бюджетные значения.
+- Enforcement budget.v1, cost model, capacity planning и агрегированные
+  финансовые/трудовые показатели не реализованы; `priority`, `wip`, `mandatory`
+  и статусы не следует интерпретировать как бюджетные значения. Модель и
+  migration contract зафиксированы в [`BUDGETING.md`](BUDGETING.md).
