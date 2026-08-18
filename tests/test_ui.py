@@ -156,6 +156,16 @@ def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, pr
     page = render_board(store, load_all_workflows(), "delivery")
     assert "budget active" in page
     assert "spent 12" in page
+    assert "planned (tokens: 20 · points: 1 · runs: 1)" in page
+    assert "reserved (tokens: 0 · points: 0 · runs: 0)" in page
+    assert "actual (tokens: 12 · points: 1 · runs: 1)" in page
+    assert "Attempt / ownership" in page
+    assert "captured_at 2026-08-18T10:00:00+00:00" in page
+    assert "normalization_version n.v1" in page
+    assert "rate_card_version —" in page
+    assert "cost —" in page
+    assert "snapshot_status fresh" in page
+    assert "enforcement_state_exact True" in page
 
 
 def test_empty_delivery_session_ticket_selector_disables_add_action(http_server, project):
