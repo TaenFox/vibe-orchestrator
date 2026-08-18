@@ -22,6 +22,7 @@ from .tickets import (
     retry_exhausted,
 )
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
+from .agent_tools import ReadOnlyAgentTools
 
 
 @dataclass
@@ -114,7 +115,7 @@ AUTO_REFRESH_SCRIPT = f"""<script>
 
 
 def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project)
+    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project); agent_tools = ReadOnlyAgentTools(project)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -149,6 +150,39 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
             if parsed.path == "/api/sessions":
                 context = BudgetReadContext()
                 return self._json([_session_payload(item, store, ledger, context) for item in session_store.list()])
+            if parsed.path == "/api/agent/tickets" or parsed.path == "/api/agent/sessions":
+                query = urllib.parse.parse_qs(parsed.query)
+                def query_int(name):
+                    value = query.get(name, [None])[0]
+                    return None if value is None else int(value)
+                try:
+                    if parsed.path.endswith("tickets"):
+                        return self._json(agent_tools.list_tickets(
+                            process=query.get("process", [None])[0], status=query.get("status", [None])[0],
+                            parent=query.get("parent", [None])[0], session=query.get("session", [None])[0],
+                            offset=query_int("offset") or 0, limit=query_int("limit"),
+                            history_limit=query_int("history_limit")))
+                    return self._json(agent_tools.list_sessions(
+                        status=query.get("status", [None])[0], offset=query_int("offset") or 0,
+                        limit=query_int("limit")))
+                except (KeyError, ValueError):
+                    return self.send_error(400, "Некорректный read-only запрос")
+            if parsed.path.startswith("/api/agent/tickets/"):
+                ticket_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    history_limit = query.get("history_limit", [None])[0]
+                    return self._json(agent_tools.get_ticket(ticket_id, history_limit=int(history_limit) if history_limit else None))
+                except KeyError:
+                    return self.send_error(404, "Тикет не найден")
+                except ValueError:
+                    return self.send_error(400, "Некорректный read-only запрос")
+            if parsed.path.startswith("/api/agent/sessions/"):
+                session_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
+                try:
+                    return self._json(agent_tools.get_session(session_id))
+                except (KeyError, ValueError):
+                    return self.send_error(404, "Сессия не найдена")
             if parsed.path.startswith("/api/sessions/"):
                 try:
                     return self._json(_session_payload(session_store.get(parsed.path.rsplit("/", 1)[-1]), store, ledger, BudgetReadContext()))

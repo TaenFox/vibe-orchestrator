@@ -292,11 +292,37 @@ Source of truth для аудита разделен на два слоя:
 - `run_history[].event` — durable timeline (`created`, `started`, `completed`, `failed`) для тикета; именно она нужна для ретроспективы после очистки `active_run`.
 - `run_history[].ticket_type` — тип тикета, к которому относится событие.
 - `run_history[].artifacts_path` — относительный путь к локальным артефактам этого запуска.
+- `run_history[].source_artifact_path` или `source_artifacts` — исходный файл или каталог запуска; в read-only payload это нормализуется в объект `{path, links}`.
 - `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
 - `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.
 - `ticket_title`, `ticket_priority`, `ticket_parent`, `ticket_description` в `run_history`/`run.json` — durable snapshot mutable ticket-полей, которые реально были встроены в prompt этого запуска.
 
 Практическое правило для расследований: сначала смотрите `run_history` в тикете как индекс запусков, затем открывайте `.vibe/runs/<run_id>/run.json` и `result.json`, и только после этого при необходимости углубляйтесь в `events.jsonl`.
+
+## Read-only agent queries
+
+Read-only tools позволяют агентам получать тикеты и delivery-сессии без изменения
+control-plane состояния. `list_tickets` поддерживает фильтры `process`, `status`,
+`parent`, `session`, пагинацию `offset`/`limit` и `history_limit`; `get_ticket`
+возвращает полную модель тикета с ограниченной историей запусков и признаком
+`run_history_truncated`. `list_sessions` и `get_session` возвращают `status`,
+`participants`, `audit_events` и `effective_membership`. Те же данные доступны
+через `/api/agent/tickets`, `/api/agent/tickets/<id>`, `/api/agent/sessions` и
+`/api/agent/sessions/<id>`.
+
+В `run_history` поля `artifacts` и `source_artifacts` имеют форму `{path, links}`.
+Ссылки строятся только для существующих файлов внутри `.vibe/runs/<run_id>` и
+ведут на `/artifacts/<run_id>/<file>` с безопасным кодированием сегментов пути.
+Если `artifacts_path` указывает на файл, ссылка сохраняет его относительный путь
+от `.vibe/runs/<run_id>`, включая имя файла; если он указывает на каталог, ссылки
+по-прежнему перечисляют файлы относительно этого каталога.
+Для source artifacts `run_id` принимается только как имя одного каталога
+непосредственно под canonical `.vibe/runs`; traversal, абсолютные значения,
+разделители и symlink-каталоги наружу отклоняются.
+Невалидные, отсутствующие или внешние source paths дают пустой `links` без ошибки.
+При наличии непустого `source_artifacts` он имеет приоритет над
+`source_artifact_path`. Запросы используют положительные integer limits с верхними
+bounds, не вызывают init/save/migration и не меняют ticket YAML.
 
 ## Конфигурация процессов
 
