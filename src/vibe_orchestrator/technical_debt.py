@@ -22,6 +22,7 @@ ERROR_CODES = {
     "TECH_DEBT_MUTATION_BLOCKED",
 }
 _FIELDS = {"problem", "evidence", "impact", "suggested_scope", "source_ticket", "source_stage", "source_run", "type", "urgency", "priority"}
+ObservationVerifier = Callable[[str, str, str], bool]
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,15 @@ def parse_technical_debt(details: str) -> list[dict[str, Any]]:
     return normalized
 
 
-def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path, ticket_store: TicketStore | None = None, session_store: SessionStore | None = None, reader: Callable[[Path], str] | None = None) -> list[dict[str, Any]]:
+def preflight_technical_debt(
+    candidates: list[dict[str, Any]],
+    *,
+    project: Path,
+    ticket_store: TicketStore | None = None,
+    session_store: SessionStore | None = None,
+    reader: Callable[[Path], str] | None = None,
+    observation_verifier: ObservationVerifier | None = None,
+) -> list[dict[str, Any]]:
     """Read-only verification of all sources and evidence before mutation."""
     store = ticket_store or TicketStore(project)
     sessions = session_store or SessionStore(project, store)
@@ -164,7 +173,7 @@ def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path,
                 expected=candidate["source_run"],
                 actual=metadata.get("run_id"),
             )
-        if manifest_present and any(
+        if any(
             not isinstance(metadata.get(field), str)
             or not metadata[field].strip()
             or metadata[field] != expected
@@ -186,4 +195,30 @@ def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path,
         identifier = candidate["evidence"]["identifier"]
         if identifier not in content:
             raise _error(f"{base}.evidence.identifier", "Identifier не найден в evidence-файле.", code="TECH_DEBT_SOURCE_MISMATCH")
+        if observation_verifier is None:
+            raise _error(
+                f"{base}.evidence.observation",
+                "Capability проверки observation недоступна.",
+                code="TECH_DEBT_PREFLIGHT_UNAVAILABLE",
+            )
+        try:
+            verified = observation_verifier(content, identifier, candidate["evidence"]["observation"])
+        except Exception as exc:
+            raise _error(
+                f"{base}.evidence.observation",
+                "Capability проверки observation недоступна.",
+                code="TECH_DEBT_PREFLIGHT_UNAVAILABLE",
+            ) from exc
+        if not isinstance(verified, bool):
+            raise _error(
+                f"{base}.evidence.observation",
+                "Capability проверки observation вернула недопустимый результат.",
+                code="TECH_DEBT_PREFLIGHT_UNAVAILABLE",
+            )
+        if not verified:
+            raise _error(
+                f"{base}.evidence.observation",
+                "Observation не подтверждено для evidence-файла.",
+                code="TECH_DEBT_SOURCE_MISMATCH",
+            )
     return candidates

@@ -19,7 +19,7 @@ from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
-from .technical_debt import TechnicalDebtError, parse_technical_debt, preflight_technical_debt
+from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_technical_debt, preflight_technical_debt
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 
@@ -27,7 +27,13 @@ log = logging.getLogger("vibe")
 
 
 class Orchestrator:
-    def __init__(self, project: Path, poll_interval: float = 2.0, max_agents: int | None = None):
+    def __init__(
+        self,
+        project: Path,
+        poll_interval: float = 2.0,
+        max_agents: int | None = None,
+        observation_verifier: ObservationVerifier | None = None,
+    ):
         self.store = TicketStore(project)
         self.store.init()
         self.workflows = load_all_workflows()
@@ -39,6 +45,7 @@ class Orchestrator:
         self.worker_control.set_limit(initial_worker_limit)
         self.max_agents = initial_worker_limit
         self._last_worker_limit = initial_worker_limit
+        self.observation_verifier = observation_verifier
         self.tree_manager = GitTreeManager(project, self.store)
         self.ledger = BudgetLedger(project)
         self.running: dict[str, asyncio.Task[None]] = {}
@@ -347,6 +354,7 @@ class Orchestrator:
                         project=self.store.project,
                         ticket_store=self.store,
                         session_store=self.session_store,
+                        observation_verifier=self.observation_verifier,
                     )
             except TechnicalDebtError:
                 raise
