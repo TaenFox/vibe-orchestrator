@@ -270,6 +270,33 @@ delta применяются одной SQLite-транзакцией; resulting
 
 ## Retry, rework и membership
 
+### Delivery session scopes
+
+DeliverySession хранит `budget_policy` (`legacy` или `enforced`),
+`budget_limits` для `tokens`, `points` и `runs` (неотрицательное целое либо
+`null`) и `membership_policy` (`legacy` или `required`). Новая сессия с
+заданными лимитами автоматически получает `enforced`; при активации для неё
+создаётся scope `session:<session-id>`. В legacy session отсутствие budget
+record сохраняет прежний bypass.
+
+При `membership_policy: required` запуск любого Delivery ticket, включая
+`wip_exempt` rework, возможен только после явного включения в session. Для
+исключения используется отдельный override с непустыми `actor` и `reason`;
+он записывается в `audit_events` вместе с `ticket_id` и timestamp. Флаг
+`wip_exempt` сам по себе membership не заменяет.
+
+Для enforced session `reserve` в одной `BEGIN IMMEDIATE` транзакции проверяет
+и ticket scope, и `session:<session-id>`; отсутствие или нехватка любого scope
+отклоняет reservation без частичных run/aggregate. Initial/retry используют
+текущий ticket, rework — `parent_ticket_id`; child budget не изменяется.
+
+Complete переводит session scope в `completed`, cancel — в `stop_new_runs`.
+Оба перехода сохраняют YAML, audit events, scopes, runs и aggregates, поэтому
+уже начатый run может быть finalized/reconciled, а новые reservations через
+terminal session запрещены. Старые session YAML без новых полей читаются с
+безопасными legacy defaults и при сохранении получают полную схему; история
+тикетов и synthetic runs при миграции не создаются.
+
 Retry получает новый `run_id`, отдельную reservation и тот же ticket budget;
 предыдущая reservation не переиспользуется. Rework получает child ticket и
 `attempt_kind: rework`, но его cost входит в budget исходного ticket и active

@@ -25,6 +25,9 @@ SESSION_STATUSES = {"draft", "active", "completed", "cancelled"}
 OPEN_STATUSES = {"draft", "active"}
 DELIVERY_TICKET_TYPES = {"story", "task", "bug", "rework"}
 SESSION_ID_PATTERN = re.compile(r"SESSION-[A-Z0-9]+\Z")
+SESSION_BUDGET_POLICIES = {"legacy", "enforced"}
+SESSION_MEMBERSHIP_POLICIES = {"legacy", "required"}
+SESSION_BUDGET_DIMENSIONS = ("tokens", "points", "runs")
 
 
 def now_iso() -> str:
@@ -44,6 +47,9 @@ class DeliverySession:
     completed_at: str | None = None
     cancelled_at: str | None = None
     audit_events: list[dict[str, Any]] = field(default_factory=list)
+    budget_policy: str = "legacy"
+    budget_limits: dict[str, int | None] = field(default_factory=lambda: {dimension: None for dimension in SESSION_BUDGET_DIMENSIONS})
+    membership_policy: str = "legacy"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DeliverySession":
@@ -64,6 +70,11 @@ class DeliverySession:
         payload.setdefault("started_at", None)
         payload.setdefault("completed_at", None)
         payload.setdefault("cancelled_at", None)
+        payload.setdefault("budget_policy", "legacy")
+        payload.setdefault("budget_limits", {dimension: None for dimension in SESSION_BUDGET_DIMENSIONS})
+        payload.setdefault("membership_policy", "legacy")
+        if isinstance(payload.get("budget_limits"), dict):
+            payload["budget_limits"] = {dimension: payload["budget_limits"].get(dimension) for dimension in SESSION_BUDGET_DIMENSIONS}
         events = payload.pop("events", payload.get("audit_events", []))
         payload["audit_events"] = [dict(item) for item in events if isinstance(item, dict)] if isinstance(events, list) else []
         allowed = {name for name in cls.__dataclass_fields__}
@@ -102,8 +113,15 @@ class SessionStore:
         self._validate_session_id(session_id)
         return self.sessions_root / f"{session_id}.yaml"
 
-    def create(self, ticket_ids: list[str] | None = None, *, title: str = "") -> DeliverySession:
-        session = DeliverySession(id=f"SESSION-{uuid.uuid4().hex[:12].upper()}", title=title)
+    def create(self, ticket_ids: list[str] | None = None, *, title: str = "", budget_policy: str = "legacy",
+               budget_limits: dict[str, int | None] | None = None, membership_policy: str = "legacy") -> DeliverySession:
+        limits = {dimension: None for dimension in SESSION_BUDGET_DIMENSIONS}
+        if budget_limits is not None:
+            limits.update(budget_limits)
+        if budget_limits is not None and budget_policy == "legacy":
+            budget_policy = "enforced"
+        session = DeliverySession(id=f"SESSION-{uuid.uuid4().hex[:12].upper()}", title=title,
+                                  budget_policy=budget_policy, budget_limits=dict(limits), membership_policy=membership_policy)
         if ticket_ids is not None:
             if not isinstance(ticket_ids, list):
                 raise TypeError("ticket_ids must be a list")
@@ -238,6 +256,9 @@ class SessionStore:
         session.started_at = now_iso()
         self._audit(session, "activated")
         self.save(session)
+        if session.budget_policy == "enforced":
+            from .budget_ledger import BudgetLedger
+            BudgetLedger(self.project).create_budget("session", session.id, limits=session.budget_limits)
 
     def complete(self, session: DeliverySession) -> None:
         self._require_status(session, "active")
@@ -245,6 +266,7 @@ class SessionStore:
         session.completed_at = now_iso()
         self._audit(session, "completed")
         self.save(session)
+        self._set_budget_status(session, "completed")
 
     def cancel(self, session: DeliverySession) -> None:
         if session.status not in {"draft", "active"}:
@@ -253,6 +275,29 @@ class SessionStore:
         session.cancelled_at = now_iso()
         self._audit(session, "cancelled")
         self.save(session)
+        self._set_budget_status(session, "stop_new_runs")
+
+    def _set_budget_status(self, session: DeliverySession, status: str) -> None:
+        if session.budget_policy == "enforced":
+            from .budget_ledger import BudgetLedger
+            BudgetLedger(self.project).set_status(f"session:{session.id}", status)
+
+    def override_ticket(self, session: DeliverySession, ticket_id: str, *, actor: str, reason: str) -> None:
+        if session.status != "active":
+            raise ValueError("Membership override requires an active session")
+        if not isinstance(actor, str) or not actor.strip() or not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Membership override requires actor and reason")
+        if ticket_id in session.ticket_ids:
+            return
+        self._audit(session, "membership_override", ticket_id=ticket_id, actor=actor.strip(), reason=reason.strip())
+        self.save(session)
+
+    @staticmethod
+    def effective_ticket_ids(session: DeliverySession) -> set[str]:
+        result = set(session.ticket_ids)
+        result.update(event["ticket_id"] for event in session.audit_events
+                      if event.get("event") == "membership_override" and isinstance(event.get("ticket_id"), str))
+        return result
 
     def _validate_session(self, session: DeliverySession) -> None:
         self._validate_session_id(session.id)
@@ -260,6 +305,16 @@ class SessionStore:
             raise ValueError(f"Unsupported session schema version: {session.schema_version!r}")
         if session.status not in SESSION_STATUSES:
             raise ValueError(f"Invalid session status: {session.status!r}")
+        if session.budget_policy not in SESSION_BUDGET_POLICIES:
+            raise ValueError(f"Invalid budget policy: {session.budget_policy!r}")
+        if session.membership_policy not in SESSION_MEMBERSHIP_POLICIES:
+            raise ValueError(f"Invalid membership policy: {session.membership_policy!r}")
+        if not isinstance(session.budget_limits, dict) or set(session.budget_limits) != set(SESSION_BUDGET_DIMENSIONS):
+            raise ValueError("budget_limits must contain tokens, points and runs")
+        for dimension in SESSION_BUDGET_DIMENSIONS:
+            value = session.budget_limits[dimension]
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                raise ValueError("budget limits must be non-negative integers or null")
         self._validate_membership(session, session.ticket_ids)
         self._validate_lifecycle(session)
         if session.status in OPEN_STATUSES:
@@ -334,6 +389,10 @@ class SessionStore:
             raise ValueError("Session schema version cannot be changed")
         if persisted.created_at != session.created_at:
             raise ValueError("Session creation time cannot be changed")
+        if (persisted.status != "draft" and
+                (persisted.budget_policy != session.budget_policy or persisted.budget_limits != session.budget_limits or
+                 persisted.membership_policy != session.membership_policy)):
+            raise ValueError("Session policies can only be changed in draft")
 
         allowed = {
             "draft": {"draft", "active", "cancelled"},

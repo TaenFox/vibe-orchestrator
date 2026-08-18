@@ -147,9 +147,16 @@ class BudgetLedger:
         now = _now()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("""INSERT INTO budgets(budget_id,scope,owner_id,mode,limit_tokens,limit_points,limit_runs,created_at,updated_at)
+            db.execute("""INSERT OR IGNORE INTO budgets(budget_id,scope,owner_id,mode,limit_tokens,limit_points,limit_runs,created_at,updated_at)
                         VALUES(?,?,?,?,?,?,?,?,?)""", (budget_id, scope, owner_id, mode, limits["tokens"], limits["points"], limits["runs"], now, now))
         return budget_id
+
+    def set_status(self, budget_id: str, status: str) -> None:
+        if status not in {"stop_new_runs", "completed"}:
+            raise ValueError("invalid terminal budget status")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE budgets SET status=?,updated_at=? WHERE budget_id=?", (status, _now(), budget_id))
 
     def get_budget(self, budget_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
@@ -206,7 +213,7 @@ class BudgetLedger:
 
     def reserve(self, run_id: str, ticket_id: str, session_id: str | None, planned: Mapping[str, Any], *,
                 attempt_kind: str = "initial", parent_run_id: str | None = None, parent_ticket_id: str | None = None,
-                budget_owner_ticket_id: str | None = None) -> Reservation:
+                budget_owner_ticket_id: str | None = None, require_session_budget: bool = False) -> Reservation:
         if attempt_kind == "rework" and not parent_ticket_id:
             raise BudgetDenied("rework requires parent_ticket_id for budget ownership")
         if attempt_kind == "rework" and budget_owner_ticket_id and budget_owner_ticket_id != parent_ticket_id:
@@ -224,6 +231,12 @@ class BudgetLedger:
                 if immutable != (ticket_id, session_id, attempt_kind, planned_values): raise ImmutableRunError("run_id parameters differ")
                 return Reservation(run_id, existing["state"])
             rows = self._budget_rows(db, budget_owner_ticket_id, session_id)
+            if require_session_budget and not session_id:
+                raise BudgetDenied("active session membership is required", reason_code="session_membership_required")
+            if require_session_budget and not any(row["scope"] == "session" for row in rows):
+                raise BudgetDenied("session budget record is missing", reason_code="budget_session_missing")
+            if require_session_budget and not any(row["scope"] == "ticket" for row in rows):
+                raise BudgetDenied("ticket budget record is missing", reason_code="budget_ticket_missing")
             if not rows:
                 return Reservation(run_id, "legacy", legacy=True)
             for row in rows:

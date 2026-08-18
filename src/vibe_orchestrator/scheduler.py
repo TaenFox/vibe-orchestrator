@@ -29,6 +29,7 @@ def select_candidates(
     running_ids: set[str],
     now: datetime | None = None,
     session_participants: set[str] | None = None,
+    session_membership_required: bool = False,
 ) -> list[Candidate]:
     by_id = workflow.by_id
     candidates: list[Candidate] = []
@@ -53,7 +54,7 @@ def select_candidates(
             and source.id == "selected_for_session"
             and target.id == "system_analysis"
             and ticket.id not in session_participants
-            and not ticket.wip_exempt
+            and (session_membership_required or not ticket.wip_exempt)
         ):
             continue
         if source.kind == "queue" and not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id) >= target.wip:
