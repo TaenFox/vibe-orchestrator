@@ -385,7 +385,7 @@ def _stage_column(store, workflow, stage, tickets, tree_manager, session_store, 
                 action=f'<form method="post" action="/retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить</button></form>'
             if ticket.status == "ready_for_release" and ticket.last_outcome == "integration_conflict":
                 action=f'<form method="post" action="/release-retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить интеграцию</button></form>'
-            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge active-badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree); drawer_button=f'<button type="button" id="open-ticket-{html.escape(ticket.id)}" class="drawer-trigger" data-open-ticket="{html.escape(ticket.id)}" aria-label="Открыть тикет {html.escape(ticket.id)}">Открыть</button>'
+            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge active-badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree, ledger); drawer_button=f'<button type="button" id="open-ticket-{html.escape(ticket.id)}" class="drawer-trigger" data-open-ticket="{html.escape(ticket.id)}" aria-label="Открыть тикет {html.escape(ticket.id)}">Открыть</button>'
             card_class = "card active-run" if ticket.active_run else "card"
             budget, _ = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
             budget_html = _budget_summary_html(budget)
@@ -469,6 +469,42 @@ def _budget_summary_html(budget: dict | None) -> str:
             f'<span class="meta">tokens: limit {fmt(limits, "tokens")} · spent {fmt(spent, "tokens")} · '
             f'reserved {fmt(reserved, "tokens")} · available {fmt(available, "tokens")} · '
             f'runs {budget.get("started_runs", 0)}/{budget.get("reserved_runs", 0)}</span></div>')
+
+
+def _budget_value(value) -> str:
+    return "—" if value is None else html.escape(str(value))
+
+
+def _budget_dimensions_html(values: dict | None) -> str:
+    values = values or {}
+    return " · ".join(f'{dimension}: {_budget_value(values.get(dimension))}' for dimension in ("tokens", "points", "runs"))
+
+
+def _budget_run_details_html(run: dict) -> str:
+    return (
+        f'<div class="run-entry">'
+        f'<div><span class="badge">{html.escape(str(run.get("state", "—")))}</span> <strong>{html.escape(str(run.get("run_id", "—")))}</strong></div>'
+        f'<div class="details-row"><span class="meta">Attempt / ownership</span>{html.escape(str(run.get("attempt_kind") or "—"))} · ticket {html.escape(str(run.get("ticket_id") or "—"))} · parent ticket {html.escape(str(run.get("parent_ticket_id") or "—"))} · ticket budget {html.escape(str(run.get("ticket_budget_id") or "—"))} · session budget {html.escape(str(run.get("session_budget_id") or "—"))}</div>'
+        f'<div class="details-row"><span class="meta">Dimensions</span>planned ({_budget_dimensions_html(run.get("planned"))}) · reserved ({_budget_dimensions_html(run.get("reserved"))}) · actual ({_budget_dimensions_html(run.get("actual"))})</div>'
+        f'<div class="details-row"><span class="meta">Snapshot</span>source {html.escape(str(run.get("source") or "unknown"))} · confidence {html.escape(str(run.get("source_confidence") or "unknown"))} · captured_at {_budget_value(run.get("captured_at"))} · last_confirmed_snapshot_at {_budget_value(run.get("last_confirmed_snapshot_at"))}</div>'
+        f'<div class="details-row"><span class="meta">Versions / cost</span>normalization_version {_budget_value(run.get("normalization_version"))} · rate_card_version {_budget_value(run.get("rate_card_version"))} · cost {_budget_value(run.get("cost"))}</div>'
+        '</div>'
+    )
+
+
+def _budget_details_html(budget: dict | None, runs: list[dict] | None = None) -> str:
+    if not budget:
+        return ""
+    limits = budget.get("limits") or {}
+    return (
+        f'<div class="details-body budget-details">'
+        f'<div class="details-row"><span class="meta">Budget identity</span>budget_id {_budget_value(budget.get("budget_id"))} · scope {_budget_value(budget.get("scope"))} · owner_id {_budget_value(budget.get("owner_id"))} · mode {_budget_value(budget.get("mode"))} · contract_version {_budget_value(budget.get("contract_version"))}</div>'
+        f'<div class="details-row"><span class="meta">Status</span>status {_budget_value(budget.get("status"))} · blocked_reason {_budget_value(budget.get("blocked_reason"))}</div>'
+        f'<div class="details-row"><span class="meta">Dimensions</span>planned ({_budget_dimensions_html(budget.get("planned"))}) · reserved ({_budget_dimensions_html(budget.get("reserved"))}) · actual ({_budget_dimensions_html(budget.get("spent"))}) · available ({_budget_dimensions_html(budget.get("available"))}) · limits ({_budget_dimensions_html(limits)})</div>'
+        f'<div class="details-row"><span class="meta">Snapshot</span>snapshot_status {_budget_value(budget.get("snapshot_status"))} · observed_at {_budget_value(budget.get("observed_at"))} · enforcement_state_exact {_budget_value(budget.get("enforcement_state_exact"))}</div>'
+        f'{"".join(_budget_run_details_html(run) for run in (runs or [])) or "<span class=meta>Запусков в budget нет</span>"}'
+        '</div>'
+    )
 
 
 def _session_payload(session, store, ledger=None) -> dict:
@@ -575,7 +611,7 @@ def _ticket_details_html(ticket, tree=None, ledger=None) -> str:
     retry_after = ticket.retry_after or "нет"
     description = ticket.description or "(пусто)"
     latest_usage, aggregate = _ticket_usage(ticket)
-    budget, _ = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
+    budget, budget_runs = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
     usage_text = "unknown"
     usage_time = "нет"
     if is_confirmed_token_usage(latest_usage):
@@ -598,7 +634,7 @@ def _ticket_details_html(ticket, tree=None, ledger=None) -> str:
         f'<div class="details-row"><span class="meta">Повтор после</span>{html.escape(retry_after)}</div>'
         f'<div class="details-row"><span class="meta">Токены (актуальный источник)</span>{html.escape(usage_text)} · {html.escape(usage_time)}</div>'
         f'<div class="details-row"><span class="meta">Токены (подтвержденные запуски)</span>{aggregate["total_tokens"]} · запусков {aggregate["confirmed_runs"]}</div>'
-        f'{_budget_summary_html(budget)}'
+        f'{_budget_summary_html(budget)}{_budget_details_html(budget, budget_runs)}'
         f'{tree_details}'
         f'<div class="details-row"><span class="meta">Создан</span>{html.escape(ticket.created_at)}</div>'
         f'<div class="details-row"><span class="meta">Обновлен</span>{html.escape(ticket.updated_at)}</div>'
@@ -646,7 +682,7 @@ def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, s
     action = _ticket_action_html(store, workflow, ticket)
     budget, budget_runs = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
     budget_details = _budget_summary_html(budget)
-    run_details = "".join(f'<div class="run-entry"><span class="badge">{html.escape(run["state"])}</span> {html.escape(run["run_id"])} · confidence {html.escape(run["source_confidence"])} · cost —</div>' for run in budget_runs)
+    run_details = _budget_details_html(budget, budget_runs)
     return (
         f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
         f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
@@ -657,7 +693,7 @@ def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, s
         f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
         f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
         f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
-        f'<div class="drawer-section"><h3>Budget</h3>{budget_details or "<span class=meta>нет enforced budget</span>"}<div class="details-body">{run_details}</div></div>'
+        f'<div class="drawer-section"><h3>Budget</h3>{budget_details}{run_details or "<span class=meta>нет enforced budget</span>"}</div>'
         f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
         f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
     )
