@@ -201,7 +201,16 @@ actual:
 лимиту Codex не запускается, `failed` run не создаётся и зависший reservation
 не остаётся. Ошибка до создания подпроцесса освобождает reservation без actual.
 Ошибка после старта финализируется по тем же правилам, что и обычный terminal
-result.
+result. В ledger `start` означает успешное возвращение
+`asyncio.create_subprocess_exec`, а не создание asyncio task или запись
+manifest; runner вызывает lifecycle callback непосредственно на этой границе.
+
+При старте оркестратора и перед каждой попыткой schedule выполняется
+`reconcile()` для просроченных `reserved_pending_start`. Явно отсутствующий
+процесс освобождает reservation, подтверждённо присутствующий переводит run в
+`started`, а неразрешимый случай оставляет run и получает marker
+`ambiguous_start`. Без evidence resolver запись не освобождается по одному
+таймауту: безопасный fallback сохраняет ambiguous.
 
 Подтверждённый provider usage, коррелированный с `run_id`, становится actual.
 Fallback допустим только с явными `source=runner_fallback`,
@@ -217,7 +226,14 @@ Raw token counts хранятся отдельно от normalized budget points
 planned/actual point value обязана иметь `normalization_version`; при null
 conversion версия null и status `unavailable`. Rate card фиксирует версию
 таблицы стоимости/пересчёта и не пересчитывает прошлые записи. Отсутствие
-конверсии в points не превращается в подтверждённый ноль.
+конверсии в points не превращается в подтверждённый ноль. Каждый связанный
+enforced scope с point limit получает `blocked_unknown`; этот reserve gate
+автоматически не сбрасывается.
+
+Terminal run immutable. Исправление выполняется только append-only
+`adjustment` с signed delta, reason, author и timestamp. Positive и negative
+delta применяются одной SQLite-транзакцией; resulting finalized aggregate не
+может стать отрицательным, иначе adjustment и частичное изменение не создаются.
 
 ## Retry, rework и membership
 

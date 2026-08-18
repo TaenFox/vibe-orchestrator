@@ -59,6 +59,17 @@ def _values(value: Mapping[str, Any] | None) -> dict[str, int | None]:
     return result
 
 
+def _signed_values(value: Mapping[str, Any] | None) -> dict[str, int]:
+    value = value or {}
+    result = {}
+    for name in DIMENSIONS:
+        item = value.get(name, 0)
+        if not isinstance(item, int) or isinstance(item, bool):
+            raise ValueError(f"{name} must be an integer")
+        result[name] = item
+    return result
+
+
 def _add(left: int, right: int | None) -> int:
     return left + (right or 0)
 
@@ -183,6 +194,8 @@ class BudgetLedger:
             if not rows:
                 return Reservation(run_id, "legacy", legacy=True)
             for row in rows:
+                if row["status"] in {"blocked_unknown", "completed", "stop_new_runs"}:
+                    raise BudgetDenied(f"{row['scope']} budget is {row['status']}")
                 for d in DIMENSIONS:
                     if row[f"limit_{d}"] is not None and sum(row[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) + (planned_values[d] or 0) > row[f"limit_{d}"]:
                         raise BudgetDenied(f"{row['scope']} budget exceeded: {d}")
@@ -208,6 +221,13 @@ class BudgetLedger:
                 values = _values(actual)
                 for budget_id in (row["ticket_budget_id"], row["session_budget_id"]):
                     if budget_id: db.execute("UPDATE budgets SET finalized_tokens=finalized_tokens+?,finalized_points=finalized_points+?,finalized_runs=finalized_runs+?,updated_at=? WHERE budget_id=?", tuple(values[d] or 0 for d in DIMENSIONS) + (now, budget_id))
+            elif state == "unknown":
+                # A point-limited scope cannot safely admit another run after
+                # usage became unknown; the administrative override is out of
+                # scope for this ledger.
+                for budget_id in (row["ticket_budget_id"], row["session_budget_id"]):
+                    if budget_id:
+                        db.execute("UPDATE budgets SET status='blocked_unknown',updated_at=? WHERE budget_id=? AND limit_points IS NOT NULL", (now, budget_id))
             db.execute("UPDATE runs SET state=?,actual_json=?,terminal_at=? WHERE run_id=?", (state, json.dumps(actual) if actual is not None else None, now, run_id))
         return self.get_run(run_id)
 
@@ -235,14 +255,19 @@ class BudgetLedger:
 
     def adjustment(self, run_id: str, delta: Mapping[str, Any], *, reason: str, author: str) -> int:
         if not reason or not author: raise ValueError("reason and author are required")
-        values = _values(delta)
+        values = _signed_values(delta)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT state,ticket_budget_id,session_budget_id FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if not row: raise KeyError(run_id)
             if row["state"] not in TERMINAL: raise ValueError("adjustments require a terminal run")
+            budgets = [budget_id for budget_id in (row["ticket_budget_id"], row["session_budget_id"]) if budget_id]
+            for budget_id in budgets:
+                budget = db.execute("SELECT finalized_tokens,finalized_points,finalized_runs FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
+                if any(budget[f"finalized_{dimension}"] + values[dimension] < 0 for dimension in DIMENSIONS):
+                    raise ValueError("adjustment would make finalized aggregate negative")
             cursor = db.execute("INSERT INTO adjustments(adjusts_run_id,delta_json,reason,author,created_at) VALUES(?,?,?,?,?)", (run_id, json.dumps(values), reason, author, _now()))
-            for budget_id in (row["ticket_budget_id"], row["session_budget_id"]):
+            for budget_id in budgets:
                 if budget_id: db.execute("UPDATE budgets SET finalized_tokens=finalized_tokens+?,finalized_points=finalized_points+?,finalized_runs=finalized_runs+?,updated_at=? WHERE budget_id=?", tuple(values[d] or 0 for d in DIMENSIONS) + (_now(), budget_id))
             return int(cursor.lastrowid)
 
