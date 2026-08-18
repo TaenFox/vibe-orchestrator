@@ -418,6 +418,7 @@ class BudgetLedger:
             )
             exhausted = any(
                 row[f"effective_limit_{dimension}"] is not None and
+                sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) > 0 and
                 row[f"effective_limit_{dimension}"] - sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) == 0
                 for dimension in DIMENSIONS
             )
