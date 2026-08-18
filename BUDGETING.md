@@ -72,7 +72,7 @@ limits:
   limit_points: 100 # non-negative integer or null
   limit_runs: 10 # non-negative integer or null
 aggregates:
-  planned: {tokens: 0, points: 0, runs: 0}
+  planned: {tokens: 0, points: 0, runs: 0} # незарезервированные obligations
   reserved: {tokens: 0, points: 0, runs: 0}
   finalized: {tokens: 0, points: 0, runs: 0}
   available: {tokens: 100000, points: 100, runs: 10}
@@ -82,17 +82,31 @@ updated_at: <timestamp>
 
 `limit_tokens`, `limit_points` и `limit_runs` — независимые неотрицательные
 целые либо `null`; `null` означает отсутствие enforcement по этому измерению,
-а не нулевой лимит. `planned` — сумма planned активных reservations и будущих
-обязательств. `reserved` — удержанное значение незавершённых runs; reservation
-считает один run. `finalized` — подтверждённый actual terminal runs; finalized
-run также считается один раз. Для каждого измерения:
+а не нулевой лимит. `planned` — только сумма зафиксированных будущих
+обязательств, для которых ещё нет active reservation. `reserved` — удержанное
+значение active reservations незавершённых runs. `finalized` — подтверждённый
+actual terminal runs; каждый run учитывается один раз.
 
-`available = limit - finalized - reserved`.
+Для каждого измерения едины определения:
 
-При отсутствии лимита `available` равен `null`. В enforced mode reservation
-допустима только если `finalized + reserved + planned <= limit` по каждому
-измерению с заданным лимитом. Проверки session и ticket выполняются атомарно
-под общим lock/transaction.
+`committed = finalized + planned + reserved`
+
+`available = limit - committed`.
+
+При отсутствии лимита `available` равен `null`, и измерение не участвует в gate.
+Для нового обязательства reservation допустима, если
+`finalized + planned + reserved + requested_planned <= limit` по каждому
+enforced измерению. `requested_planned` — только новая стоимость, ещё не
+включённая в `planned`; после успешной операции она сразу попадает в
+`reserved`, а не остаётся одновременно в `planned`.
+
+Если reservation принимает уже существующее planned obligation, операция
+атомарно уменьшает `planned` на held value и увеличивает `reserved` на ту же
+величину. Для такого transfer gate проверяет текущий `committed` (новая
+стоимость не прибавляется второй раз), поэтому `available` не меняется. При
+прямом запуске obligation создаётся и сразу переводится в `reserved`, без
+промежуточного увеличения `planned`. Проверки session и ticket выполняются
+атомарно под общим lock/transaction.
 
 ## Run ledger
 
@@ -108,18 +122,40 @@ scope_links:
   parent_run_id: <id-or-null>
   parent_ticket_id: <id-or-null>
 attempt_kind: initial # initial | retry | rework
-planned: {tokens: 10000, points: 10, runs: 1}
+planned: {tokens: 10000, points: 10, runs: 1, normalization_version: v1, points_status: available}
 reserved: {tokens: 10000, points: 10, runs: 1}
 state: reserved # reserved | finalized | released | unknown
 reserved_at: <timestamp>
 ```
 
-`planned` фиксируется до запуска политикой stage/model/reasoning effort и имеет
-`normalization_version`; задним числом он не меняется. `reserved` равно
-принятому к удержанию planned и освобождается только terminal transition.
+`planned` в записи run — immutable estimate, зафиксированный до запуска
+политикой stage/model/reasoning effort. `planned.normalization_version` обязана
+быть непустой при `planned.points != null`; при `planned.points: null` она
+обязана быть `null`, а `planned.points_status` обязан быть `unavailable`.
+`null` не означает нулевое потребление и не может тихо пройти gate для
+`limit_points`. `reserved` — immutable held value, принятый из planned при
+reservation; он освобождается только terminal transition.
 
 Для `finalized` обязательно `actual` с raw tokens, normalized points,
-`usage_source`, `usage_ref`, `normalization_version` и `rate_card_version`.
+`usage_source`, `usage_ref`, `normalization_version`, `rate_card_version` и
+`points_status`:
+
+```yaml
+actual:
+  tokens_raw: 17000
+  points: 17
+  points_status: available # available | unavailable
+  usage_source: provider
+  usage_ref: <provider-event-id>
+  normalization_version: v1 # required iff points != null; otherwise null
+  rate_card_version: v1
+```
+
+При `actual.points: null` `actual.normalization_version` обязана быть `null`,
+а `points_status` — `unavailable`. Если для scope задан ненулевой
+`limit_points`, такая finalization не подтверждает usage: run получает
+`unknown`, scope — `blocked_unknown`, и actual не увеличивает `finalized` как
+ноль. Если `limit_points: null`, остальные измерения могут быть финализированы.
 `run_id` — уникальный ключ reservation/finalization: повторный polling или
 обработка результата не меняет агрегаты повторно.
 
@@ -161,9 +197,10 @@ run получает `unknown`, а scope — `blocked_unknown`; следующи
 Если actual больше planned, сохраняется весь actual, Codex не прерывается, а
 после финализации scope становится `over_budget` при превышении лимита.
 
-Raw token counts хранятся отдельно от normalized budget points. Каждая planned
-и actual point value обязана иметь `normalization_version`; rate card фиксирует
-версию таблицы стоимости/пересчёта и не пересчитывает прошлые записи. Отсутствие
+Raw token counts хранятся отдельно от normalized budget points. Каждая ненулевая
+planned/actual point value обязана иметь `normalization_version`; при null
+conversion версия null и status `unavailable`. Rate card фиксирует версию
+таблицы стоимости/пересчёта и не пересчитывает прошлые записи. Отсутствие
 конверсии в points не превращается в подтверждённый ноль.
 
 ## Retry, rework и membership
@@ -203,21 +240,28 @@ finalization обязаны быть atomic, с lock и recovery для сбоя
 
 ## Acceptance scenarios
 
-1. При available 30 и planned 20 создаётся ровно одна reservation; повторный
-   run с тем же `run_id` идемпотентен.
-2. actual 17 переводит reservation в finalized, уменьшает reserved и увеличивает
-   finalized на 17; available пересчитывается по формуле.
+1. Если до нового запуска `available=30`, а `requested_planned=20`, gate
+   принимает reservation: `reserved` увеличивается на 20, новая стоимость не
+   попадает в `planned`, а post-reservation `available=10`. Повторная операция
+   с тем же `run_id` возвращает существующую запись и не меняет aggregates.
+2. Если существующее planned obligation равно 20, его transfer в reservation
+   уменьшает `planned` на 20 и увеличивает `reserved` на 20; `committed` и
+   `available` остаются неизменными. Затем actual 17 уменьшает reserved на held
+   value, увеличивает finalized на 17 и пересчитывает available.
 3. `limit_tokens`, `limit_points` и `limit_runs` проверяются независимо;
    превышение любого enforced измерения запрещает новый run.
 4. Retry и rework используют существующие ticket/session budgets и не дают
    двойного списания; child rework не получает отдельный лимит.
 5. Unknown usage даёт `blocked_unknown`, а completed scope не принимает новые
    reservations.
-6. Actual выше planned сохраняется полностью, с версиями нормализации и rate
+6. Ненулевые planned/actual points требуют normalization version; при null
+   points version null и status unavailable, а активный point limit приводит к
+   unknown, не к финализации нулём.
+7. Actual выше planned сохраняется полностью, с версиями нормализации и rate
    card, и даёт `over_budget` без остановки уже запущенного процесса.
-7. Изменение policy/rate card не меняет прошлые planned/actual; исправление —
+8. Изменение policy/rate card не меняет прошлые planned/actual; исправление —
    отдельный immutable adjustment.
-8. Legacy migration сохраняет lifecycle и `run_history` без их переписывания.
+9. Legacy migration сохраняет lifecycle и `run_history` без их переписывания.
 
 ## Зависимости и открытые решения
 

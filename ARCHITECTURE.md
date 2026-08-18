@@ -22,7 +22,8 @@
 **Budget control plane (`budget.v1`)**
 - scopes `session`, `ticket` и `run` с ownership и связями через `run_id`;
 - независимые `limit_tokens`, `limit_points` и `limit_runs`, агрегаты
-  `planned`/`reserved`/`finalized`/`available`;
+  `planned` (только незарезервированные obligations), `reserved` (active holds),
+  `finalized`/`available`, где `committed = finalized + planned + reserved`;
 - atomic ledger reservations/finalizations для initial, retry и rework без
   отдельного бюджета child rework;
 - состояния `active`, `stop_new_runs`, `exhausted`, `over_budget`,
