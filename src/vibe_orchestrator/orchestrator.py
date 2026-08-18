@@ -73,8 +73,7 @@ class Orchestrator:
             session_participants = delivery_session_participants if process == "delivery" else None
             global_candidates.extend(
                 (workflow, c)
-                for c in select_candidates(workflow, tickets, running_ids, session_participants=session_participants,
-                                           session_membership_required=any(s.membership_policy == "required" for s in active_delivery_sessions))
+                for c in select_candidates(workflow, tickets, running_ids, session_participants=session_participants)
             )
         global_candidates.sort(
             key=lambda item: (
@@ -92,6 +91,14 @@ class Orchestrator:
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
             stage = self._stage_for_ticket(workflow, workflow.by_id[candidate.target_status], ticket)
+            active_sessions = [s for s in active_delivery_sessions if ticket.id in self.session_store.effective_ticket_ids(s)]
+            session = active_sessions[0] if active_sessions else None
+            if workflow.id == "delivery" and active_delivery_sessions and session is None:
+                ticket.blocked_reason = "session_membership_required"
+                ticket.last_outcome = "blocked_budget"
+                ticket.last_summary = "Тикет не включен в активную Delivery-сессию"
+                self.store.save(ticket)
+                continue
             run_id = uuid.uuid4().hex
             workspace = None
             try:
@@ -120,14 +127,6 @@ class Orchestrator:
                 self.store.save(ticket)
                 self._record_failure(ticket, run_id, candidate.target_status, exc, metadata)
                 log.exception("сбой подготовки запуска для %s (%s)", ticket.id, ticket.type)
-                continue
-            active_sessions = [s for s in active_delivery_sessions if ticket.id in self.session_store.effective_ticket_ids(s)]
-            session = active_sessions[0] if active_sessions else None
-            if active_delivery_sessions and any(s.membership_policy == "required" for s in active_delivery_sessions) and session is None:
-                ticket.blocked_reason = "session_membership_required"
-                ticket.last_outcome = "blocked_budget"
-                ticket.last_summary = "Тикет не включен в активную Delivery-сессию"
-                self.store.save(ticket)
                 continue
             session_id = session.id if session else None
             attempt_kind = "rework" if ticket.type == "rework" else "initial"
