@@ -317,7 +317,12 @@ timestamp в audit event. `expected_updated_at` защищает от stale upda
 а `idempotency_key` делает повтор create безопасным: тот же payload возвращает
 исходный тикет без нового события, другой payload дает conflict. Delivery
 tech-debt в текущей модели представляется как обычный `task`; агент не может
-сразу выбрать queue или agent status.
+сразу выбрать queue или agent status. Для validated basis safe `create_ticket`
+вычисляет `tech_debt.v1:<sha256>` из консервативно нормализованных problem,
+suggested_scope и evidence; basis сохраняется immutable. Поиск ограничен
+активными Delivery story/task/bug: exact возвращает существующий тикет без
+нового audit event, ambiguous возвращает стабильных кандидатов, done и legacy
+тикеты без basis не блокируют создание.
 
 При `create_ticket` новый тикет сначала полностью формируется в памяти: в него
 попадают `run_history.created` и обязательное событие `ticket_created`, после
@@ -429,16 +434,17 @@ confidence и fresh/stale/unavailable metadata. Card, drawer и session panel
 
 - Переходы, выполняемые человеком, намеренно упрощены: обычно кнопки UI следуют настроенному `next`; для Discovery `investment_decision` цель выбирается по `implementation_required`.
 - Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.
-- `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Дедупликация похожих тикетов пока не реализована.
+- `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Tech-debt candidates после preflight используют тот же safe write boundary и find-or-create.
 - В том же верхнеуровневом YAML `details` можно передать `tech_debt_candidates` версии `tech_debt_candidates.v1`. Каждый кандидат обязан содержать непустые `problem`, `impact`, `suggested_scope`, `source_ticket`, `source_stage`, `source_run`, `type: task`, `urgency: low|medium|high`, неотрицательный целочисленный `priority` и `evidence` с `path`, `identifier`, `observation`. Отсутствующий ключ означает пустой список; неизвестная версия, поле или malformed payload — ошибка.
 - Preflight отклоняет кандидата с отсутствующим или отличающимся `run.json.run_id`, а также с отсутствующими, нестроковыми, пустыми или whitespace-only `ticket_id`/`stage`, ошибкой `TECH_DEBT_SOURCE_MISMATCH` по пути `tech_debt_candidates.candidates[N].source_run`; при этом source ticket, session и Delivery children не изменяются.
+- Dedup key не включает source_run, source_ticket, urgency, priority, actor или origin; scan, ambiguity decision и atomic save защищены межпроцессным lock-файлом. Ошибка чтения/lock не создаёт тикет.
 - При отсутствии manifest допускается legacy fallback на последнюю matching-запись `run_history`, но выбранная запись обязана содержать непустые строковые `ticket_id` и `stage`, точно совпадающие с source ticket/source stage, а `run_id` — с `source_run` кандидата. Неполная identity-запись отклоняется без попытки использовать другую history-запись.
 - Accepted manifest metadata: `{"run_id":"run-1","ticket_id":"DISC-ABC123","stage":"technical_analysis"}` при соответствующих `source_run`, source ticket и source stage кандидата. Rejected: `{ "run_id": "run-1" }`, `ticket_id: null`, `stage: "   "` или любое нестроковое значение; matching history не используется, если такой `run.json` уже существует.
 - Перед любым созданием Delivery-тикета выполняется read-only preflight: проверяются source ticket, stage, run artifact, согласованность run metadata, активные Delivery-сессии и безопасный путь evidence. Единый error envelope имеет `contract_version: orchestrator.errors.v1`, `code`, `path`, `message`; ошибки `TECH_DEBT_INVALID`, `TECH_DEBT_SOURCE_NOT_FOUND`, `TECH_DEBT_SOURCE_MISMATCH` и `TECH_DEBT_PREFLIGHT_UNAVAILABLE` блокируют mutation. Такие contract errors не являются `needs_correction`: source ticket и session остаются без изменений, `_record_failure` и follow-up не вызываются, corrective или Delivery children не создаются. Кандидат автоматически в сессию не добавляется.
 - Для legacy Discovery-тикета без поля `implementation_required` на ручном переходе из `investment_decision` решение выводится из membership: наличие хотя бы одного Delivery-ребенка ведет в `implementation`, отсутствие — в `ready_for_validation`. Это режим совместимости, а не миграция данных; существующие YAML не переписываются автоматически.
 - После входа в `implementation` scheduler gate ждет завершения только детей с `mandatory: true`; `done` означает завершенный Delivery-агрегат после release-интеграции. Необязательные дети и legacy-дети, если они помечены `mandatory: false`, не удерживают Discovery.
 - Legacy Discovery YAML без `implementation_required` можно не переписывать: при переходе из `investment_decision` используется fallback по наличию Delivery-детей. Переход на явный контракт выполняется по одному тикету — после проверки membership добавьте boolean, не меняя `parent`, статусы и `run_history`; новые результаты `technical_analysis` уже должны содержать boolean.
-- Traceability MVP хранит `run_history` в самом тикете и локальные артефакты в `.vibe/runs/`; централизованного аудиторского хранилища, retention policy и защиты от ручного редактирования YAML пока нет.
+- Traceability MVP хранит `run_history` в самом тикете и локальные артефакты в `.vibe/runs/`; централизованного аудиторского хранилища, retention policy и защиты от ручного редактирования YAML пока нет. Lock защищает локальные процессы, но не заменяет транзакционную БД или ручное разрешение legacy-дублей.
 - Если процесс Codex завершается с ошибкой, тикет остается на активной стадии и занимает WIP во время ограниченной серии повторов; после исчерпания попыток требуется ручной повтор.
 - UI намеренно минималистичен и не имеет зависимостей.
 - Для `evidence.observation` preflight требует явно переданную read-only capability `observation_verifier(content, identifier, observation) -> bool`. Отсутствие capability или ошибка/недопустимый результат verifier возвращает `TECH_DEBT_PREFLIGHT_UNAVAILABLE`; отрицательный результат — `TECH_DEBT_SOURCE_MISMATCH`. Непустая строка observation и наличие identifier сами по себе доказательством не являются. Browser-level проверки DOM/focus/viewport для этого контракта не требуются и в worker-контексте недоступны.

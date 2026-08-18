@@ -111,15 +111,19 @@ metadata-полей и отклоняет неизвестные поля, а т
 
 `Ticket.audit_events[]` хранится в том же YAML и добавляется только после
 успешной проверки. Событие содержит operation, actor, origin, ticket ID,
-timestamp, sorted `changed_fields`, before/after и при необходимости
-idempotency key. Write service сериализует операции lock-ом, а `TicketStore.save`
+ timestamp, sorted `changed_fields`, before/after и при необходимости
+ idempotency key. Write service сериализует операции внутрипроцессным и
+ межпроцессным lock-ом, а `TicketStore.save`
 завершает запись атомарной заменой временного файла; legacy ticket без
 `audit_events` загружается с пустым списком.
 
 Повторный create с тем же idempotency key и payload возвращает исходный тикет без
 нового события; другой payload или stale `expected_updated_at` дает conflict.
 Tech-debt пока не отдельный domain type: агент создает Delivery `task` и не
-получает права менять lifecycle.
+получает права менять lifecycle. Для immutable validated basis используется
+canonical `tech_debt.v1:<sha256>` по problem/area/evidence. Exact active match
+возвращается без записи, ambiguous возвращает стабильный список кандидатов;
+technical analysis и safe agent create используют этот единый boundary.
 
 Рекомендованный порядок расследования:
 
