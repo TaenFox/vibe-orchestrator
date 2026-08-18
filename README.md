@@ -313,8 +313,9 @@ Source of truth для аудита разделен на два слоя:
 ## Ограничения UI, telemetry и performance
 
 UI не является telemetry или billing системой: budget read-model читается из
-локального SQLite и не содержит цены. Для больших board возможны дополнительные
-bounded reads по ticket/session scopes; пагинация и внешний provider API не
+локального SQLite и не содержит цены. Повторные budget reads в одном API/render
+проходе переиспользуют bounded request-local snapshots по scope; cache не
+переживает запрос. Пагинация и внешний provider API не
 реализованы. Browser-level smoke выполняется вручную, поскольку worker-контекст
 не подключает browser runner.
 
