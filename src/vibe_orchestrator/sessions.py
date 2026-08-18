@@ -548,7 +548,7 @@ class SessionStore:
                 raise ValueError(f"Unknown ticket: {ticket_id}") from exc
             if ticket.process != "delivery" or ticket.type not in DELIVERY_TICKET_TYPES:
                 raise ValueError(f"Invalid delivery ticket type: {ticket.type!r}")
-            if self.ticket_store.is_done(ticket):
+            if session.status in OPEN_STATUSES and self.ticket_store.is_done(ticket):
                 raise ValueError(f"A completed ticket cannot belong to a session: {ticket_id}")
             for dependency_id in ticket.blocked_by if validate_dependencies else ():
                 try:

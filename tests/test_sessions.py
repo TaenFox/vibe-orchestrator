@@ -29,6 +29,20 @@ def test_session_lifecycle_reload_and_audit(tmp_path: Path):
     assert [event["event"] for event in loaded.audit_events] == ["created", "activated", "completed"]
 
 
+def test_completed_session_keeps_completed_ticket_history(tmp_path: Path):
+    tickets, store = stores(tmp_path)
+    ticket = tickets.create("delivery", "story", "Completed work")
+    session = store.create([ticket.id])
+    store.activate(session)
+    ticket.status = "done"
+    tickets.save(ticket)
+    store.complete(session)
+
+    loaded = store.get(session.id)
+    assert loaded.status == "completed"
+    assert loaded.ticket_ids == [ticket.id]
+
+
 def test_membership_invariants_and_one_open_session(tmp_path: Path):
     tickets, store = stores(tmp_path)
     ticket = tickets.create("delivery", "task", "Only once")
