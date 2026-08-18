@@ -271,6 +271,31 @@ def test_reservation_metadata_is_carried_to_contract_and_history(tmp_path: Path)
         assert run_events(completed)[1]["reservation"] == metadata
 
     asyncio.run(scenario())
+def test_rework_needs_rework_restarts_from_session_selection(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    ticket = orchestrator.store.create(
+        "delivery",
+        "rework",
+        "Repeat rework",
+        status="review",
+        rework_stage="review",
+    )
+    ticket.active_run = "run-rework-review"
+    orchestrator.store.save(ticket)
+
+    workflow = load_workflow("delivery")
+    orchestrator._apply_result(
+        workflow,
+        ticket.id,
+        workflow.by_id["review"],
+        AgentResult(outcome="needs_rework", summary="Нужен integration-тест", details="AC-7.4"),
+    )
+
+    updated = orchestrator.store.get(ticket.id)
+    assert updated.status == "selected_for_session"
+    assert updated.last_outcome == "needs_rework"
+    assert orchestrator.store.children_of(ticket.id, process="delivery") == []
+    assert select_candidates(workflow, [updated], set())[0].target_status == "system_analysis"
 
 
 @pytest.mark.parametrize(
