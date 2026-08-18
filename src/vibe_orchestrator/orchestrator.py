@@ -518,18 +518,20 @@ class Orchestrator:
         debt_service = TicketWriteService(self.store.project)
         for candidate in parse_technical_debt(details):
             key, basis = technical_debt_basis(candidate, self.store.project)
-            result = debt_service.create_ticket_result({
-                "process": "delivery", "type": candidate["type"],
-                "title": candidate["problem"].strip(),
-                "description": (
-                    f"Технический долг из {candidate['source_ticket']} / {candidate['source_run']}.\n"
-                    f"Evidence: {candidate['evidence']['path']}::{candidate['evidence']['identifier']}\n"
-                    f"{candidate['evidence']['observation']}"
-                ),
-                "priority": candidate["priority"], "parent": parent.id,
-                "mandatory": True, "origin": f"technical_analysis:{candidate['source_run']}",
-                "technical_debt": {"dedup_key": key, "basis": basis},
-            }, actor="orchestrator")
+            result = debt_service.create_technical_debt_ticket(
+                problem=candidate["problem"].strip(),
+                evidence=candidate["evidence"],
+                impact=candidate["impact"],
+                suggested_scope=candidate["suggested_scope"],
+                source_ticket=candidate["source_ticket"],
+                source_stage=candidate["source_stage"],
+                source_run=candidate["source_run"],
+                dedup_key=key,
+                dedup_basis=basis,
+                priority=candidate["priority"],
+                origin=f"technical_analysis:{candidate['source_run']}",
+                actor="orchestrator",
+            )
             if result.ticket is not None:
                 debt_tickets.append(result.ticket)
                 if result.status == "exact":

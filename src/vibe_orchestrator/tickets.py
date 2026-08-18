@@ -465,6 +465,96 @@ class TicketWriteService:
         assert result.ticket is not None
         return result.ticket
 
+    def create_technical_debt_ticket(
+        self,
+        *,
+        problem: str,
+        evidence: dict[str, str],
+        impact: str,
+        suggested_scope: str,
+        source_ticket: str,
+        source_stage: str,
+        source_run: str,
+        dedup_key: str,
+        dedup_basis: dict[str, Any],
+        priority: int,
+        origin: str,
+        actor: str,
+    ) -> TicketWriteResult:
+        """Atomically create an independent, deferred tech-debt task.
+
+        This is intentionally a privileged orchestrator boundary rather than
+        an extension of the agent create API: tech-debt tasks must not inherit
+        a parent or become Delivery-session members as a side effect.
+        """
+        actor = _validate_actor(actor)
+        origin = _validate_origin(origin)
+        title = _validate_title(problem)
+        priority = _validate_priority(priority)
+        dedup_key, dedup_basis = self._validate_dedup_metadata(
+            {"dedup_key": dedup_key, "basis": dedup_basis}
+        )
+        context = {
+            "problem": problem,
+            "evidence": dict(evidence),
+            "impact": impact,
+            "suggested_scope": suggested_scope,
+            "origin": {
+                "source_ticket": source_ticket,
+                "source_stage": source_stage,
+                "source_run": source_run,
+                "dedup_key": dedup_key,
+            },
+        }
+        with _WRITE_LOCK, _process_write_lock(self.store.project):
+            matches = self._dedup_candidates(self.store, dedup_key)
+            if len(matches) == 1:
+                return TicketWriteResult("exact", matches[0])
+            if len(matches) > 1:
+                return TicketWriteResult("ambiguous", candidates=tuple(self._candidate_payload(item) for item in matches))
+            ticket = self.store._new_ticket(
+                "delivery",
+                "task",
+                title,
+                description=(
+                    f"Проблема: {problem}\n"
+                    f"Доказательство: {evidence['path']}::{evidence['identifier']}\n"
+                    f"Наблюдение: {evidence['observation']}\n"
+                    f"Влияние: {impact}\n"
+                    f"Предлагаемый scope: {suggested_scope}"
+                ),
+                priority=priority,
+                parent=None,
+                mandatory=False,
+                status="todo",
+            )
+            ticket.context = context
+            ticket.context_revision = 1
+            ticket.dedup_key = dedup_key
+            ticket.dedup_basis = dedup_basis
+            ticket.audit_events.append({
+                "event": "ticket_created",
+                "timestamp": now_iso(),
+                "actor": actor,
+                "origin": origin,
+                "operation": "create_technical_debt_ticket",
+                "ticket_id": ticket.id,
+                "changed_fields": ["context", "description", "mandatory", "parent", "priority", "process", "status", "type"],
+                "before": None,
+                "after": {
+                    "process": "delivery",
+                    "type": "task",
+                    "title": title,
+                    "priority": priority,
+                    "parent": None,
+                    "mandatory": False,
+                    "status": "todo",
+                    "context": context,
+                },
+            })
+            self.store.save(ticket)
+            return TicketWriteResult("created", ticket)
+
     def update_ticket(self, ticket_id: str, data: dict[str, Any], *, actor: str) -> Ticket:
         if not isinstance(data, dict):
             raise TicketWriteError("request must be an object")

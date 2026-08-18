@@ -1,5 +1,6 @@
 import asyncio
 import json
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -1034,31 +1035,50 @@ def test_technical_debt_exact_replay_preserves_existing_child_during_reconciliat
     idea = orchestrator.store.create("discovery", "idea", "Existing technical debt", status="technical_analysis")
     candidate = {
         "problem": "Stale adapter boundary",
+        "impact": "Risk",
         "suggested_scope": "Extract the adapter",
         "evidence": {"path": "README.md", "identifier": "Traceability MVP", "observation": "Observed"},
         "source_ticket": idea.id,
         "source_run": "run-ta-1",
     }
     key, basis = technical_debt_basis(candidate, tmp_path)
-    existing = TicketWriteService(tmp_path).create_ticket(
-        {
-            "process": "delivery",
-            "type": "task",
-            "title": candidate["problem"],
-            "description": "Original description",
-            "priority": 7,
-            "parent": idea.id,
-            "mandatory": False,
-            "technical_debt": {"dedup_key": key, "basis": basis},
-        },
+    existing_result = TicketWriteService(tmp_path).create_technical_debt_ticket(
+        problem=candidate["problem"],
+        evidence=candidate["evidence"],
+        impact=candidate["impact"],
+        suggested_scope=candidate["suggested_scope"],
+        source_ticket=candidate["source_ticket"],
+        source_stage="technical_analysis",
+        source_run=candidate["source_run"],
+        dedup_key=key,
+        dedup_basis=basis,
+        priority=7,
+        origin="technical_analysis:run-ta-1",
         actor="test",
     )
+    assert existing_result.ticket is not None
+    existing = existing_result.ticket
+    assert existing.status == "todo"
+    assert existing.mandatory is False
+    assert existing.parent is None
+    assert existing.blocked_by == []
+    assert existing.context["problem"] == candidate["problem"]
+    assert existing.context["evidence"] == candidate["evidence"]
+    assert existing.context["impact"] == candidate["impact"]
+    assert existing.context["suggested_scope"] == candidate["suggested_scope"]
+    assert existing.context["origin"] == {
+        "source_ticket": idea.id,
+        "source_stage": "technical_analysis",
+        "source_run": "run-ta-1",
+        "dedup_key": key,
+    }
+    assert existing.run_history[-1]["event"] == "created"
     existing.status = "selected_for_session"
     orchestrator.store.save(existing)
     before = orchestrator.store.get(existing.id).to_dict()
     before_audit = list(existing.audit_events)
 
-    details = """```yaml
+    details = textwrap.dedent("""
 implementation_required: true
 delivery_tickets:
   - type: task
@@ -1082,7 +1102,7 @@ tech_debt_candidates:
       type: task
       urgency: medium
       priority: 7
-```""" % idea.id
+    """ % idea.id)
 
     orchestrator._create_delivery_children(idea, details)
     orchestrator._create_delivery_children(idea, details)
