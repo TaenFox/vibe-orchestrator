@@ -279,11 +279,20 @@ DeliverySession хранит `budget_policy` (`legacy` или `enforced`),
 создаётся scope `session:<session-id>`. В legacy session отсутствие budget
 record сохраняет прежний bypass.
 
-При `membership_policy: required` запуск любого Delivery ticket, включая
-`wip_exempt` rework, возможен только после явного включения в session. Для
-исключения используется отдельный override с непустыми `actor` и `reason`;
-он записывается в `audit_events` вместе с `ticket_id` и timestamp. Флаг
-`wip_exempt` сам по себе membership не заменяет.
+При наличии любой active Delivery session запуск любого Delivery ticket, включая
+`wip_exempt` rework, возможен только для effective member этой session. Это
+membership-инвариант, независимый от `membership_policy`: `legacy` сохраняет
+legacy budget behavior, но не отключает membership gate. Для внешнего ticket
+используется отдельный override с непустыми `actor` и `reason`; он записывается
+в `audit_events` вместе с `ticket_id` и timestamp и считается effective
+membership. Флаг `wip_exempt` сам по себе membership не заменяет и влияет только
+на WIP count/сортировку.
+
+Если внешний ticket попал в snapshot scheduler из-за race или рассинхронизации,
+runtime guard повторно отклоняет его до `reserve`: выставляются
+`blocked_reason=session_membership_required` и `last_outcome=blocked_budget`, но
+runner, run/reservation и session aggregate не создаются. При отсутствии active
+Delivery session сохраняется прежнее legacy-поведение с `session_id=null`.
 
 Для enforced session `reserve` в одной `BEGIN IMMEDIATE` транзакции проверяет
 и ticket scope, и `session:<session-id>`; отсутствие или нехватка любого scope
@@ -306,6 +315,10 @@ session ровно один раз. Child ID сохраняется в run trace
 rework до запуска. `wip_exempt` не обходит budget gate. Один ticket может
 принадлежать не более чем одной active Delivery session; membership после
 активации сессии не изменяется.
+
+Acceptance regression: внешний `wip_exempt` rework при active session с
+`membership_policy=legacy` не является candidate и не запускается; member либо
+ticket с валидным `membership_override` запускается с `session_id` этой session.
 
 ## Legacy и миграция
 

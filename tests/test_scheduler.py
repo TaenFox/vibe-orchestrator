@@ -67,8 +67,15 @@ def test_no_active_session_keeps_legacy_selected_tickets_schedulable():
     assert select_candidates(workflow, [legacy], set())[0].ticket.id == "LEGACY"
 
 
-def test_active_session_keeps_rework_wip_exemption_behavior():
+def test_active_legacy_session_blocks_external_rework_even_when_wip_exempt():
     workflow = load_workflow("delivery")
     rework = ticket("REWORK", "selected_for_session", wip_exempt=True)
 
-    assert select_candidates(workflow, [rework], set(), session_participants=set())[0].ticket.id == "REWORK"
+    assert select_candidates(workflow, [rework], set(), session_participants=set()) == []
+
+
+def test_active_legacy_session_allows_member_wip_exempt_rework():
+    workflow = load_workflow("delivery")
+    rework = ticket("REWORK", "selected_for_session", wip_exempt=True)
+
+    assert [c.ticket.id for c in select_candidates(workflow, [rework], set(), session_participants={"REWORK"})] == ["REWORK"]

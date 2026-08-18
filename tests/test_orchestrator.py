@@ -7,7 +7,7 @@ import pytest
 from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
-from vibe_orchestrator.scheduler import select_candidates
+from vibe_orchestrator.scheduler import Candidate, select_candidates
 from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
 
 
@@ -227,6 +227,95 @@ def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_override_member_rework_uses_session_and_parent_budgets(tmp_path: Path):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = BlockingRunner()
+        orchestrator.runner = runner
+        parent = orchestrator.store.create("delivery", "task", "Parent", status="review")
+        child = orchestrator.store.create(
+            "delivery", "rework", "Override rework", parent=parent.id,
+            status="selected_for_session", rework_stage="review",
+        )
+        child.context = {"budget": {"planned": {"tokens": 5, "points": 1, "runs": 1}}}
+        orchestrator.store.save(child)
+        member = orchestrator.store.create("delivery", "task", "Session member", status="selected_for_session")
+        session = orchestrator.session_store.create(
+            [member.id], membership_policy="legacy",
+            budget_limits={"tokens": 10, "points": 10, "runs": 1},
+        )
+        # An override is the effective membership for an active session even when
+        # the ticket is not present in the session's direct ticket_ids.
+        orchestrator.session_store.activate(session)
+        orchestrator.session_store.override_ticket(
+            session, child.id, actor="reviewer", reason="Approved rework scope",
+        )
+        override_events = [
+            event for event in session.audit_events
+            if event.get("event") == "membership_override"
+        ]
+        assert override_events[-1]["ticket_id"] == child.id
+        assert override_events[-1]["actor"] == "reviewer"
+        assert override_events[-1]["reason"] == "Approved rework scope"
+        orchestrator.ledger.create_budget("ticket", parent.id, limits={"tokens": 10, "points": 10, "runs": 1})
+        orchestrator.ledger.create_budget("ticket", child.id, limits={"tokens": 100, "points": 100, "runs": 100})
+        orchestrator.ledger.create_budget("session", session.id, limits={"tokens": 10, "points": 10, "runs": 1})
+
+        await orchestrator._schedule_once()
+        await runner.started.wait()
+
+        scheduled = orchestrator.store.get(child.id)
+        run_id = scheduled.run_history[-1]["run_id"]
+        run = orchestrator.ledger.get_run(run_id)
+        assert run["session_id"] == session.id
+        assert run["parent_ticket_id"] == parent.id
+        assert run["ticket_budget_id"] == f"ticket:{parent.id}"
+        assert run["session_budget_id"] == f"session:{session.id}"
+        assert orchestrator.ledger.get_budget(f"ticket:{parent.id}")["aggregates"]["reserved"]["runs"] == 1
+        assert orchestrator.ledger.get_budget(f"ticket:{child.id}")["aggregates"]["reserved"]["runs"] == 0
+        assert orchestrator.ledger.get_budget(f"session:{session.id}")["aggregates"]["reserved"]["runs"] == 1
+
+        runner.release.set()
+        await orchestrator.running[child.id]
+
+    asyncio.run(scenario())
+
+
+def test_runtime_membership_guard_blocks_external_legacy_rework_before_runner_or_ledger(tmp_path: Path, monkeypatch):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = CapturingRunner()
+        orchestrator.runner = runner
+        parent = orchestrator.store.create("delivery", "task", "Parent", status="review")
+        external = orchestrator.store.create(
+            "delivery", "rework", "External rework", parent=parent.id,
+            status="selected_for_session", rework_stage="review",
+        )
+        member = orchestrator.store.create("delivery", "task", "Member", status="selected_for_session")
+        session = orchestrator.session_store.create(
+            [member.id], membership_policy="legacy",
+            budget_limits={"tokens": 10, "points": 10, "runs": 1},
+        )
+        orchestrator.session_store.activate(session)
+
+        def stale_candidates(workflow, tickets, running_ids, **kwargs):
+            if workflow.id == "delivery":
+                return [Candidate(external, "selected_for_session", "system_analysis", 1)]
+            return []
+
+        monkeypatch.setattr("vibe_orchestrator.orchestrator.select_candidates", stale_candidates)
+        await orchestrator._schedule_once()
+
+        external = orchestrator.store.get(external.id)
+        assert external.active_run is None
+        assert external.blocked_reason == "session_membership_required"
+        assert external.last_outcome == "blocked_budget"
+        assert runner.contracts == []
+        assert orchestrator.ledger.get_budget(f"session:{session.id}")["aggregates"]["reserved"]["runs"] == 0
+
+    asyncio.run(scenario())
+
+
 def test_budget_admission_denial_is_blocked_without_failed_run(tmp_path: Path):
     async def scenario() -> None:
         orchestrator = Orchestrator(tmp_path, max_agents=1)
@@ -271,6 +360,31 @@ def test_reservation_metadata_is_carried_to_contract_and_history(tmp_path: Path)
         assert run_events(completed)[1]["reservation"] == metadata
 
     asyncio.run(scenario())
+def test_rework_needs_rework_restarts_from_session_selection(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    ticket = orchestrator.store.create(
+        "delivery",
+        "rework",
+        "Repeat rework",
+        status="review",
+        rework_stage="review",
+    )
+    ticket.active_run = "run-rework-review"
+    orchestrator.store.save(ticket)
+
+    workflow = load_workflow("delivery")
+    orchestrator._apply_result(
+        workflow,
+        ticket.id,
+        workflow.by_id["review"],
+        AgentResult(outcome="needs_rework", summary="Нужен integration-тест", details="AC-7.4"),
+    )
+
+    updated = orchestrator.store.get(ticket.id)
+    assert updated.status == "selected_for_session"
+    assert updated.last_outcome == "needs_rework"
+    assert orchestrator.store.children_of(ticket.id, process="delivery") == []
+    assert select_candidates(workflow, [updated], set())[0].target_status == "system_analysis"
 
 
 @pytest.mark.parametrize(
