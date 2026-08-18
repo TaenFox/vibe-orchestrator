@@ -1,8 +1,7 @@
 # Версионируемый контракт budget control plane
 
-Статус: принятый контракт `budget.v1`; runtime enforcement в текущем MVP не
-реализован. Этот документ фиксирует модель и границы, которые должны быть
-соблюдены при последующей реализации Delivery.
+Статус: принятый контракт `budget.v1`; runtime ledger реализован для Delivery.
+Этот документ фиксирует модель, baseline и границы реализации.
 
 ## Назначение и границы
 
@@ -18,9 +17,10 @@ retry-backoff, workflow-статусов и UI/CLI авторизация. Эт�
 
 ## Baseline текущего MVP
 
-Budget enforcement отсутствует: текущий scheduler не проверяет лимиты и не
-создаёт reservations. `BUDGETING.md` ранее описывал предварительный
-ticket-level `budget_points`, но runtime его не читает.
+В legacy-режиме scheduler сохраняет прежнее поведение. Для enforced budget
+records scheduler атомарно резервирует лимиты до запуска, а SQLite ledger
+становится authoritative источником reservations и агрегатов. Ранее описанный
+ticket-level `budget_points` runtime не читал.
 
 Traceability остаётся за существующими источниками: подтверждённые
 `codex_cli.turn.completed` события суммируются в `token_usage`, а malformed,
@@ -35,6 +35,14 @@ legacy или incomplete output получает `source=unknown`; значен�
 
 Новый ledger не подменяет эти источники и не реконструирует старое потребление.
 История запусков не является budget ledger.
+
+## Authoritative SQLite layout
+
+`BudgetLedger` открывает `.vibe/budgets/ledger.sqlite3`, включает foreign keys,
+WAL, busy timeout и использует `BEGIN IMMEDIATE` для операций записи. Таблицы
+`budgets`, `runs`, `adjustments` и `metadata` хранят scope aggregates, immutable
+run state и append-only corrections. Отсутствующий budget record или
+`mode=legacy` означает bypass без synthetic ledger run.
 
 ## Термины, scopes и ownership
 
@@ -232,11 +240,13 @@ finalized без доказуемого `usage_ref` и версий нормал
 отдельный лимит не появляется. Откат metadata не меняет lifecycle и
 `run_history`; ledger records остаются доступными для аудита.
 
-Предлагаемое хранилище: `.vibe/budgets/<budget_id>.yaml`, append-only
-`.vibe/budgets/ledger.jsonl` и `.vibe/budgets.lock`. Конкретный authoritative
-layout должен быть подтверждён до enforcement; append/update reservation и
-finalization обязаны быть atomic, с lock и recovery для сбоя между reservation
-и стартом процесса.
+Реализованное authoritative-хранилище — SQLite
+`.vibe/budgets/ledger.sqlite3`; append/update reservation и finalization
+выполняются atomic под `BEGIN IMMEDIATE`. Состояния проходят
+`reserved_pending_start -> started -> finalized|released|unknown`.
+`reconcile()` освобождает только явно подтверждённый отсутствующий запуск,
+переводит подтверждённый запуск в `started`, а неоднозначный оставляет с
+marker `ambiguous_start`.
 
 ## Acceptance scenarios
 
@@ -265,8 +275,7 @@ finalization обязаны быть atomic, с lock и recovery для сбоя
 
 ## Зависимости и открытые решения
 
-До enforcement нужно подтвердить гарантию корреляции provider usage с каждым
-`run_id`, владельца normalization table и формат `rate_card_version`, а также
-authoritative persistence layout. Manual override для `over_budget` и
+Нужно подтвердить гарантию корреляции provider usage с каждым `run_id`,
+владельца normalization table и формат `rate_card_version`. Manual override для `over_budget` и
 `blocked_unknown` требует audit actor/reason и отдельного решения о полномочиях.
 Срок хранения ledger и UI/CLI ролей также остаются вне этого контракта.

@@ -19,6 +19,7 @@ from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
 from .token_usage import unknown_token_usage
+from .budget_ledger import BudgetDenied, BudgetLedger
 
 log = logging.getLogger("vibe")
 
@@ -37,6 +38,7 @@ class Orchestrator:
         self.max_agents = initial_worker_limit
         self._last_worker_limit = initial_worker_limit
         self.tree_manager = GitTreeManager(project, self.store)
+        self.ledger = BudgetLedger(project)
         self.running: dict[str, asyncio.Task[None]] = {}
 
     async def run_forever(self) -> None:
@@ -117,6 +119,18 @@ class Orchestrator:
                 self._record_failure(ticket, run_id, candidate.target_status, exc, metadata)
                 log.exception("сбой подготовки запуска для %s (%s)", ticket.id, ticket.type)
                 continue
+            session_id = next((s.id for s in self.session_store.list() if s.status == "active" and ticket.id in s.ticket_ids), None)
+            try:
+                reservation = self.ledger.reserve(
+                    contract.run_id, ticket.id, session_id, self._planned_budget(ticket),
+                    attempt_kind="rework" if ticket.type == "rework" else "initial",
+                    parent_ticket_id=ticket.parent,
+                )
+            except BudgetDenied:
+                log.info("запуск %s отклонен budget gate", ticket.id)
+                continue
+            if not reservation.legacy:
+                self.ledger.start(contract.run_id)
             ticket.status = candidate.target_status
             ticket.active_run = contract.run_id
             ticket.retry_after = None
@@ -142,6 +156,12 @@ class Orchestrator:
             log.info("лимит воркеров изменен: %s -> %s", self._last_worker_limit, worker_limit)
             self._last_worker_limit = worker_limit
         return worker_limit
+
+    @staticmethod
+    def _planned_budget(ticket: Ticket) -> dict[str, int | None]:
+        budget = ticket.context.get("budget", {}) if isinstance(ticket.context, dict) else {}
+        planned = budget.get("planned", {}) if isinstance(budget, dict) else {}
+        return {"tokens": planned.get("tokens"), "points": planned.get("points"), "runs": planned.get("runs", 1)}
 
     def _stage_for_ticket(self, workflow: Workflow, stage: Stage, ticket: Ticket) -> Stage:
         if workflow.id != "process_management" or stage.id != "in_progress":
@@ -208,6 +228,12 @@ class Orchestrator:
         ticket.last_outcome = "failed"
         ticket.last_summary = str(exc)
         self.store.save(ticket)
+        self._ledger_finalize(run_id, "failed")
+
+    def _ledger_finalize(self, run_id: str | None, outcome: str, usage: dict | None = None) -> None:
+        if not run_id or self.ledger.get_run(run_id) is None:
+            return
+        self.ledger.finalize(run_id, outcome if outcome in {"completed", "failed", "unknown"} else "failed", usage or self._run_token_usage(run_id))
 
     def _apply_result(
         self,
@@ -268,6 +294,7 @@ class Orchestrator:
                 token_usage=result.token_usage or self._run_token_usage(active_run),
                 **metadata,
             )
+            self._ledger_finalize(active_run, result.outcome, result.token_usage)
         ticket.active_run = None
         self._handle_follow_up(ticket, workflow, stage, result)
         self.store.save(ticket)
