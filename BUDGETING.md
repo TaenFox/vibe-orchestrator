@@ -168,10 +168,12 @@ actual:
 ```
 
 При `actual.points: null` `actual.normalization_version` обязана быть `null`,
-а `points_status` — `unavailable`. Если для scope задан ненулевой
-`limit_points`, такая finalization не подтверждает usage: run получает
-`unknown`, scope — `blocked_unknown`, и actual не увеличивает `finalized` как
-ноль. Если `limit_points: null`, остальные измерения могут быть финализированы.
+а `points_status` — `unavailable`. Если для scope задан enforced
+`limit_points` (включая `0`), такая finalization не подтверждает usage: run
+получает `unknown`, scope — `blocked_unknown`, и actual не увеличивает
+`finalized` как ноль. Если `limit_points: null`, unknown остаётся
+audit-сигналом, но не блокирует scope; остальные измерения могут быть
+финализированы.
 `run_id` — уникальный ключ reservation/finalization: повторный polling или
 обработка результата не меняет агрегаты повторно.
 
@@ -181,13 +183,15 @@ actual:
 
 ## Состояния и precedence
 
-- `active` — новые runs разрешены при доступном лимите и отсутствии unknown;
+- `active` — новые runs разрешены при доступном лимите и отсутствии применимого
+  unknown (только для enforced scope с `limit_points IS NOT NULL`);
 - `stop_new_runs` — ручной или policy gate запрещает новые runs, но существующие
   reservations могут завершиться;
 - `exhausted` — available равен нулю хотя бы по одному enforced измерению,
   поэтому положительный новый planned запрещён;
 - `over_budget` — finalized превышает лимит хотя бы по одному измерению;
-- `blocked_unknown` — есть run `state=unknown`; usage не считается нулём;
+- `blocked_unknown` — есть run `state=unknown` в scope с enforced
+  `limit_points IS NOT NULL`; usage не считается нулём;
 - `completed` — scope явно закрыт, новые reservations запрещены, история и
   adjustments доступны для чтения.
 
@@ -216,8 +220,10 @@ manifest; runner вызывает lifecycle callback непосредствен�
 Fallback допустим только с явными `source=runner_fallback`,
 `normalization_version` и `rate_card_version`. При отсутствии подтверждённого
 или разрешённого fallback reservation снимается, finalized не увеличивается,
-run получает `unknown`, а scope — `blocked_unknown`; следующий run запрещён до
-ручного решения.
+run получает `unknown`. Scope с enforced `limit_points IS NOT NULL` получает
+`blocked_unknown` и запрещает следующий run до ручного решения; scope с
+`limit_points: null` сохраняет unknown для аудита и может продолжать работу по
+остальным лимитам.
 
 Если actual больше planned, сохраняется весь actual, Codex не прерывается, а
 после финализации scope становится `over_budget` при превышении лимита.
@@ -227,8 +233,9 @@ planned/actual point value обязана иметь `normalization_version`; п
 conversion версия null и status `unavailable`. Rate card фиксирует версию
 таблицы стоимости/пересчёта и не пересчитывает прошлые записи. Отсутствие
 конверсии в points не превращается в подтверждённый ноль. Каждый связанный
-enforced scope с point limit получает `blocked_unknown`; этот reserve gate
-автоматически не сбрасывается.
+enforced scope с `limit_points IS NOT NULL` получает `blocked_unknown`; scope с
+`limit_points: null` не блокируется этим unknown. Этот reserve gate автоматически
+не сбрасывается.
 
 Terminal run immutable. Исправление выполняется только append-only
 `adjustment` с signed delta, reason, author и timestamp. Positive и negative
@@ -299,7 +306,8 @@ unknown runs с precedence `over_budget` → `blocked_unknown` → `stop_new_run
    ticket budget и budget active session; child budget не изменён. Run хранит
    child ID и `parent_ticket_id`, а после finalize/release оба агрегата меняются
    ровно один раз. Отказ parent/session блокирует запуск без reservation.
-5. Unknown usage даёт `blocked_unknown`, а completed scope не принимает новые
+5. Unknown usage даёт `blocked_unknown` только scope с enforced
+   `limit_points IS NOT NULL`, а completed scope не принимает новые
    reservations.
 6. Ненулевые planned/actual points требуют normalization version; при null
    points version null и status unavailable, а активный point limit приводит к
@@ -311,8 +319,10 @@ unknown runs с precedence `over_budget` → `blocked_unknown` → `stop_new_run
 9. Legacy migration сохраняет lifecycle и `run_history` без их переписывания.
 10. AC-4: pre-start finalize отклоняется; после `start` тот же run финализируется.
 11. AC-7: finalized overrun даёт `over_budget`, нулевой available даёт
-    `exhausted`, а unknown блокирует scope только при недоступном enforced points.
-    При `limit_points: null` подтверждённые остальные измерения финализируются.
+    `exhausted`, а unknown блокирует scope только при enforced
+    `limit_points IS NOT NULL` (включая `0`). При `limit_points: null`
+    подтверждённые остальные измерения финализируются, а следующий run
+    разрешается при доступных прочих лимитах.
 12. AC-8: каждый finalized run увеличивает `finalized.runs` ровно на один;
     повторный finalize не меняет агрегат.
 
