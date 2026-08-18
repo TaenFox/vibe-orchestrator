@@ -10,6 +10,7 @@ from html.parser import HTMLParser
 import pytest
 
 from vibe_orchestrator.control import DeliverySessionStore
+from vibe_orchestrator.budget_ledger import BudgetLedger
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.ui import AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, render_board, render_board_fragment
 from vibe_orchestrator.config import load_all_workflows
@@ -126,6 +127,35 @@ def test_ui_api_payload_covers_discovery_delivery_and_active_session(http_server
     assert {item["id"] for item in session_payload["tickets"]} == {delivery.id}
     assert session_payload["aggregate"]["active_run"] == 1
     assert session_payload["tickets"][0]["active_run"] == "run-active"
+
+
+def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, project):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Budget API", status="review")
+    ledger = BudgetLedger(project)
+    ledger.create_budget("ticket", ticket.id, limits={"tokens": 100, "points": 10, "runs": 2})
+    ledger.reserve("run-budget", ticket.id, None, {"tokens": 20, "points": 1, "runs": 1})
+    ledger.start("run-budget")
+    ledger.finalize("run-budget", "completed", {
+        "run_id": "run-budget", "model": "m", "reasoning_effort": "medium", "usage_ref": "u-1",
+        "input_tokens": 7, "output_tokens": 5, "total_tokens": 12, "source": "provider",
+        "captured_at": "2026-08-18T10:00:00+00:00", "normalization_version": "n.v1",
+    })
+
+    with urllib.request.urlopen(f"{http_server}/api/tickets") as response:
+        item = next(value for value in json.load(response) if value["id"] == ticket.id)
+
+    assert item["budget"]["limits"] == {"tokens": 100, "points": 10, "runs": 2}
+    assert item["budget"]["spent"] == {"tokens": 12, "points": 1, "runs": 1}
+    assert item["budget"]["snapshot_status"] == "fresh"
+    assert item["budget"]["enforcement_state_exact"] is True
+    assert item["budget_runs"][0]["source_confidence"] == "confirmed"
+    assert item["budget_runs"][0]["actual"]["tokens"] == 12
+    assert item["budget_runs"][0]["cost"] is None
+
+    page = render_board(store, load_all_workflows(), "delivery")
+    assert "budget active" in page
+    assert "spent 12" in page
 
 
 def test_empty_delivery_session_ticket_selector_disables_add_action(http_server, project):

@@ -443,6 +443,23 @@ class BudgetLedger:
             result[key.removesuffix("_json")] = json.loads(result[key]) if result[key] else None
         return result
 
+    def list_runs(self, budget_id: str) -> list[dict[str, Any]]:
+        """Return runs linked to a budget, without changing accounting state."""
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT * FROM runs
+                   WHERE ticket_budget_id=? OR session_budget_id=?
+                   ORDER BY reserved_at, run_id""",
+                (budget_id, budget_id),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key in ("planned_json", "reserved_json", "actual_json"):
+                item[key.removesuffix("_json")] = json.loads(item[key]) if item[key] else None
+            result.append(item)
+        return result
+
     def _budget_rows(self, db: sqlite3.Connection, budget_owner_ticket_id: str, session_id: str | None):
         rows = []
         for scope, owner in (("ticket", budget_owner_ticket_id), ("session", session_id)):

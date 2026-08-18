@@ -10,6 +10,7 @@ from threading import Thread
 
 from .config import load_all_workflows
 from .control import DeliverySessionStore, SessionError, WorkerControl
+from .budget_ledger import BudgetLedger
 from .git_trees import GitTreeManager
 from .tickets import (
     TICKET_TYPES_BY_PROCESS,
@@ -105,7 +106,7 @@ AUTO_REFRESH_SCRIPT = f"""<script>
 
 
 def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project)
+    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -122,7 +123,7 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
                     ticket = store.get(query.get("ticket", [""])[0])
                 except KeyError:
                     return self.send_error(404)
-                return self._html(_ticket_drawer_panel_html(store, workflows, query.get("process", ["discovery"])[0], ticket, tree_manager, session_store))
+                return self._html(_ticket_drawer_panel_html(store, workflows, query.get("process", ["discovery"])[0], ticket, tree_manager, session_store, ledger))
             if parsed.path.startswith("/artifacts/"):
                 relative = urllib.parse.unquote(parsed.path.removeprefix("/artifacts/")).strip("/")
                 candidate = (store.runs_root / relative).resolve()
@@ -134,11 +135,11 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
                 if candidate.is_file():
                     payload = candidate.read_bytes(); self.send_response(200); self.send_header("Content-Type", "application/octet-stream"); self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload); return
                 return self.send_error(404)
-            if parsed.path == "/api/tickets": return self._json([_ticket_payload(ticket) for ticket in store.list()])
-            if parsed.path == "/api/sessions": return self._json([_session_payload(item, store) for item in session_store.list()])
+            if parsed.path == "/api/tickets": return self._json([_ticket_payload(ticket, ledger) for ticket in store.list()])
+            if parsed.path == "/api/sessions": return self._json([_session_payload(item, store, ledger) for item in session_store.list()])
             if parsed.path.startswith("/api/sessions/"):
                 try:
-                    return self._json(_session_payload(session_store.get(parsed.path.rsplit("/", 1)[-1]), store))
+                    return self._json(_session_payload(session_store.get(parsed.path.rsplit("/", 1)[-1]), store, ledger))
                 except SessionError as exc:
                     return self.send_error(404, str(exc))
             self.send_error(404)
@@ -299,6 +300,7 @@ def _create_ticket_form(store, process: str, workflows) -> str:
 
 def render_board(store, workflows, process: str, worker_control: WorkerControl | None = None, tree_manager: GitTreeManager | None = None, session_store: DeliverySessionStore | None = None, *, mode: str = "compact", search: str = "", status: str = "", active: str | bool = "") -> str:
 # End merged renderer signature.
+    ledger = BudgetLedger(store.project)
     workflow=workflows.get(process) or workflows["discovery"]; tickets=store.list(workflow.id)
     mode = mode if mode in {"compact", "flat"} else "compact"
     search = search.strip()
@@ -321,10 +323,10 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
         rendered.update(item.id for item in related)
         group = []
         for item in related:
-            group.append(_stage_column(store, workflow, item, tickets, tree_manager, session_store))
+            group.append(_stage_column(store, workflow, item, tickets, tree_manager, session_store, ledger))
         columns.append(f'<div class="compact-group" data-stage-group="{html.escape(stage.id)}">{"".join(group)}</div>' if mode == "compact" else "".join(group))
     if mode == "flat":
-        columns = [_stage_column(store, workflow, stage, tickets, tree_manager, session_store) for stage in workflow.stages]
+        columns = [_stage_column(store, workflow, stage, tickets, tree_manager, session_store, ledger) for stage in workflow.stages]
     board_class = "board flat-list" if mode == "flat" else "board"
     toolbar = _board_toolbar(workflow, mode, search, status, active)
     board = f'<main class="{board_class}">{"".join(columns) or "<div class=board-empty>Нет тикетов по текущему фильтру</div>"}</main>'
@@ -334,13 +336,14 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
     active_workers = sum(1 for ticket in store.list() if ticket.active_run)
     worker_form = f'<form method="post" action="/workers"><input type="hidden" name="process" value="{html.escape(workflow.id)}"><label class="meta">воркеры <input type="number" name="count" min="0" value="{worker_limit}"></label><button>Применить</button><span class="meta">активно {active_workers}</span></form>'
     create_form = _create_ticket_form(store, workflow.id, workflows)
-    sessions_html = _sessions_html(store, session_store) if process == "delivery" else ""
-    drawer = _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store)
+    sessions_html = _sessions_html(store, session_store, ledger) if process == "delivery" else ""
+    drawer = _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store, ledger)
     refresh_control = '<button type="button" data-refresh-toggle aria-pressed="false">Обновление: включено</button>'
     return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}{refresh_control}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}{toolbar}{board}{drawer}</body></html>'
 
 
 def render_board_fragment(store, workflows, process: str, worker_control=None, tree_manager=None, session_store=None, *, mode="compact", search="", status="", active="") -> str:
+    ledger = BudgetLedger(store.project)
     workflow = workflows.get(process) or workflows["discovery"]
     tickets = store.list(workflow.id)
     mode = mode if mode in {"compact", "flat"} else "compact"
@@ -359,9 +362,9 @@ def render_board_fragment(store, workflows, process: str, worker_control=None, t
             related=[stage]
             if stage.kind == "queue" and stage.pull_to and stage.pull_to in workflow.by_id: related.insert(0, workflow.by_id[stage.pull_to])
             rendered.update(item.id for item in related)
-            columns.append(f'<div class="compact-group" data-stage-group="{html.escape(stage.id)}">{"".join(_stage_column(store, workflow, item, tickets, tree_manager, session_store) for item in related)}</div>')
+            columns.append(f'<div class="compact-group" data-stage-group="{html.escape(stage.id)}">{"".join(_stage_column(store, workflow, item, tickets, tree_manager, session_store, ledger) for item in related)}</div>')
     else:
-        columns=[_stage_column(store, workflow, stage, tickets, tree_manager, session_store) for stage in stages]
+        columns=[_stage_column(store, workflow, stage, tickets, tree_manager, session_store, ledger) for stage in stages]
     return f'<main class="{"board flat-list" if mode == "flat" else "board"}">{"".join(columns) or "<div class=board-empty>Нет тикетов по текущему фильтру</div>"}</main>'
 
 
@@ -371,7 +374,7 @@ def _board_toolbar(workflow, mode, search, status, active=False):
     return f'<section class="board-toolbar"><label>Режим <select data-board-mode><option value="compact"{(" selected" if mode == "compact" else "")}>Компактный</option><option value="flat"{(" selected" if mode == "flat" else "")}>Плоский список</option></select></label><label>Поиск <input data-board-search type="search" value="{html.escape(search)}" placeholder="ID, заголовок или описание"></label><label>Фильтр <select data-board-status>{options}</select></label><label>Активность <select data-board-active>{active_options}</select></label></section>'
 
 
-def _stage_column(store, workflow, stage, tickets, tree_manager, session_store):
+def _stage_column(store, workflow, stage, tickets, tree_manager, session_store, ledger=None):
         cards=[]; stage_tickets=[t for t in tickets if t.status==stage.id]; stage_tickets.sort(key=lambda t:(0 if t.wip_exempt else 1,t.priority,t.created_at))
         for ticket in stage_tickets:
             action=""
@@ -384,11 +387,91 @@ def _stage_column(store, workflow, stage, tickets, tree_manager, session_store):
                 action=f'<form method="post" action="/release-retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить интеграцию</button></form>'
             blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge active-badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree); drawer_button=f'<button type="button" id="open-ticket-{html.escape(ticket.id)}" class="drawer-trigger" data-open-ticket="{html.escape(ticket.id)}" aria-label="Открыть тикет {html.escape(ticket.id)}">Открыть</button>'
             card_class = "card active-run" if ticket.active_run else "card"
-            cards.append(f'<div class="{card_class}" data-ticket="{html.escape(ticket.id)}"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{session_badge}{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{summary}{drawer_button}{details}{action}</div>')
+            budget, _ = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
+            budget_html = _budget_summary_html(budget)
+            cards.append(f'<div class="{card_class}" data-ticket="{html.escape(ticket.id)}"><span class="meta">{html.escape(ticket.id)}</span><strong>{html.escape(ticket.title)}</strong><span class="badge">{html.escape(ticket.type)}</span>{session_badge}{corrective}{blocked}{run}{retry}<div class="meta">приоритет {ticket.priority}</div>{budget_html}{summary}{drawer_button}{details}{action}</div>')
         wip=f" · WIP {stage.wip}" if stage.wip is not None else ""; return f'<section class="column" data-stage="{html.escape(stage.id)}"><h3>{html.escape(stage.title)}{wip}</h3>{"".join(cards)}</section>'
 
 
-def _session_payload(session, store) -> dict:
+def _dimensions(value) -> dict[str, int | None]:
+    return {dimension: value.get(dimension) if isinstance(value, dict) else None for dimension in ("tokens", "points", "runs")}
+
+
+def _source_confidence(actual: dict | None) -> str:
+    if not isinstance(actual, dict) or actual.get("source") == "unknown":
+        return "unknown"
+    if actual.get("source") == "provider":
+        return "confirmed"
+    return "degraded"
+
+
+def _budget_run(run: dict) -> dict:
+    actual = _dimensions(run.get("actual")) if run.get("actual") is not None else {"tokens": None, "points": None, "runs": None}
+    usage = run.get("actual") or {}
+    confidence = "unknown" if run.get("state") == "unknown" else _source_confidence(usage)
+    captured_at = usage.get("captured_at") if isinstance(usage, dict) else None
+    return {
+        "run_id": run["run_id"], "state": run["state"], "attempt_kind": run["attempt_kind"],
+        "ticket_id": run["ticket_id"], "parent_ticket_id": run.get("parent_ticket_id"),
+        "ticket_budget_id": run.get("ticket_budget_id"), "session_budget_id": run.get("session_budget_id"),
+        "planned": _dimensions(run.get("planned")), "reserved": _dimensions(run.get("reserved")), "actual": actual,
+        "source": usage.get("source", "unknown") if isinstance(usage, dict) else "unknown",
+        "source_confidence": confidence, "captured_at": captured_at,
+        "last_confirmed_snapshot_at": captured_at if confidence == "confirmed" else None,
+        "normalization_version": usage.get("normalization_version") if isinstance(usage, dict) and confidence != "unknown" else None,
+        "rate_card_version": usage.get("rate_card_version") if isinstance(usage, dict) and confidence != "unknown" else None,
+        "cost": None,
+    }
+
+
+def _budget_read_model(ledger, budget_id: str | None) -> tuple[dict | None, list[dict]]:
+    if not budget_id:
+        return None, []
+    try:
+        raw = ledger.get_budget(budget_id)
+        if raw is None:
+            return None, []
+        runs = [_budget_run(run) for run in ledger.list_runs(budget_id)]
+        started = sum(run["state"] == "started" for run in runs)
+        reserved = sum(run["state"] in {"reserved_pending_start", "started"} for run in runs)
+        budget = {
+            "contract_version": "budget.read.v1", "budget_id": raw["budget_id"], "scope": raw["scope"],
+            "owner_id": raw["owner_id"], "mode": raw["mode"],
+            "base_limits": {d: raw.get(f"base_limit_{d}") for d in ("tokens", "points", "runs")},
+            "limits": raw["limits"], "spent": raw["aggregates"]["finalized"],
+            "reserved": raw["aggregates"]["reserved"], "planned": raw["aggregates"]["planned"],
+            "available": raw["available"], "started_runs": started, "reserved_runs": reserved,
+            "status": raw["status"],
+            "blocked_reason": raw["status"] if raw["status"] in {"blocked_unknown", "stop_new_runs", "exhausted", "over_budget", "completed"} else None,
+            "observed_at": raw.get("updated_at"), "snapshot_status": raw.get("snapshot_status", "fresh"),
+            "enforcement_state_exact": raw.get("enforcement_state_exact", raw.get("snapshot_status", "fresh") == "fresh"),
+        }
+        return budget, runs
+    except Exception as exc:  # read API fails closed when SQLite is unavailable
+        return {"contract_version": "budget.read.v1", "budget_id": budget_id, "scope": None, "owner_id": None,
+                "mode": None, "base_limits": None, "limits": None, "spent": None, "reserved": None,
+                "planned": None, "available": None, "started_runs": 0, "reserved_runs": 0, "status": "unavailable",
+                "blocked_reason": None, "observed_at": None, "snapshot_status": "unavailable",
+                "enforcement_state_exact": False, "reason": type(exc).__name__}, []
+
+
+def _budget_summary_html(budget: dict | None) -> str:
+    if not budget:
+        return ""
+    if budget.get("snapshot_status") != "fresh":
+        label = "budget: stale" if budget.get("snapshot_status") == "stale" else "budget: unavailable"
+        return f'<div class="budget-summary"><span class="badge">{label}</span><span class="meta">enforcement state не подтвержден</span></div>'
+    limits, spent = budget.get("limits") or {}, budget.get("spent") or {}
+    reserved, available = budget.get("reserved") or {}, budget.get("available") or {}
+    def fmt(values, dimension):
+        return "unlimited" if values.get(dimension) is None else str(values.get(dimension, "—"))
+    return (f'<div class="budget-summary"><span class="badge">budget {html.escape(str(budget.get("status")))}</span>'
+            f'<span class="meta">tokens: limit {fmt(limits, "tokens")} · spent {fmt(spent, "tokens")} · '
+            f'reserved {fmt(reserved, "tokens")} · available {fmt(available, "tokens")} · '
+            f'runs {budget.get("started_runs", 0)}/{budget.get("reserved_runs", 0)}</span></div>')
+
+
+def _session_payload(session, store, ledger=None) -> dict:
     tickets = [store.get(ticket_id) for ticket_id in session.participants if _ticket_exists(store, ticket_id)]
     aggregate = {
         "mandatory": sum(ticket.mandatory for ticket in tickets),
@@ -397,7 +480,11 @@ def _session_payload(session, store) -> dict:
         "blocked": sum(bool(ticket.blocked_by) for ticket in tickets),
         "active_run": sum(bool(ticket.active_run) for ticket in tickets),
     }
-    return {"session": session.to_dict(), "aggregate": aggregate, "tickets": [_ticket_payload(ticket) for ticket in tickets]}
+    budget, budget_runs = _budget_read_model(ledger, f"session:{session.id}") if ledger else (None, [])
+    aggregate["budget_started_runs"] = budget["started_runs"] if budget else 0
+    aggregate["budget_reserved_runs"] = budget["reserved_runs"] if budget else 0
+    return {"session": session.to_dict(), "aggregate": aggregate, "budget": budget,
+            "budget_runs": budget_runs, "tickets": [_ticket_payload(ticket, ledger) for ticket in tickets]}
 
 
 def _ticket_exists(store, ticket_id: str) -> bool:
@@ -429,22 +516,28 @@ def _ticket_usage(ticket) -> tuple[dict, dict]:
     }
 
 
-def _ticket_payload(ticket) -> dict:
+def _ticket_payload(ticket, ledger=None) -> dict:
     payload = ticket.to_dict()
     latest, aggregate = _ticket_usage(ticket)
     if aggregate["confirmed_runs"] or ticket.run_history:
         payload["token_usage"] = latest
         payload["token_usage_aggregate"] = aggregate
+    budget, budget_runs = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
+    payload["budget"] = budget
+    payload["budget_runs"] = budget_runs
+    by_id = {run["run_id"]: run for run in budget_runs}
+    payload["run_history"] = [dict(entry, budget_run=by_id[entry["run_id"]]) if entry.get("run_id") in by_id else entry
+                               for entry in payload.get("run_history", [])]
     return payload
 
 
-def _sessions_html(store, session_store) -> str:
+def _sessions_html(store, session_store, ledger=None) -> str:
     if not session_store:
         session_store = DeliverySessionStore(store.project)
     sessions = session_store.list()
     cards = []
     for session in sessions:
-        payload = _session_payload(session, store)
+        payload = _session_payload(session, store, ledger)
         aggregate = payload["aggregate"]
         participants = []
         for ticket_id in session.participants:
@@ -470,18 +563,19 @@ def _sessions_html(store, session_store) -> str:
             actions = f'<form method="post" action="/session/add"><input type="hidden" name="session" value="{html.escape(session.id)}"><select name="ticket" required>{options}</select><button{add_disabled}>Добавить тикет</button></form><form method="post" action="/session/activate"><input type="hidden" name="session" value="{html.escape(session.id)}"><button>Активировать</button></form>'
         elif session.status == "active":
             actions = f'<form method="post" action="/session/complete"><input type="hidden" name="session" value="{html.escape(session.id)}"><input name="override" placeholder="Причина override, если неполна"><button>Завершить</button></form><form method="post" action="/session/cancel"><input type="hidden" name="session" value="{html.escape(session.id)}"><input name="override" placeholder="Причина override, если неполна"><button>Отменить</button></form>'
-        cards.append(f'<article class="card"><strong>{html.escape(session.title)}</strong><span class="badge">{html.escape(session.id)}</span><span class="badge">{html.escape(session.status)}</span><div class="meta">mandatory {aggregate["mandatory"]} · optional {aggregate["optional"]} · done {aggregate["done"]} · blocked {aggregate["blocked"]} · active_run {aggregate["active_run"]}</div><div class="details-body">{"".join(participants) or "<span class=meta>Состав пуст</span>"}</div>{actions}</article>')
+        cards.append(f'<article class="card"><strong>{html.escape(session.title)}</strong><span class="badge">{html.escape(session.id)}</span><span class="badge">{html.escape(session.status)}</span><div class="meta">mandatory {aggregate["mandatory"]} · optional {aggregate["optional"]} · done {aggregate["done"]} · blocked {aggregate["blocked"]} · active_run {aggregate["active_run"]}</div>{_budget_summary_html(payload["budget"])}<div class="details-body">{"".join(participants) or "<span class=meta>Состав пуст</span>"}</div>{actions}</article>')
     create = '<form class="create-form" method="post" action="/session/create"><strong>Новая Delivery-сессия</strong><input name="title" placeholder="название сессии" required><button>Создать</button></form>'
     return f'<section class="sessions"><h2>Delivery-сессии</h2>{create}{"".join(cards) or "<div class=meta>Сессий пока нет</div>"}</section>'
 
 
-def _ticket_details_html(ticket, tree=None) -> str:
+def _ticket_details_html(ticket, tree=None, ledger=None) -> str:
     parent = ticket.parent or "нет"
     blockers = ", ".join(ticket.blocked_by) if ticket.blocked_by else "нет"
     outcome = ticket.last_outcome or "нет"
     retry_after = ticket.retry_after or "нет"
     description = ticket.description or "(пусто)"
     latest_usage, aggregate = _ticket_usage(ticket)
+    budget, _ = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
     usage_text = "unknown"
     usage_time = "нет"
     if is_confirmed_token_usage(latest_usage):
@@ -504,6 +598,7 @@ def _ticket_details_html(ticket, tree=None) -> str:
         f'<div class="details-row"><span class="meta">Повтор после</span>{html.escape(retry_after)}</div>'
         f'<div class="details-row"><span class="meta">Токены (актуальный источник)</span>{html.escape(usage_text)} · {html.escape(usage_time)}</div>'
         f'<div class="details-row"><span class="meta">Токены (подтвержденные запуски)</span>{aggregate["total_tokens"]} · запусков {aggregate["confirmed_runs"]}</div>'
+        f'{_budget_summary_html(budget)}'
         f'{tree_details}'
         f'<div class="details-row"><span class="meta">Создан</span>{html.escape(ticket.created_at)}</div>'
         f'<div class="details-row"><span class="meta">Обновлен</span>{html.escape(ticket.updated_at)}</div>'
@@ -522,12 +617,12 @@ def _ticket_action_html(store, workflow, ticket) -> str:
     return ""
 
 
-def _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store) -> str:
-    panels = [_ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store) for ticket in tickets]
+def _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store, ledger=None) -> str:
+    panels = [_ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store, ledger) for ticket in tickets]
     return f'<div class="drawer-backdrop" data-drawer-backdrop hidden></div><aside class="ticket-drawer" data-ticket-drawer role="dialog" aria-modal="true" aria-label="Контекст тикета" aria-hidden="true" hidden>{"".join(panels)}</aside>'
 
 
-def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store) -> str:
+def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, session_store, ledger=None) -> str:
     workflow = workflows.get(ticket.process) or workflows[process]
     tree = tree_manager.trees.get(ticket.id) if tree_manager else None
     session = next((item for item in session_store.list() if ticket.id in item.participants), None) if session_store and ticket.process == "delivery" else None
@@ -549,6 +644,9 @@ def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, s
         tree_html = f'<div class="details-row"><span class="meta">Ветка</span>{html.escape(tree.branch)}</div><div class="details-row"><span class="meta">Worktree</span>{html.escape(tree.worktree)}</div><div class="details-row"><span class="meta">Интеграция</span>{html.escape(tree.integration_status)}</div>'
     session_html = f'<div class="details-row"><span class="meta">Сессия</span>{html.escape(session.id)} · {html.escape(session.status)}</div>' if session else '<div class="details-row"><span class="meta">Сессия</span>нет</div>'
     action = _ticket_action_html(store, workflow, ticket)
+    budget, budget_runs = _budget_read_model(ledger, f"ticket:{ticket.id}") if ledger else (None, [])
+    budget_details = _budget_summary_html(budget)
+    run_details = "".join(f'<div class="run-entry"><span class="badge">{html.escape(run["state"])}</span> {html.escape(run["run_id"])} · confidence {html.escape(run["source_confidence"])} · cost —</div>' for run in budget_runs)
     return (
         f'<section class="drawer-panel" data-drawer-ticket="{html.escape(ticket.id)}" tabindex="-1" hidden>'
         f'<div class="drawer-header"><div><span class="meta">{html.escape(ticket.id)}</span><h2>{html.escape(ticket.title)}</h2></div><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div>'
@@ -559,6 +657,7 @@ def _ticket_drawer_panel_html(store, workflows, process, ticket, tree_manager, s
         f'<div class="details-row"><span class="meta">Outcome</span>{html.escape(ticket.last_outcome or "нет")}</div>'
         f'<div class="details-row"><span class="meta">Родитель · blockers</span>{html.escape(parent)} · {html.escape(blockers)}</div>'
         f'<div class="details-row"><span class="meta">Создан · обновлен</span>{html.escape(ticket.created_at)} · {html.escape(ticket.updated_at)}</div></div>'
+        f'<div class="drawer-section"><h3>Budget</h3>{budget_details or "<span class=meta>нет enforced budget</span>"}<div class="details-body">{run_details}</div></div>'
         f'<div class="drawer-section"><h3>Retry и выполнение</h3><div class="details-row"><span class="meta">Active run</span>{html.escape(ticket.active_run or "нет")}</div><div class="details-row"><span class="meta">Ошибок подряд · повтор после</span>{ticket.consecutive_failures} · {html.escape(ticket.retry_after or "нет")}</div>{session_html}{tree_html}</div>'
         f'<div class="drawer-section"><h3>История запусков</h3><div class="run-history">{"".join(run_links) or "<span class=meta>Запусков пока нет</span>"}</div></div></section>'
     )

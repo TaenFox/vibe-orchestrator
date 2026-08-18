@@ -489,3 +489,47 @@ audit trail выполняется через `vibe budget decisions`. Programma
 использует injectable authorizer и применяет default-deny при отсутствии policy;
 API сохраняет то же требование. Browser-level проверка override UI не
 выполнялась, поскольку UI/API actions для неё не предоставлены в этом контексте.
+## Read API и UI contract
+
+Delivery read endpoints используют SQLite ledger как authoritative source и не
+создают записи при GET: `/api/tickets` возвращает `budget` и `budget_runs`, а
+`/api/sessions` и `/api/sessions/{id}` — budget session scope и его aggregate.
+Budget read-model содержит `contract_version`, `scope`, `owner_id`,
+`base_limits`, `limits`, `spent` (только finalized), `reserved`, `planned`,
+`available`, `started_runs`, `reserved_runs`, `status`, `blocked_reason`,
+`observed_at`, `snapshot_status` и `enforcement_state_exact`. Отсутствующий
+legacy record сериализуется как `null`, без synthetic unlimited budget.
+
+`budget_runs` связывается с ledger по `run_id` и сохраняет lifecycle state,
+`attempt_kind`, ticket/session ownership, planned/reserved/actual, source,
+`source_confidence`, captured timestamps, normalization/rate-card versions и
+nullable `cost`. Unknown usage имеет `actual` и `cost` равными `null`, а не нулю;
+стоимость не вычисляется без rate-card policy. Rework сохраняет child
+`run_id`, но его ticket aggregate принадлежит `ticket_budget_id` parent.
+
+На Delivery card показывается компактный limit/spent/reserved/available summary;
+drawer дополнительно показывает run counts, status, confidence, timestamps,
+версии и cost. Session panel показывает session aggregate отдельно от ticket
+payload. `fresh` означает прямое успешное чтение ledger; `stale` или
+`unavailable` всегда сопровождаются `enforcement_state_exact=false` и
+визуальной пометкой «не подтверждено». GET не добавляет mutation endpoints.
+
+## Ошибки и ограничения read model
+
+Отсутствие budget record — это legacy/read-compatible состояние, а не unlimited.
+Ledger error возвращает unavailable snapshot с `exact=false`; run_history не
+используется как подмена enforcement state. Snapshot не является billing
+integration: `cost` остаётся nullable. API локальный, без authentication,
+пагинации и внешнего provider API; large boards могут выполнять bounded
+per-scope reads.
+
+## Manual browser smoke
+
+Worker tests проверяют JSON, HTML escaping и inline refresh guards, но не являются
+browser-level проверкой DOM, focus, keyboard, viewport или auto-refresh.
+Внешний ручной прогон: запустить UI, открыть Delivery board, проверить card,
+drawer и session panel для enforced, legacy и unavailable/stale fixtures;
+убедиться в видимых `unknown`/`не подтверждено`, проверить Escape и focus trap
+drawer, ввод в фильтр и отсутствие перезаписи открытых details при refresh.
+Подождать более 5 секунд и подтвердить, что auto-refresh не теряет ввод и
+selection.
