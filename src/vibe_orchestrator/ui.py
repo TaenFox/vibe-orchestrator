@@ -22,7 +22,7 @@ from .tickets import (
     retry_exhausted,
 )
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
-from .agent_tools import AgentTicketTools, ReadOnlyAgentTools
+from .agent_tools import AgentSessionTools, AgentTicketTools, ReadOnlyAgentTools
 from .tickets import TicketWriteConflict, TicketWriteError, _parent_is_compatible as ticket_parent_is_compatible
 
 
@@ -193,6 +193,8 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
         def do_POST(self):
             if self.path == "/api/agent/tickets":
                 return self._agent_ticket_write(create=True)
+            if self.path.startswith("/api/agent/sessions/"):
+                return self._agent_session_write()
             length = int(self.headers.get("content-length", "0")); data = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
             try:
                 if self.path == "/session/create":
@@ -256,7 +258,36 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
         def do_PATCH(self):
             if self.path.startswith("/api/agent/tickets/"):
                 return self._agent_ticket_write(create=False)
+            if self.path.startswith("/api/agent/sessions/"):
+                return self._agent_session_write()
             self.send_error(404)
+
+        def _agent_session_write(self):
+            try:
+                length = int(self.headers.get("content-length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(body, dict):
+                    raise ValueError("JSON body must be an object")
+                path_parts = self.path.strip("/").split("/")
+                session_id = urllib.parse.unquote(path_parts[3])
+                action = path_parts[4] if len(path_parts) > 4 else "membership"
+                actor = self.headers.get("X-Agent-Id", "")
+                origin = body.get("origin", "")
+                tools = AgentSessionTools(project)
+                if action == "add":
+                    payload = tools.add_to_session(session_id, body.get("ticket_id"), actor=actor,
+                                                   origin=origin, priority=body.get("priority"))
+                elif action == "remove":
+                    payload = tools.remove_from_session(session_id, body.get("ticket_id"), actor=actor,
+                                                        origin=origin)
+                else:
+                    payload = tools.update_session_membership(session_id, body.get("members"),
+                                                              actor=actor, origin=origin)
+                return self._json(payload)
+            except KeyError:
+                return self._json({"error": "session or ticket not found"}, status=404)
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                return self._json({"error": str(exc)}, status=400)
         def _agent_ticket_write(self, *, create: bool):
             try:
                 length = int(self.headers.get("content-length", "0"))
