@@ -153,13 +153,13 @@ class SessionStore:
         self.init()
         return [self.load_path(path) for path in sorted(self.sessions_root.glob("*.yaml"))]
 
-    def save(self, session: DeliverySession) -> None:
+    def save(self, session: DeliverySession, *, _allow_active_membership_extension: bool = False) -> None:
         path = self._validate_session_path(self.session_path(session))
         with self._save_lock():
             persisted = self.load_path(path) if path.exists() else None
             if persisted is not None:
-                self._validate_transition(persisted, session)
-            self._validate_session(session)
+                self._validate_transition(persisted, session, allow_active_membership_extension=_allow_active_membership_extension)
+            self._validate_session(session, allow_active_membership_extension=_allow_active_membership_extension)
             session.updated_at = now_iso()
             self.sessions_root.mkdir(parents=True, exist_ok=True)
             payload = yaml.safe_dump(session.to_dict(), sort_keys=False, allow_unicode=True)
@@ -240,6 +240,28 @@ class SessionStore:
         self._audit(session, "ticket_added", ticket_id=ticket_id)
         self.save(session)
 
+    def inherit_ticket(self, session: DeliverySession, ticket_id: str, *, source_ticket: str) -> None:
+        """Add a rework child to the active session of its source ticket."""
+        if session.status != "active":
+            raise ValueError("Session inheritance requires an active session")
+        if not isinstance(source_ticket, str) or not source_ticket:
+            raise ValueError("Source ticket is required for session inheritance")
+        if source_ticket not in self.effective_ticket_ids(session):
+            raise ValueError("Source ticket does not belong to the session")
+        if ticket_id in self.effective_ticket_ids(session):
+            return
+        try:
+            ticket = self.ticket_store.get(ticket_id)
+        except KeyError as exc:
+            raise ValueError(f"Unknown ticket: {ticket_id}") from exc
+        if ticket.process != "delivery" or ticket.type not in DELIVERY_TICKET_TYPES:
+            raise ValueError(f"Invalid delivery ticket type: {ticket.type!r}")
+        if self.ticket_store.is_done(ticket):
+            raise ValueError("A completed ticket cannot inherit an active session")
+        session.ticket_ids.append(ticket_id)
+        self._audit(session, "ticket_inherited", ticket_id=ticket_id, source_ticket=source_ticket)
+        self.save(session, _allow_active_membership_extension=True)
+
     def remove_ticket(self, session: DeliverySession, ticket_id: str) -> None:
         self._require_draft(session)
         if ticket_id not in session.ticket_ids:
@@ -299,7 +321,7 @@ class SessionStore:
                       if event.get("event") == "membership_override" and isinstance(event.get("ticket_id"), str))
         return result
 
-    def _validate_session(self, session: DeliverySession) -> None:
+    def _validate_session(self, session: DeliverySession, *, allow_active_membership_extension: bool = False) -> None:
         self._validate_session_id(session.id)
         if session.schema_version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported session schema version: {session.schema_version!r}")
@@ -315,7 +337,7 @@ class SessionStore:
             value = session.budget_limits[dimension]
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
                 raise ValueError("budget limits must be non-negative integers or null")
-        self._validate_membership(session, session.ticket_ids)
+        self._validate_membership(session, session.ticket_ids, allow_active_membership_extension=allow_active_membership_extension)
         self._validate_lifecycle(session)
         if session.status in OPEN_STATUSES:
             for other in self.list():
@@ -382,7 +404,7 @@ class SessionStore:
         except TypeError as exc:
             raise ValueError("Session timestamps must use compatible ISO-8601 offsets") from exc
 
-    def _validate_transition(self, persisted: DeliverySession, session: DeliverySession) -> None:
+    def _validate_transition(self, persisted: DeliverySession, session: DeliverySession, *, allow_active_membership_extension: bool = False) -> None:
         if persisted.id != session.id:
             raise ValueError("Session ID cannot be changed")
         if persisted.schema_version != session.schema_version:
@@ -402,7 +424,13 @@ class SessionStore:
         }
         if session.status not in allowed.get(persisted.status, set()):
             raise ValueError(f"Invalid session status transition: {persisted.status!r} -> {session.status!r}")
-        if persisted.status != "draft" and persisted.ticket_ids != session.ticket_ids:
+        if persisted.status != "draft" and persisted.ticket_ids != session.ticket_ids and not (
+            allow_active_membership_extension
+            and persisted.status == "active"
+            and session.status == "active"
+            and persisted.ticket_ids == session.ticket_ids[:-1]
+            and session.audit_events[-1].get("event") == "ticket_inherited"
+        ):
             raise ValueError("Session membership can only be changed in draft")
         if persisted.status == "active" and session.started_at != persisted.started_at:
             raise ValueError("Session start time cannot be changed")
@@ -436,10 +464,10 @@ class SessionStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
-    def _validate_membership(self, session: DeliverySession, ticket_ids: list[str]) -> None:
+    def _validate_membership(self, session: DeliverySession, ticket_ids: list[str], *, allow_active_membership_extension: bool = False) -> None:
         if not isinstance(ticket_ids, list):
             raise TypeError("ticket_ids must be a list")
-        if session.status != "draft" and ticket_ids != session.ticket_ids:
+        if session.status != "draft" and not allow_active_membership_extension and ticket_ids != session.ticket_ids:
             raise ValueError("Session membership can only be changed in draft")
         if any(not isinstance(ticket_id, str) or not ticket_id for ticket_id in ticket_ids):
             raise TypeError("ticket_ids must contain non-empty strings")
