@@ -178,6 +178,55 @@ def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     assert all(entry["run_id"] == "run-review" for entry in run_events(parent))
 
 
+@pytest.mark.parametrize(
+    ("ticket_type", "prompt"),
+    [
+        ("audit", "process_management/audit.md"),
+        ("planning", "process_management/planning.md"),
+        ("estimation", "process_management/estimation.md"),
+    ],
+)
+def test_process_management_uses_type_specific_prompt(tmp_path: Path, ticket_type: str, prompt: str):
+    orchestrator = Orchestrator(tmp_path)
+    ticket = orchestrator.store.create("process_management", ticket_type, "Process work", status="in_progress")
+    stage = orchestrator._stage_for_ticket(orchestrator.workflows["process_management"], orchestrator.workflows["process_management"].by_id["in_progress"], ticket)
+
+    assert stage.prompt == prompt
+
+
+def test_completed_stage_updates_ticket_context_and_revision(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    ticket = orchestrator.store.create("delivery", "task", "Context update", status="system_analysis")
+    ticket.active_run = "run-context"
+    orchestrator.store.save(ticket)
+
+    workflow = load_workflow("delivery")
+    orchestrator._apply_result(
+        workflow,
+        ticket.id,
+        workflow.by_id["system_analysis"],
+        AgentResult(
+            outcome="completed",
+            summary="Спецификация готова",
+            details="""```yaml
+context:
+  goal:
+    expected_result: Стабильный handoff
+  acceptance_criteria:
+    - id: AC-1
+      requirement: Контекст сохраняется
+```""",
+        ),
+    )
+
+    updated = orchestrator.store.get(ticket.id)
+    event = run_events(updated)[0]
+    assert updated.context_revision == 1
+    assert updated.context["goal"]["expected_result"] == "Стабильный handoff"
+    assert event["context_revision_before"] == 0
+    assert event["context_revision_after"] == 1
+
+
 def test_schedule_records_started_and_completed_run_history(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     orchestrator.runner = SuccessfulRunner()

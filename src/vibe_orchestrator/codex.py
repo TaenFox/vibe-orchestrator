@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+import yaml
+
 from . import __version__
 from .config import PromptSpec, Stage, load_prompt_spec, package_root
 from .tickets import Ticket, TicketStore
@@ -171,6 +173,9 @@ class CodexRunner:
         correction_context = self._correction_context(ticket)
         if correction_context:
             prompt += f"\n\n## Контекст завершённых Correction\n{correction_context}\n"
+        if ticket.context:
+            context_yaml = yaml.safe_dump(ticket.context, sort_keys=False, allow_unicode=True).rstrip()
+            prompt += f"\n\n## Актуальный контекст тикета (ревизия {ticket.context_revision})\n```yaml\n{context_yaml}\n```\n"
         return prompt
 
     def _correction_context(self, ticket: Ticket) -> str:

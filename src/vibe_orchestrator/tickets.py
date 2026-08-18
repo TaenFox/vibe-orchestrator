@@ -47,6 +47,8 @@ class Ticket:
     active_run: str | None = None
     last_outcome: str | None = None
     last_summary: str | None = None
+    context: dict[str, Any] = field(default_factory=dict)
+    context_revision: int = 0
     consecutive_failures: int = 0
     retry_after: str | None = None
     run_history: list[dict[str, Any]] = field(default_factory=list)
@@ -59,6 +61,10 @@ class Ticket:
             payload["run_history"] = [dict(item) for item in history if isinstance(item, dict)]
         else:
             payload["run_history"] = []
+        context = payload.get("context")
+        payload["context"] = dict(context) if isinstance(context, dict) else {}
+        revision = payload.get("context_revision", 0)
+        payload["context_revision"] = revision if isinstance(revision, int) and revision >= 0 else 0
         allowed = {name for name in cls.__dataclass_fields__}
         return cls(**{key: value for key, value in payload.items() if key in allowed})
 
@@ -76,6 +82,10 @@ class Ticket:
             payload.pop("consecutive_failures")
         if payload["retry_after"] is None:
             payload.pop("retry_after")
+        if not payload["context"]:
+            payload.pop("context")
+        if payload["context_revision"] == 0:
+            payload.pop("context_revision")
         return payload
 
 
@@ -100,10 +110,10 @@ class TicketStore:
             )
         gitignore = self.root / ".gitignore"
         if not gitignore.exists():
-            gitignore.write_text("runs/\ntmp/\ntickets/\n", encoding="utf-8")
+            gitignore.write_text("runs/\ntmp/\ntickets/\nsessions/\nsessions.lock\n", encoding="utf-8")
         else:
             entries = gitignore.read_text(encoding="utf-8").splitlines()
-            missing = [entry for entry in ("runs/", "tmp/", "tickets/") if entry not in entries]
+            missing = [entry for entry in ("runs/", "tmp/", "tickets/", "sessions/", "sessions.lock") if entry not in entries]
             if missing:
                 gitignore.write_text("\n".join([*entries, *missing]) + "\n", encoding="utf-8")
 

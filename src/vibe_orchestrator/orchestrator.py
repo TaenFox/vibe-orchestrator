@@ -4,6 +4,8 @@ import asyncio
 import logging
 import re
 import uuid
+from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -84,7 +86,7 @@ class Orchestrator:
             ticket = self.store.get(candidate.ticket.id)
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
-            stage = workflow.by_id[candidate.target_status]
+            stage = self._stage_for_ticket(workflow, workflow.by_id[candidate.target_status], ticket)
             run_id = uuid.uuid4().hex
             workspace = None
             try:
@@ -107,6 +109,7 @@ class Orchestrator:
                     event="started",
                     from_status=candidate.source_status,
                     to_status=candidate.target_status,
+                    context_revision=ticket.context_revision,
                     **metadata,
                     **ticket_prompt_metadata(ticket),
                 )
@@ -124,6 +127,7 @@ class Orchestrator:
                 event="started",
                 from_status=candidate.source_status,
                 to_status=candidate.target_status,
+                context_revision=ticket.context_revision,
                 **contract.history_metadata(),
                 **ticket_prompt_metadata(ticket),
             )
@@ -139,9 +143,19 @@ class Orchestrator:
             self._last_worker_limit = worker_limit
         return worker_limit
 
+    def _stage_for_ticket(self, workflow: Workflow, stage: Stage, ticket: Ticket) -> Stage:
+        if workflow.id != "process_management" or stage.id != "in_progress":
+            return stage
+        prompt = {
+            "audit": "process_management/audit.md",
+            "planning": "process_management/planning.md",
+            "estimation": "process_management/estimation.md",
+        }.get(ticket.type)
+        return replace(stage, prompt=prompt) if prompt else stage
+
     async def _execute(self, workflow: Workflow, ticket_id: str, stage_id: str, contract: ExecutionContract | str, *, workspace: Path | None = None) -> None:
         ticket = self.store.get(ticket_id)
-        stage = workflow.by_id[stage_id]
+        stage = self._stage_for_ticket(workflow, workflow.by_id[stage_id], ticket)
         metadata: dict[str, str] | None = None
         try:
             if isinstance(contract, str):
@@ -229,6 +243,11 @@ class Orchestrator:
         ticket.last_summary = result.summary
         ticket.consecutive_failures = 0
         ticket.retry_after = None
+        context_before = ticket.context_revision
+        context_update = _extract_context_payload(result.details)
+        if context_update:
+            ticket.context = _merge_context(ticket.context, context_update)
+            ticket.context_revision += 1
         target_status = (stage.outcomes or {})[result.outcome]
         if ticket.type == "correction" and workflow.id == "discovery" and result.outcome == "completed":
             target_status = "done"
@@ -244,6 +263,8 @@ class Orchestrator:
                 outcome=result.outcome,
                 summary=result.summary,
                 to_status=ticket.status,
+                context_revision_before=context_before,
+                context_revision_after=ticket.context_revision,
                 token_usage=result.token_usage or self._run_token_usage(active_run),
                 **metadata,
             )
@@ -530,6 +551,22 @@ def _extract_structured_payload(details: str) -> dict[str, object]:
         if isinstance(payload, dict):
             return payload
     return {}
+
+
+def _extract_context_payload(details: str) -> dict[str, object]:
+    payload = _extract_structured_payload(details)
+    context = payload.get("context")
+    return context if isinstance(context, dict) else {}
+
+
+def _merge_context(current: dict[str, object], update: dict[str, object]) -> dict[str, object]:
+    merged = deepcopy(current)
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_context(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
 def _technical_analysis_plan(details: str) -> tuple[bool, list[dict[str, object]]]:

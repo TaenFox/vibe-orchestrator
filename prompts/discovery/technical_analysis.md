@@ -31,3 +31,7 @@ delivery_tickets: []
 При `implementation_required: true` укажите хотя бы один тикет с `mandatory: true`. Не используйте пустой список для обозначения ошибки или незавершенного анализа: в таком случае верните `needs_correction`.
 
 Оркестратор автоматически создаст эти связанные Delivery-тикеты, сохранит признак обязательности и привяжет их к Discovery-идее.
+
+В тот же YAML-блок добавьте `context` с секциями `technical`, `implementation`, `acceptance_criteria`,
+`test_plan`, `dependencies`, `assumptions` и `risks`. Для каждого Delivery-тикета продублируйте
+самостоятельные критерии приемки и способ проверки, чтобы тикет не зависел от устных пояснений.

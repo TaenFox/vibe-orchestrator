@@ -131,6 +131,23 @@ def test_prompt_includes_completed_correction_context(tmp_path: Path):
     assert "тикеты независимы" in prompt
 
 
+def test_prompt_includes_current_ticket_context(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Context handoff")
+    ticket.context = {"acceptance_criteria": [{"id": "AC-1", "requirement": "Сохранить данные"}]}
+    ticket.context_revision = 2
+    store.save(ticket)
+    runner = CodexRunner(store)
+    stage = load_workflow("delivery").by_id["development"]
+
+    prompt = runner._build_prompt(ticket, stage, runner.prepare_execution_contract(stage, "run-context"))
+
+    assert "Актуальный контекст тикета (ревизия 2)" in prompt
+    assert "AC-1" in prompt
+    assert "Сохранить данные" in prompt
+
+
 def test_execution_contract_versions_full_prompt_template(tmp_path: Path, monkeypatch):
     store = TicketStore(tmp_path)
     store.init()
