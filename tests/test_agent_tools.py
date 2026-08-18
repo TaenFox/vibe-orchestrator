@@ -4,7 +4,7 @@ import pytest
 
 from vibe_orchestrator.agent_tools import AgentTicketTools, ReadOnlyAgentTools
 from vibe_orchestrator.control import DeliverySessionStore
-from vibe_orchestrator.tickets import TicketStore, TicketWriteConflict, TicketWriteError
+from vibe_orchestrator.tickets import TicketStore, TicketWriteConflict, TicketWriteError, TicketWriteService
 
 
 def test_agent_ticket_queries_are_filtered_bounded_and_read_only(tmp_path: Path):
@@ -54,6 +54,50 @@ def test_agent_write_contract_validates_lifecycle_and_audits(tmp_path: Path):
     assert updated["status"] == "todo"
     assert updated["audit_events"][-1]["changed_fields"] == ["context", "title"]
     assert len(TicketStore(tmp_path).get(created["id"]).audit_events) == 2
+
+
+def test_agent_create_commits_run_history_and_audit_in_one_save(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = TicketStore(tmp_path)
+    store.init()
+    service = TicketWriteService(tmp_path)
+    saves = []
+    original_save = service.store.save
+
+    def observe_save(ticket):
+        saves.append(ticket.to_dict())
+        original_save(ticket)
+
+    monkeypatch.setattr(service.store, "save", observe_save)
+
+    created = service.create_ticket(
+        {"process": "delivery", "type": "task", "title": "Atomic task", "origin": "agent"},
+        actor="agent-1",
+    )
+
+    assert len(saves) == 1
+    assert saves[0]["run_history"][-1]["event"] == "created"
+    assert saves[0]["audit_events"][-1]["event"] == "ticket_created"
+    assert TicketStore(tmp_path).get(created.id).audit_events[-1]["event"] == "ticket_created"
+
+
+def test_agent_create_save_failure_does_not_publish_partial_ticket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = TicketStore(tmp_path)
+    store.init()
+    service = TicketWriteService(tmp_path)
+
+    def fail_replace(source, target):
+        raise OSError("commit failed")
+
+    monkeypatch.setattr("vibe_orchestrator.tickets.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="commit failed"):
+        service.create_ticket(
+            {"process": "delivery", "type": "task", "title": "Unpublished", "origin": "agent"},
+            actor="agent-1",
+        )
+
+    assert list((tmp_path / ".vibe" / "tickets").glob("*/*.yaml")) == []
+    assert list((tmp_path / ".vibe" / "tickets").glob("*/*")) == []
 
 
 def test_agent_write_rejects_invalid_metadata_without_changes(tmp_path: Path):

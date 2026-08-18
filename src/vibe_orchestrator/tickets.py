@@ -196,7 +196,7 @@ class TicketStore:
         stage = workflow.by_id[ticket.status]
         return stage.kind == "done"
 
-    def create(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None, mandatory: bool = True, correction_stage: str | None = None, rework_stage: str | None = None) -> Ticket:
+    def _new_ticket(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None, mandatory: bool = True, correction_stage: str | None = None, rework_stage: str | None = None) -> Ticket:
         workflow = load_workflow(process)
         prefix = {"discovery": "DISC", "delivery": "DEL", "process_management": "PM"}[process]
         ticket_id = f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
@@ -204,6 +204,10 @@ class TicketStore:
             wip_exempt = ticket_type in {"rework", "correction"}
         ticket = Ticket(id=ticket_id, process=process, type=ticket_type, title=title, status=status or workflow.initial_status, priority=priority, description=description, parent=parent, correction_stage=correction_stage, rework_stage=rework_stage, mandatory=mandatory, wip_exempt=wip_exempt)
         self.record_run_event(ticket, run_id=None, stage_id=ticket.status, event="created")
+        return ticket
+
+    def create(self, process: str, ticket_type: str, title: str, description: str = "", priority: int = 100, parent: str | None = None, status: str | None = None, wip_exempt: bool | None = None, mandatory: bool = True, correction_stage: str | None = None, rework_stage: str | None = None) -> Ticket:
+        ticket = self._new_ticket(process, ticket_type, title, description, priority, parent, status, wip_exempt, mandatory, correction_stage, rework_stage)
         self.save(ticket)
         log.info("создан тикет %s (%s): %s", ticket.id, ticket.type, ticket.title)
         return ticket
@@ -365,7 +369,7 @@ class TicketWriteService:
                                 return existing
                             raise TicketWriteConflict("idempotency_key was already used with another payload")
             self._validate_parent(parent_id, process, ticket_type)
-            ticket = self.store.create(process, ticket_type, title, description=description, priority=priority, parent=parent_id, mandatory=mandatory)
+            ticket = self.store._new_ticket(process, ticket_type, title, description=description, priority=priority, parent=parent_id, mandatory=mandatory)
             ticket.audit_events.append({"event": "ticket_created", "timestamp": now_iso(), "actor": actor, "origin": origin, "operation": "create_ticket", "ticket_id": ticket.id, "changed_fields": sorted({"process", "type", "title", "description", "priority", "parent", "mandatory"}), "before": None, "after": {"process": process, "type": ticket_type, "title": title, "description": description, "priority": priority, "parent": parent_id, "mandatory": mandatory}, **({"idempotency_key": key} if key else {})})
             self.store.save(ticket)
             return ticket
