@@ -35,14 +35,18 @@ class ExecutionContract:
     prompt_version: str
     model: str
     reasoning_effort: str
+    reservation_metadata: dict[str, object] | None = None
 
-    def history_metadata(self) -> dict[str, str]:
-        return {
+    def history_metadata(self) -> dict[str, object]:
+        metadata: dict[str, object] = {
             "prompt_path": self.prompt_path,
             "prompt_version": self.prompt_version,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
         }
+        if self.reservation_metadata is not None:
+            metadata["reservation"] = self.reservation_metadata
+        return metadata
 
 
 def ticket_prompt_metadata(ticket: Ticket) -> dict[str, str]:
@@ -127,6 +131,7 @@ class CodexRunner:
             "version": __version__,
             "model": contract.model,
             "reasoning_effort": contract.reasoning_effort,
+            "reservation": contract.reservation_metadata,
             "ticket_snapshot": ticket_prompt_metadata(ticket),
             "workspace_path": str(workspace),
             "token_usage": unknown_token_usage(),

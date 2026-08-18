@@ -20,7 +20,7 @@ from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
-from .budget_ledger import BudgetDenied, BudgetLedger
+from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 
 log = logging.getLogger("vibe")
 
@@ -94,7 +94,6 @@ class Orchestrator:
             run_id = uuid.uuid4().hex
             workspace = None
             try:
-                workspace = self.tree_manager.workspace_for(ticket, stage_id=stage.id)
                 contract = self.runner.prepare_execution_contract(stage, run_id)
             except Exception as exc:
                 try:
@@ -130,12 +129,37 @@ class Orchestrator:
                     parent_ticket_id=ticket.parent,
                     budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
                 )
-            except BudgetDenied:
-                log.info("запуск %s отклонен budget gate", ticket.id)
+            except BudgetDenied as exc:
+                reason_code = getattr(exc, "reason_code", "budget_denied")
+                already_blocked = ticket.last_outcome == "blocked_budget" and ticket.blocked_reason == reason_code
+                ticket.blocked_reason = reason_code
+                ticket.last_outcome = "blocked_budget"
+                ticket.last_summary = str(exc)
+                if not already_blocked:
+                    self.store.record_run_event(
+                        ticket,
+                        run_id=None,
+                        stage_id=candidate.target_status,
+                        event="blocked",
+                        reason_code=reason_code,
+                        reason=str(exc),
+                    )
+                self.store.save(ticket)
+                log.info("запуск %s отклонен budget gate: %s", ticket.id, reason_code)
+                continue
+            contract = replace(contract, reservation_metadata=self._reservation_metadata(reservation.run_id))
+            try:
+                workspace = self.tree_manager.workspace_for(ticket, stage_id=stage.id)
+            except Exception as exc:
+                if not reservation.legacy:
+                    self.ledger.release(contract.run_id)
+                self._record_failure(ticket, contract.run_id, candidate.target_status, exc, contract.history_metadata())
+                log.exception("сбой подготовки workspace для %s (%s)", ticket.id, ticket.type)
                 continue
             ticket.status = candidate.target_status
             ticket.active_run = contract.run_id
             ticket.retry_after = None
+            ticket.blocked_reason = None
             self.store.record_run_event(
                 ticket,
                 run_id=contract.run_id,
@@ -173,6 +197,24 @@ class Orchestrator:
         budget = ticket.context.get("budget", {}) if isinstance(ticket.context, dict) else {}
         planned = budget.get("planned", {}) if isinstance(budget, dict) else {}
         return {"tokens": planned.get("tokens"), "points": planned.get("points"), "runs": planned.get("runs", 1)}
+
+    def _reservation_metadata(self, run_id: str) -> dict[str, object]:
+        run = self.ledger.get_run(run_id)
+        if run is None:
+            return {"contract_version": "budget.v1", "run_id": run_id}
+        return {
+            "contract_version": "budget.v1",
+            "run_id": run["run_id"],
+            "state": run["state"],
+            "attempt_kind": run["attempt_kind"],
+            "ticket_budget_id": run["ticket_budget_id"],
+            "session_budget_id": run["session_budget_id"],
+            "parent_run_id": run["parent_run_id"],
+            "parent_ticket_id": run["parent_ticket_id"],
+            "planned": run["planned"],
+            "reserved": run["reserved"],
+            "reserved_at": run["reserved_at"],
+        }
 
     def _stage_for_ticket(self, workflow: Workflow, stage: Stage, ticket: Ticket) -> Stage:
         if workflow.id != "process_management" or stage.id != "in_progress":
@@ -258,7 +300,8 @@ class Orchestrator:
         self._ledger_finalize(run_id, "failed")
 
     def _ledger_finalize(self, run_id: str | None, outcome: str, usage: dict | None = None) -> None:
-        if not run_id or self.ledger.get_run(run_id) is None:
+        run = self.ledger.get_run(run_id) if run_id else None
+        if run is None or run["state"] in TERMINAL:
             return
         self.ledger.finalize(run_id, outcome if outcome in {"completed", "failed", "unknown"} else "failed", usage or self._run_token_usage(run_id))
 
@@ -286,6 +329,7 @@ class Orchestrator:
                 )
         ticket = self.store.get(ticket_id)
         active_run = contract.run_id if contract else run_id or ticket.active_run
+        ticket.blocked_reason = None
         metadata = self._run_traceability_metadata(
             ticket,
             active_run,
@@ -576,6 +620,8 @@ class Orchestrator:
                 if entry.get("run_id") != run_id or entry.get("event") != "started":
                     continue
                 metadata.update({key: value for key in _TRACEABILITY_KEYS if (value := entry.get(key)) is not None})
+                if entry.get("reservation") is not None:
+                    metadata["reservation"] = entry["reservation"]
                 break
         if len(metadata) < len(_TRACEABILITY_KEYS):
             if fallback:

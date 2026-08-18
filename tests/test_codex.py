@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -383,6 +384,11 @@ def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(
     stage = load_workflow("delivery").by_id["development"]
     runner = CodexRunner(store, codex_binary="codex-bin", model="gpt-5-test", reasoning_effort="medium")
     contract = runner.prepare_execution_contract(stage, "run-contract")
+    contract = replace(contract, reservation_metadata={
+        "contract_version": "budget.v1",
+        "ticket_budget_id": "ticket:DEL-1",
+        "state": "reserved_pending_start",
+    })
 
     class FakeProcess:
         returncode = 0
@@ -411,4 +417,5 @@ def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(
     assert result.outcome == "completed"
     assert manifest["prompt_path"] == contract.prompt_path
     assert manifest["prompt_version"] == contract.prompt_version
+    assert manifest["reservation"] == contract.reservation_metadata
     assert manifest["prompt_contract"] == contract.prompt_contract

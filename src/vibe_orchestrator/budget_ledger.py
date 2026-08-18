@@ -24,6 +24,10 @@ STATES = {"reserved_pending_start", "started", *TERMINAL}
 class BudgetDenied(RuntimeError):
     """A reservation cannot be admitted by one of the enforced scopes."""
 
+    def __init__(self, message: str, *, reason_code: str = "budget_denied"):
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 class ImmutableRunError(ValueError):
     pass
@@ -224,10 +228,16 @@ class BudgetLedger:
                 return Reservation(run_id, "legacy", legacy=True)
             for row in rows:
                 if row["status"] in {"blocked_unknown", "completed", "stop_new_runs"}:
-                    raise BudgetDenied(f"{row['scope']} budget is {row['status']}")
+                    raise BudgetDenied(
+                        f"{row['scope']} budget is {row['status']}",
+                        reason_code=f"budget_{row['status']}",
+                    )
                 for d in DIMENSIONS:
                     if row[f"limit_{d}"] is not None and sum(row[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) + (planned_values[d] or 0) > row[f"limit_{d}"]:
-                        raise BudgetDenied(f"{row['scope']} budget exceeded: {d}")
+                        raise BudgetDenied(
+                            f"{row['scope']} budget exceeded: {d}",
+                            reason_code=f"budget_exceeded_{d}",
+                        )
             now = _now()
             links = {"ticket": next((r["budget_id"] for r in rows if r["scope"] == "ticket"), None), "session": next((r["budget_id"] for r in rows if r["scope"] == "session"), None)}
             db.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, ticket_id, session_id, links["ticket"], links["session"], attempt_kind, parent_run_id, parent_ticket_id, json.dumps(planned_values), json.dumps(planned_values), None, "reserved_pending_start", now, None, None, None))
