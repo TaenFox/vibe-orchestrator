@@ -12,11 +12,16 @@ from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
 
 
 CONFIRMED_USAGE = {
+    "run_id": "run-ta",
     "input_tokens": 12,
     "output_tokens": 3,
     "total_tokens": 15,
-    "source": "codex_cli.turn.completed",
+    "model": "test-model",
+    "reasoning_effort": "medium",
+    "source": "provider",
+    "usage_ref": "evt-ta",
     "captured_at": "2026-08-17T10:11:12+00:00",
+    "normalization_version": "tokens_per_1000.v1",
 }
 
 

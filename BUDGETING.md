@@ -205,13 +205,13 @@ audit-сигналом, но не блокирует scope; остальные �
 
 Delivery run проходит состояния `reserved_pending_start -> started -> finalized|unknown|released`. Provider usage является единственным источником фактических токенов; prompt, summary, details, result payload и длина текста не являются usage-доказательством.
 
-Normalized usage fact содержит `run_id`, raw `input_tokens`, `output_tokens`, `total_tokens`, `model`, `reasoning_effort`, `source`, `usage_ref`, `captured_at` и `normalization_version`. Provider event принимается только при exact correlation с run/profile, непустом stable ref и `total_tokens == input_tokens + output_tokens`.
+Normalized usage fact содержит `run_id`, raw `input_tokens`, `output_tokens`, `total_tokens`, `model`, `reasoning_effort`, `source`, `usage_ref`, `captured_at` и `normalization_version`. Для confirmed provider и runner fallback все эти provenance-поля и `captured_at` обязательны и непусты; provider event принимается только при exact correlation с run/profile, непустом stable ref и `total_tokens == input_tokens + output_tokens`.
 
 Incremental facts складываются по уникальному `usage_ref`; replay того же ref идемпотентен. Cumulative snapshots не складываются: используется последний валидный snapshot, а regression, mixed semantics или изменение counts у одного ref дают `unknown`. `runner_fallback` разрешён только с `fallback_policy_version`, `normalization_version` и `degraded_confidence: true`. Cost/currency и `rate_card_version` — optional audit metadata.
 
 ### Изменения тикета DEL-B09FBE
 
-Adapter передаёт correlated contract без пересчёта в `run.json`, `result.json`, `run_history` и ledger. Ledger валидирует provenance на finalize boundary, сохраняет raw counts и metadata, а повторный finalize terminal run идемпотентен. Старые артефакты читаются через legacy parser, но без доказуемых correlation/ref/version не переносятся в подтверждённый finalized usage. Если provider не поставляет эти поля, результат остаётся `unknown`; точные имена полей и гарантия semantics остаются открытой зависимостью.
+Adapter передаёт correlated contract без пересчёта в `run.json`, `result.json`, `run_history` и ledger. Ledger валидирует provenance на finalize boundary, сохраняет raw counts и metadata, а повторный finalize terminal run идемпотентен. Старые артефакты читаются через legacy parser, но `source=codex_cli.turn.completed` является только read-compatible форматом и никогда не считается confirmed или переносится в finalized aggregates. Если provider не поставляет correlation/ref/version/timestamp, результат остаётся `unknown`; точные имена полей и гарантия semantics остаются открытой зависимостью.
 
 Перед вызовом Codex control plane атомарно создаёт reservation. При отказе по
 лимиту Codex не запускается, `failed` run не создаётся и зависший reservation
