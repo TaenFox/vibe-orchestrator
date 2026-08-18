@@ -33,6 +33,24 @@ def test_effective_limit_is_materialized_in_reads_and_expires(tmp_path):
     assert ledger.get_budget("ticket:T")["limits"]["tokens"] == 5
 
 
+def test_zero_increase_limit_is_audited_noop(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"tokens": 5, "runs": 2})
+    before = ledger.get_budget("ticket:T")
+    decision = ledger.increase_limit(actor="a", target_scope="ticket", target_id="T", dimension="tokens",
+                                     delta=0, reason="confirm current limit", reference="ref-0",
+                                     expires_at="2999-01-01T00:00:00+00:00", decision_id="zero")
+    after = ledger.get_budget("ticket:T")
+    assert decision["decision_id"] == "zero"
+    assert ledger.list_decisions(operation="increase-limit")[0]["payload"]["delta"] == 0
+    assert after["limits"] == before["limits"]
+    assert after["aggregates"] == before["aggregates"]
+    with pytest.raises(ValueError, match="non-negative"):
+        ledger.increase_limit(actor="a", target_scope="ticket", target_id="T", dimension="tokens", delta=-1,
+                              reason="bad", reference="bad", expires_at="2999-01-01T00:00:00+00:00")
+    assert len(ledger.list_decisions()) == 1
+
+
 def test_consumed_one_shot_resolve_blocks_unknown_again(tmp_path):
     ledger = BudgetLedger(tmp_path, authorizer=authorizer)
     ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
@@ -57,6 +75,46 @@ def test_expired_resolve_unknown_blocks_again(tmp_path):
     assert ledger.get_budget("ticket:T")["status"] != "blocked_unknown"
     current[0] = "2026-08-18T02:00:00+00:00"
     assert ledger.get_budget("ticket:T")["status"] == "blocked_unknown"
+
+
+def test_evidence_resolution_records_immutable_fact_and_applies_usage_once(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"tokens": 20, "points": 10, "runs": 3})
+    ledger.reserve("run-a", "T", None, {"tokens": 5, "points": 1, "runs": 1})
+    ledger.start("run-a")
+    ledger.finalize("run-a", "unknown", {"provider": "raw", "points": None})
+    raw = ledger.get_run("run-a")
+    evidence = {"operator": "confirmed", "usage": {"tokens": 7, "points": 2, "runs": 1},
+                "normalization": "tokens_per_1000.v1"}
+    ledger.resolve_unknown(actor="alice", run_id="run-a", reason="verified", reference="E-1",
+                           evidence=evidence, expires_at="2999-01-01T00:00:00+00:00", decision_id="e-1")
+    facts = ledger.list_reconciliation_facts(run_id="run-a")
+    assert len(facts) == 1
+    assert facts[0]["decision_id"] == "e-1"
+    assert facts[0]["actor"] == "alice"
+    assert facts[0]["reference"] == "E-1"
+    assert facts[0]["evidence"] == evidence
+    assert ledger.get_run("run-a")["state"] == raw["state"] == "unknown"
+    assert ledger.get_run("run-a")["actual_json"] == raw["actual_json"]
+    assert ledger.get_budget("ticket:T")["aggregates"]["finalized"] == {"tokens": 7, "points": 2, "runs": 1}
+    ledger.resolve_unknown(actor="alice", run_id="run-a", reason="verified", reference="E-1",
+                           evidence=evidence, expires_at="2999-01-01T00:00:00+00:00", decision_id="e-1")
+    assert len(ledger.list_reconciliation_facts(decision_id="e-1")) == 1
+    assert ledger.get_budget("ticket:T")["aggregates"]["finalized"] == {"tokens": 7, "points": 2, "runs": 1}
+
+
+def test_invalid_evidence_usage_rolls_back_decision_and_fact(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"points": 10, "runs": 2})
+    ledger.reserve("run-a", "T", None, {"runs": 1})
+    ledger.start("run-a")
+    ledger.finalize("run-a", "unknown", {"points": None})
+    with pytest.raises(ValueError, match="non-negative"):
+        ledger.resolve_unknown(actor="a", run_id="run-a", reason="bad", reference="bad",
+                               evidence={"usage": {"points": -1}},
+                               expires_at="2999-01-01T00:00:00+00:00", decision_id="bad-evidence")
+    assert ledger.list_decisions() == []
+    assert ledger.list_reconciliation_facts() == []
 
 
 def test_one_shot_increase_refreshes_effective_limit_after_consumption(tmp_path):

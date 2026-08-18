@@ -154,6 +154,14 @@ class BudgetLedger:
               expires_at TEXT, one_shot INTEGER NOT NULL DEFAULT 0 CHECK(one_shot IN (0,1)),
               consumed_at TEXT, created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS reconciliation_facts (
+              fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              run_id TEXT NOT NULL REFERENCES runs(run_id),
+              decision_id TEXT NOT NULL UNIQUE REFERENCES budget_decisions(decision_id),
+              actor TEXT NOT NULL, reference TEXT NOT NULL, timestamp TEXT NOT NULL,
+              mode TEXT NOT NULL CHECK(mode='evidence'),
+              evidence_json TEXT NOT NULL, usage_json TEXT NOT NULL
+            );
             INSERT OR IGNORE INTO metadata(key,value) VALUES ('schema_version','budget.v1');
             INSERT OR IGNORE INTO metadata(key,value) VALUES ('decision_schema_version','budget_decisions.v1');
             """)
@@ -267,9 +275,52 @@ class BudgetLedger:
             item = dict(row); item["payload"] = json.loads(item.pop("payload_json")); item["one_shot"] = bool(item["one_shot"]); result.append(item)
         return result
 
+    def list_reconciliation_facts(self, *, run_id: str | None = None,
+                                  decision_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM reconciliation_facts WHERE 1=1"; params: list[Any] = []
+        if run_id is not None:
+            query += " AND run_id=?"; params.append(run_id)
+        if decision_id is not None:
+            query += " AND decision_id=?"; params.append(decision_id)
+        with self._connect() as db:
+            rows = db.execute(query + " ORDER BY fact_id", params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["evidence"] = json.loads(item.pop("evidence_json"))
+            item["usage"] = json.loads(item.pop("usage_json"))
+            result.append(item)
+        return result
+
     def _active_decisions(self, db: sqlite3.Connection, operation: str, scope: str, target_id: str, *, now: str) -> list[sqlite3.Row]:
         rows = db.execute("SELECT * FROM budget_decisions WHERE operation=? AND target_scope=? AND target_id=? AND (expires_at IS NULL OR expires_at>?) AND consumed_at IS NULL", (operation, scope, target_id, now)).fetchall()
         return rows
+
+    def _record_reconciliation(self, db: sqlite3.Connection, *, run_id: str,
+                               decision: Mapping[str, Any], timestamp: str) -> None:
+        evidence = decision["payload"].get("evidence")
+        if not isinstance(evidence, Mapping):
+            raise ValueError("evidence reconciliation requires an evidence mapping")
+        normalized = evidence.get("usage", evidence.get("normalized_usage"))
+        usage = _values(normalized) if normalized is not None else {dimension: None for dimension in DIMENSIONS}
+        cursor = db.execute(
+            """INSERT OR IGNORE INTO reconciliation_facts
+               (run_id,decision_id,actor,reference,timestamp,mode,evidence_json,usage_json)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (run_id, decision["decision_id"], decision["actor"], decision["reference"],
+             timestamp, "evidence", json.dumps(dict(evidence), sort_keys=True),
+             json.dumps(usage, sort_keys=True)),
+        )
+        if cursor.rowcount == 0:
+            return
+        budget_ids = [budget_id for budget_id in
+                      (db.execute("SELECT ticket_budget_id,session_budget_id FROM runs WHERE run_id=?", (run_id,)).fetchone())
+                      if budget_id]
+        for budget_id in budget_ids:
+            db.execute(
+                "UPDATE budgets SET finalized_tokens=finalized_tokens+?,finalized_points=finalized_points+?,finalized_runs=finalized_runs+?,updated_at=? WHERE budget_id=?",
+                tuple(usage[d] or 0 for d in DIMENSIONS) + (timestamp, budget_id),
+            )
 
     def _record_decision(self, operation: str, *, decision_id: str | None, actor: str, reason: str,
                          target_scope: str, target_id: str, reference: str, payload: Mapping[str, Any],
@@ -289,6 +340,8 @@ class BudgetLedger:
                              "one_shot": one_shot}
                 if any(old.get(key) != value for key, value in requested.items()):
                     raise ValueError("decision_id already exists with different payload")
+                if operation == "resolve-unknown" and old["payload"]["mode"] == "evidence":
+                    self._record_reconciliation(db, run_id=target_id, decision=old, timestamp=old["timestamp"])
                 return old
             if operation in {"increase-limit", "allow-overrun"} and target_scope in {"ticket", "session"}:
                 if not db.execute("SELECT 1 FROM budgets WHERE scope=? AND owner_id=?", (target_scope, target_id)).fetchone():
@@ -309,6 +362,8 @@ class BudgetLedger:
             result = self._insert_decision(db, decision_id=decision_id, operation=operation, actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, policy=policy, payload=payload, expires_at=expires_at, one_shot=one_shot, timestamp=timestamp)
             self._refresh_effective_limits(db, now=timestamp)
             if operation == "resolve-unknown":
+                if payload["mode"] == "evidence":
+                    self._record_reconciliation(db, run_id=target_id, decision=result, timestamp=timestamp)
                 if one_shot:
                     db.execute("UPDATE budget_decisions SET consumed_at=? WHERE decision_id=?", (timestamp, decision_id))
                 self._recompute_status(db, [value for value in (run["ticket_budget_id"], run["session_budget_id"]) if value], now=timestamp)
@@ -317,8 +372,8 @@ class BudgetLedger:
     def increase_limit(self, *, actor: str, target_scope: str, target_id: str, dimension: str, delta: int,
                        reason: str, reference: str, expires_at: str | None = None, one_shot: bool = False,
                        decision_id: str | None = None) -> dict[str, Any]:
-        if dimension not in DIMENSIONS or not isinstance(delta, int) or isinstance(delta, bool) or delta < 0 or delta == 0:
-            raise ValueError("dimension must be valid and delta must be a positive integer")
+        if dimension not in DIMENSIONS or not isinstance(delta, int) or isinstance(delta, bool) or delta < 0:
+            raise ValueError("dimension must be valid and delta must be a non-negative integer")
         return self._record_decision("increase-limit", actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, payload={"dimension": dimension, "delta": delta}, expires_at=expires_at, one_shot=one_shot, decision_id=decision_id)
 
     def allow_overrun(self, *, actor: str, target_scope: str, target_id: str, dimensions: list[str] | tuple[str, ...],
