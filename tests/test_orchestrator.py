@@ -986,6 +986,63 @@ delivery_tickets:
     assert [child.mandatory for child in second_children] == [True, False]
 
 
+@pytest.mark.parametrize("session_status", ["draft", "active"])
+def test_technical_analysis_retry_preserves_selected_child_in_open_session(tmp_path: Path, session_status: str):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Session-aware onboarding", status="technical_analysis")
+    child = orchestrator.store.create(
+        "delivery", "story", "Story onboarding shell", parent=idea.id, status="selected_for_session"
+    )
+    session = orchestrator.session_store.create()
+    orchestrator.session_store.add_ticket(session, child.id)
+    if session_status == "active":
+        orchestrator.session_store.activate(session)
+
+    details = """```yaml
+implementation_required: true
+delivery_tickets:
+  - type: story
+    title: Story onboarding shell
+    description: Собрать базовый сценарий онбординга.
+```"""
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    orchestrator._apply_result(
+        load_workflow("discovery"),
+        idea.id,
+        load_workflow("discovery").by_id["technical_analysis"],
+        AgentResult(outcome="completed", summary="Готово", details=details),
+    )
+
+    assert orchestrator.store.get(child.id).status == "selected_for_session"
+
+
+def test_technical_analysis_retry_moves_legacy_selected_child_back_to_todo(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Legacy onboarding", status="technical_analysis")
+    child = orchestrator.store.create(
+        "delivery", "story", "Story onboarding shell", parent=idea.id, status="selected_for_session"
+    )
+    details = """```yaml
+implementation_required: true
+delivery_tickets:
+  - type: story
+    title: Story onboarding shell
+```"""
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    orchestrator._apply_result(
+        load_workflow("discovery"),
+        idea.id,
+        load_workflow("discovery").by_id["technical_analysis"],
+        AgentResult(outcome="completed", summary="Готово", details=details),
+    )
+
+    assert orchestrator.store.get(child.id).status == "todo"
+
+
 def test_technical_analysis_retry_removes_stale_delivery_children_from_implementation(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     idea = orchestrator.store.create("discovery", "idea", "New onboarding", status="technical_analysis")
