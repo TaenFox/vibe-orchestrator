@@ -36,6 +36,16 @@ def test_finalize_release_and_unknown_are_idempotent(tmp_path: Path):
     assert ledger.get_run("run-2")["state"] == "unknown"
 
 
+def test_unknown_blocks_point_limited_scope_and_reserve(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 100, "points": 10, "runs": 3})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.finalize("run-1", "unknown", {"points": None, "points_status": "unavailable"})
+    assert ledger.get_budget("ticket:DEL-1")["status"] == "blocked_unknown"
+    with pytest.raises(BudgetDenied):
+        ledger.reserve("run-2", "DEL-1", None, {"tokens": 1, "points": 1, "runs": 1})
+
+
 def test_reconcile_absent_and_ambiguous_pending_runs(tmp_path: Path):
     ledger = BudgetLedger(tmp_path, pending_timeout=0)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 20, "points": 20, "runs": 2})
@@ -69,6 +79,18 @@ def test_terminal_run_can_only_be_corrected_by_append_only_adjustment(tmp_path: 
     adjustment_id = ledger.adjustment("run-1", {"tokens": 2, "points": 1, "runs": 0}, reason="provider correction", author="operator")
     assert adjustment_id == 1
     assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"]["tokens"] == 7
+
+
+def test_adjustment_accepts_signed_delta_and_rejects_underflow_atomically(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 50, "points": 50, "runs": 5})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "points": 1, "runs": 1})
+    ledger.finalize("run-1", "completed", {"total_tokens": 5, "points": 1, "points_status": "available"})
+    ledger.adjustment("run-1", {"tokens": -1, "points": 0, "runs": 0}, reason="correction", author="operator")
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"]["tokens"] == 4
+    with pytest.raises(ValueError):
+        ledger.adjustment("run-1", {"tokens": -10, "points": 0, "runs": 0}, reason="bad correction", author="operator")
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"]["tokens"] == 4
 
 
 def test_rework_reserves_parent_ticket_scope_but_keeps_child_run_metadata(tmp_path: Path):

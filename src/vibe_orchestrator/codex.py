@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -96,7 +97,7 @@ class CodexRunner:
             reasoning_effort=profile["reasoning_effort"],
         )
 
-    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None) -> AgentResult:
+    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None, on_process_started: Callable[[str], None] | None = None) -> AgentResult:
         contract = contract or self.prepare_execution_contract(stage, run_id or ticket.active_run)
         run_id = contract.run_id
         run_dir = self.store.run_path(run_id)
@@ -134,6 +135,8 @@ class CodexRunner:
         manifest["command"] = cmd
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        if on_process_started:
+            on_process_started(run_id)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
         events_path.write_bytes(stdout or b"")
         token_usage = parse_codex_usage(stdout or b"")

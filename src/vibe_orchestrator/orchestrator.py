@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import uuid
@@ -48,6 +49,7 @@ class Orchestrator:
         while True:
             self._reap_finished()
             self._reconcile_tickets()
+            self.ledger.reconcile()
             await self._schedule_once()
             await asyncio.sleep(self.poll_interval)
 
@@ -131,8 +133,6 @@ class Orchestrator:
             except BudgetDenied:
                 log.info("запуск %s отклонен budget gate", ticket.id)
                 continue
-            if not reservation.legacy:
-                self.ledger.start(contract.run_id)
             ticket.status = candidate.target_status
             ticket.active_run = contract.run_id
             ticket.retry_after = None
@@ -148,7 +148,16 @@ class Orchestrator:
                 **ticket_prompt_metadata(ticket),
             )
             self.store.save(ticket)
-            task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace), name=ticket.id)
+            execution = self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace)
+            try:
+                task = asyncio.create_task(execution, name=ticket.id)
+            except Exception as exc:
+                execution.close()
+                if not reservation.legacy:
+                    self.ledger.release(contract.run_id)
+                self._record_failure(ticket, contract.run_id, candidate.target_status, exc, contract.history_metadata())
+                log.exception("сбой создания task для %s (%s)", ticket.id, ticket.type)
+                continue
             self.running[ticket.id] = task
             log.info("запущено %s (%s) -> %s", ticket.id, ticket.type, candidate.target_status)
 
@@ -185,10 +194,23 @@ class Orchestrator:
                 contract = self.runner.prepare_execution_contract(stage, contract)
             else:
                 metadata = contract.history_metadata()
-            if workspace is None:
-                result = await self.runner.run(ticket, stage, contract.run_id, contract=contract)
-            else:
-                result = await self.runner.run(ticket, stage, contract.run_id, contract=contract, workspace=workspace)
+            run_kwargs = {"contract": contract}
+            if workspace is not None:
+                run_kwargs["workspace"] = workspace
+            ledger_run = self.ledger.get_run(contract.run_id)
+            if ledger_run is not None:
+                run_kwargs["on_process_started"] = lambda started_run_id: self.ledger.start(started_run_id)
+            # Keep small test/delivery runner adapters source-compatible while
+            # making the production runner own the subprocess boundary.
+            parameters = inspect.signature(self.runner.run).parameters
+            if "on_process_started" not in parameters and not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                run_kwargs.pop("on_process_started", None)
+            result = await self.runner.run(ticket, stage, contract.run_id, **run_kwargs)
+            ledger_run = self.ledger.get_run(contract.run_id)
+            if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                # Compatibility adapters may not expose the subprocess hook;
+                # a returned result proves that execution passed its boundary.
+                self.ledger.start(contract.run_id)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
             log.info("завершено %s (%s): %s -> %s", ticket_id, self.store.get(ticket_id).type, result.outcome, self.store.get(ticket_id).status)
         except Exception as exc:
@@ -199,6 +221,9 @@ class Orchestrator:
             else:
                 run_id = contract.run_id
                 metadata = metadata or self._run_traceability_metadata(ticket, run_id, stage, fallback=contract.history_metadata())
+            ledger_run = self.ledger.get_run(run_id)
+            if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                self.ledger.release(run_id)
             self._record_failure(ticket, run_id, stage_id, exc, metadata)
             log.exception("сбой воркера для %s (%s)", ticket_id, ticket.type)
 
