@@ -92,10 +92,19 @@ def _artifact_links(project: Path, entry: dict[str, Any], *, source: bool = Fals
     allowed_root = run_root if source else runs_root
     if allowed_root not in candidate.parents and candidate != allowed_root:
         return {"path": artifact_path, "links": []}
+    # Non-source artifacts may be directories, but they still belong to the
+    # run named by the entry.  Reject a path from another run before computing
+    # its relative path from this run's root.
+    if not source and run_root not in candidate.parents and candidate != run_root:
+        return {"path": artifact_path, "links": []}
     files = _files_below(candidate, allowed_root, recursive=source)
     links = []
     for path in files:
-        relative = path.resolve().relative_to(allowed_root if source else candidate)
+        if source or candidate.is_dir():
+            relative_root = allowed_root if source else candidate
+        else:
+            relative_root = run_root
+        relative = path.resolve().relative_to(relative_root)
         links.append(_url_path(run_id, *relative.parts))
     return {"path": artifact_path, "links": links}
 
