@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -580,13 +581,13 @@ tech_debt_candidates:
 
 
 @pytest.mark.parametrize(
-    "manifest_json",
+    "manifest_metadata",
     [
-        '{"run_id":"run-other","ticket_id":"%s","stage":"technical_analysis"}',
-        '{"run_id":"run-source","stage":"technical_analysis"}',
+        {"run_id": "run-other", "ticket_id": "__SOURCE_ID__", "stage": "technical_analysis"},
+        {"run_id": "run-source", "stage": "technical_analysis"},
     ],
 )
-def test_technical_debt_source_mismatch_does_not_mutate_control_plane(tmp_path: Path, manifest_json: str):
+def test_technical_debt_source_mismatch_does_not_mutate_control_plane(tmp_path: Path, manifest_metadata: dict):
     orchestrator = Orchestrator(tmp_path)
     idea = orchestrator.store.create("discovery", "idea", "Reject foreign evidence", status="technical_analysis")
     idea.active_run = "run-contract-error"
@@ -594,7 +595,11 @@ def test_technical_debt_source_mismatch_does_not_mutate_control_plane(tmp_path: 
     orchestrator.store.save(idea)
     run_dir = tmp_path / ".vibe" / "runs" / "run-source"
     run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(manifest_json % idea.id, encoding="utf-8")
+    manifest = {
+        key: idea.id if value == "__SOURCE_ID__" else value
+        for key, value in manifest_metadata.items()
+    }
+    (run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
     before = orchestrator.store.get(idea.id).to_dict()
 
@@ -630,6 +635,7 @@ tech_debt_candidates:
         )
 
     assert caught.value.code == "TECH_DEBT_SOURCE_MISMATCH"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].source_run"
     assert orchestrator.store.get(idea.id).to_dict() == before
     assert orchestrator.store.children_of(idea.id) == []
 
