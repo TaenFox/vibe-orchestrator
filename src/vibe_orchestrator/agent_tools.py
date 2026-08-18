@@ -143,6 +143,8 @@ def _session_payload(store: TicketStore, session: DeliverySession) -> dict[str, 
         "completed_at": session.completed_at,
         "cancelled_at": session.cancelled_at,
         "participants": participants,
+        "membership_priorities": {ticket_id: session.membership_priorities.get(ticket_id, 100)
+                                   for ticket_id in participants},
         "audit_events": [dict(event) for event in session.audit_events],
         "effective_membership": effective,
         "membership_policy": session.membership_policy,
@@ -218,6 +220,32 @@ class AgentTicketTools(ReadOnlyAgentTools):
 WriteAgentTools = AgentTicketTools
 
 
+class AgentSessionTools(ReadOnlyAgentTools):
+    """Agent-safe draft-session membership mutations.
+
+    Lifecycle operations and the underlying SessionStore remain deliberately
+    unavailable through this boundary.
+    """
+
+    def add_to_session(self, session_id: str, ticket_id: str, *, actor: str, origin: str,
+                       priority: int | None = None) -> dict[str, Any]:
+        return _session_payload(self._store, self.sessions.agent_add_ticket(
+            session_id, ticket_id, actor=actor, origin=origin, priority=priority)) | {
+                "contract_version": "agent.session.write.v1"}
+
+    def remove_from_session(self, session_id: str, ticket_id: str, *, actor: str,
+                            origin: str) -> dict[str, Any]:
+        return _session_payload(self._store, self.sessions.agent_remove_ticket(
+            session_id, ticket_id, actor=actor, origin=origin)) | {
+                "contract_version": "agent.session.write.v1"}
+
+    def update_session_membership(self, session_id: str, members: list[dict[str, Any]], *,
+                                  actor: str, origin: str) -> dict[str, Any]:
+        return _session_payload(self._store, self.sessions.agent_update_membership(
+            session_id, members, actor=actor, origin=origin)) | {
+                "contract_version": "agent.session.write.v1"}
+
+
 def create_ticket(project: Path, *, actor: str, **data: Any) -> dict[str, Any]:
     return AgentTicketTools(project, actor=actor).create_ticket(**data)
 
@@ -240,3 +268,21 @@ def list_sessions(project: Path, **filters: Any) -> dict[str, Any]:
 
 def get_session(project: Path, session_id: str) -> dict[str, Any]:
     return ReadOnlyAgentTools(project).get_session(session_id)
+
+
+def add_to_session(project: Path, session_id: str, ticket_id: str, *, actor: str,
+                   origin: str, priority: int | None = None) -> dict[str, Any]:
+    return AgentSessionTools(project).add_to_session(session_id, ticket_id, actor=actor,
+                                                     origin=origin, priority=priority)
+
+
+def remove_from_session(project: Path, session_id: str, ticket_id: str, *, actor: str,
+                        origin: str) -> dict[str, Any]:
+    return AgentSessionTools(project).remove_from_session(session_id, ticket_id, actor=actor,
+                                                          origin=origin)
+
+
+def update_session_membership(project: Path, session_id: str, members: list[dict[str, Any]], *,
+                              actor: str, origin: str) -> dict[str, Any]:
+    return AgentSessionTools(project).update_session_membership(session_id, members, actor=actor,
+                                                                origin=origin)

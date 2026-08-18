@@ -2,9 +2,63 @@ from pathlib import Path
 
 import pytest
 
-from vibe_orchestrator.agent_tools import AgentTicketTools, ReadOnlyAgentTools
+from vibe_orchestrator.agent_tools import AgentSessionTools, AgentTicketTools, ReadOnlyAgentTools
 from vibe_orchestrator.control import DeliverySessionStore
 from vibe_orchestrator.tickets import TicketStore, TicketWriteConflict, TicketWriteError, TicketWriteService
+
+
+def test_agent_session_membership_write_is_ordered_prioritized_and_audited(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    first = store.create("delivery", "story", "First")
+    second = store.create("delivery", "task", "Second")
+    session = DeliverySessionStore(tmp_path).create("Release")
+    tools = AgentSessionTools(tmp_path)
+
+    result = tools.update_session_membership(session.id, [
+        {"ticket_id": second.id, "position": 1, "priority": 20},
+        {"ticket_id": first.id, "position": 0, "priority": 5},
+    ], actor="agent-1", origin="run-1")
+    assert result["contract_version"] == "agent.session.write.v1"
+    assert result["participants"] == [first.id, second.id]
+    assert result["membership_priorities"] == {first.id: 5, second.id: 20}
+    assert result["audit_events"][-1]["actor"] == "agent-1"
+    assert result["audit_events"][-1]["origin"] == "run-1"
+
+    replay = tools.update_session_membership(session.id, [
+        {"ticket_id": first.id, "position": 0, "priority": 5},
+        {"ticket_id": second.id, "position": 1, "priority": 20},
+    ], actor="agent-1", origin="run-1")
+    assert len(replay["audit_events"]) == len(result["audit_events"])
+    loaded = DeliverySessionStore(tmp_path).get(session.id)
+    assert loaded.ticket_ids == [first.id, second.id]
+    assert loaded.membership_priorities == {first.id: 5, second.id: 20}
+
+
+def test_agent_session_membership_rejects_invalid_full_replacement_without_write(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    first = store.create("delivery", "story", "First")
+    missing_dependency = "DEL-MISSING"
+    blocked = store.create("delivery", "task", "Blocked")
+    blocked.blocked_by = [missing_dependency]
+    store.save(blocked)
+    session = DeliverySessionStore(tmp_path).create("Release")
+    DeliverySessionStore(tmp_path).add(session.id, first.id, store)
+    tools = AgentSessionTools(tmp_path)
+    before = DeliverySessionStore(tmp_path).get(session.id).to_dict()
+
+    with pytest.raises(ValueError, match="Unknown dependency"):
+        tools.update_session_membership(session.id, [
+            {"ticket_id": first.id}, {"ticket_id": blocked.id},
+        ], actor="agent-1", origin="run-1")
+    after = DeliverySessionStore(tmp_path).get(session.id)
+    assert after.to_dict() == before
+
+    active = DeliverySessionStore(tmp_path)
+    active.activate(session.id, store)
+    with pytest.raises(ValueError, match="only be changed in draft"):
+        tools.add_to_session(session.id, first.id, actor="agent-1", origin="run-1")
 
 
 def test_agent_ticket_queries_are_filtered_bounded_and_read_only(tmp_path: Path):

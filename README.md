@@ -205,6 +205,8 @@ UI проверяется регрессионными тестами для Dis
 объемов данных. Для MVP приемлемы локальные очереди и ручная проверка; при росте
 числа тикетов потребуется отдельная оптимизация хранилища и обновления по diff.
 
+## Управляемые Delivery-сессии
+
 Управляемые сессии можно создавать и изменять через CLI:
 
 ```bash
@@ -350,6 +352,40 @@ control-plane состояния. `list_tickets` поддерживает фил
 При наличии непустого `source_artifacts` он имеет приоритет над
 `source_artifact_path`. Запросы используют положительные integer limits с верхними
 bounds, не вызывают init/save/migration и не меняют ticket YAML.
+
+## Write tools / Agent write boundary
+
+Агентский контракт `agent.session.write.v1` добавляет только безопасные операции
+составом draft-сессии: `add_to_session`, `remove_from_session` и
+`update_session_membership`. Они требуют непустые `actor` и `origin`, проверяют
+существование Delivery story/task/bug/rework, отсутствие дублей и конфликтов с
+другой открытой сессией. Завершённые тикеты, тикеты с незавершёнными
+`blocked_by` и неизвестными dependency отвергаются; зависимости и lifecycle
+тикета при этом не изменяются.
+
+`update_session_membership` атомарно заменяет полный состав. Элементы имеют
+`ticket_id`, необязательные уникальные неотрицательные `position` и `priority`;
+порядок сохраняется в `ticket_ids`, а `membership_priorities` хранится отдельно
+от `Ticket.priority` (legacy YAML без этого поля читаются с default `100`).
+Успешная запись добавляет append-only audit event с `actor`, `origin`, временем,
+`before`, `after` и `changed_fields`; повтор без изменений события не создаёт.
+Запись выполняется под `sessions.lock` через atomic tempfile/replace, поэтому
+ошибка валидации не оставляет частичного состава.
+
+Агенты не получают `activate`, `complete` или `cancel` и не могут менять active,
+completed или cancelled session. Автоматический Delivery rework по-прежнему
+наследуется в active session через privileged путь оркестратора; ручные write
+tools этот путь не вызывают и active membership не редактируют.
+
+Операции доступны Python-обёртками в `AgentSessionTools` и transport-маршрутом
+`/api/agent/sessions/<id>/add`, `/remove` и `/membership` (PATCH или POST).
+
+## Корректирующая работа
+
+Rework, созданный оркестратором для Delivery-родителя, наследует активную
+сессию через `SessionStore.inherit_ticket`; повторное наследование идемпотентно.
+Агентские tools состава не создают rework и не могут вручную расширить active
+сессию, поэтому корректирующая работа не выпадает из scheduler membership.
 
 ## Конфигурация процессов
 

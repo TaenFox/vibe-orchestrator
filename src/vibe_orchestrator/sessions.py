@@ -41,6 +41,9 @@ class DeliverySession:
     schema_version: int = SCHEMA_VERSION
     status: str = "draft"
     ticket_ids: list[str] = field(default_factory=list)
+    # Optional metadata introduced for agent membership writes.  An empty map
+    # is the legacy representation and means default priority 100.
+    membership_priorities: dict[str, int] = field(default_factory=dict)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     started_at: str | None = None
@@ -58,6 +61,7 @@ class DeliverySession:
         payload.setdefault("schema_version", 1)
         payload.setdefault("status", "draft")
         payload.setdefault("ticket_ids", [])
+        payload.setdefault("membership_priorities", {})
         had_created_at = bool(payload.get("created_at"))
         payload.setdefault("created_at", now_iso())
         # Legacy documents used ``created_at`` as their only lifecycle
@@ -240,6 +244,63 @@ class SessionStore:
         self._audit(session, "ticket_added", ticket_id=ticket_id)
         self.save(session)
 
+    def agent_add_ticket(self, session_id: str, ticket_id: str, *, actor: str, origin: str,
+                         priority: int | None = None) -> DeliverySession:
+        session = self.get(session_id)
+        self._validate_agent_identity(actor, origin)
+        self._require_draft(session)
+        if ticket_id in session.ticket_ids:
+            raise ValueError(f"Ticket already belongs to session: {ticket_id}")
+        priorities = dict(session.membership_priorities)
+        priorities[ticket_id] = self._validate_membership_priority(priority if priority is not None else 100)
+        return self.agent_update_membership(session_id, [{"ticket_id": item, "priority": priorities.get(item, 100)}
+                                                          for item in [*session.ticket_ids, ticket_id]],
+                                            actor=actor, origin=origin, _event="ticket_added_by_agent",
+                                            _ticket_ids=[ticket_id])
+
+    def agent_remove_ticket(self, session_id: str, ticket_id: str, *, actor: str, origin: str) -> DeliverySession:
+        session = self.get(session_id)
+        self._validate_agent_identity(actor, origin)
+        self._require_draft(session)
+        if ticket_id not in session.ticket_ids:
+            raise KeyError(ticket_id)
+        members = [{"ticket_id": item, "priority": session.membership_priorities.get(item, 100)}
+                   for item in session.ticket_ids if item != ticket_id]
+        return self.agent_update_membership(session_id, members, actor=actor, origin=origin,
+                                            _event="ticket_removed_by_agent", _ticket_ids=[ticket_id])
+
+    def agent_update_membership(self, session_id: str, members: list[dict[str, Any]], *, actor: str,
+                                origin: str, _event: str = "membership_updated_by_agent",
+                                _ticket_ids: list[str] | None = None) -> DeliverySession:
+        self._validate_agent_identity(actor, origin)
+        if not isinstance(members, list):
+            raise ValueError("members must be a list")
+        current = self.get(session_id)
+        self._require_draft(current)
+        members = [dict(item, priority=item.get("priority", current.membership_priorities.get(item.get("ticket_id"), 100)))
+                   for item in members]
+        normalized = self._normalize_agent_members(members)
+        ticket_ids = [item["ticket_id"] for item in normalized]
+        self._validate_membership(current, ticket_ids, validate_dependencies=True)
+        priorities = {item["ticket_id"]: item["priority"] for item in normalized}
+        current_priorities = {item: current.membership_priorities.get(item, 100)
+                              for item in current.ticket_ids}
+        if current.ticket_ids == ticket_ids and current_priorities == priorities:
+            return current
+        candidate = DeliverySession.from_dict(current.to_dict())
+        before = {"ticket_ids": list(current.ticket_ids),
+                  "membership_priorities": {item: current.membership_priorities.get(item, 100)
+                                             for item in current.ticket_ids}}
+        candidate.ticket_ids = ticket_ids
+        candidate.membership_priorities = priorities
+        after = {"ticket_ids": list(ticket_ids), "membership_priorities": dict(priorities)}
+        changed = [field for field in ("ticket_ids", "membership_priorities") if before[field] != after[field]]
+        self._audit(candidate, _event, timestamp=now_iso(), actor=actor.strip(), origin=origin.strip(),
+                    session_id=session_id, **({"ticket_id": _ticket_ids[0]} if _ticket_ids and len(_ticket_ids) == 1 else {}),
+                    ticket_ids=list(ticket_ids), before=before, after=after, changed_fields=changed)
+        self.save(candidate)
+        return candidate
+
     def inherit_ticket(self, session: DeliverySession, ticket_id: str, *, source_ticket: str) -> None:
         """Add a rework child to the active session of its source ticket."""
         if session.status != "active":
@@ -338,6 +399,12 @@ class SessionStore:
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
                 raise ValueError("budget limits must be non-negative integers or null")
         self._validate_membership(session, session.ticket_ids, allow_active_membership_extension=allow_active_membership_extension)
+        if not isinstance(session.membership_priorities, dict):
+            raise ValueError("membership_priorities must be an object")
+        if set(session.membership_priorities) - set(session.ticket_ids):
+            raise ValueError("membership_priorities contains unknown ticket")
+        for priority in session.membership_priorities.values():
+            self._validate_membership_priority(priority)
         self._validate_lifecycle(session)
         if session.status in OPEN_STATUSES:
             for other in self.list():
@@ -464,7 +531,8 @@ class SessionStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
-    def _validate_membership(self, session: DeliverySession, ticket_ids: list[str], *, allow_active_membership_extension: bool = False) -> None:
+    def _validate_membership(self, session: DeliverySession, ticket_ids: list[str], *, allow_active_membership_extension: bool = False,
+                             validate_dependencies: bool = False) -> None:
         if not isinstance(ticket_ids, list):
             raise TypeError("ticket_ids must be a list")
         if session.status != "draft" and not allow_active_membership_extension and ticket_ids != session.ticket_ids:
@@ -480,6 +548,47 @@ class SessionStore:
                 raise ValueError(f"Unknown ticket: {ticket_id}") from exc
             if ticket.process != "delivery" or ticket.type not in DELIVERY_TICKET_TYPES:
                 raise ValueError(f"Invalid delivery ticket type: {ticket.type!r}")
+            if self.ticket_store.is_done(ticket):
+                raise ValueError(f"A completed ticket cannot belong to a session: {ticket_id}")
+            for dependency_id in ticket.blocked_by if validate_dependencies else ():
+                try:
+                    dependency = self.ticket_store.get(dependency_id)
+                except KeyError as exc:
+                    raise ValueError(f"Unknown dependency: {dependency_id}") from exc
+                if not self.ticket_store.is_done(dependency):
+                    raise ValueError(f"Ticket is blocked by unfinished dependency: {ticket_id}")
+
+    @staticmethod
+    def _validate_agent_identity(actor: Any, origin: Any) -> None:
+        if not isinstance(actor, str) or not actor.strip() or len(actor.strip()) > 200:
+            raise ValueError("actor must be a non-empty string of at most 200 characters")
+        if not isinstance(origin, str) or not origin.strip() or len(origin.strip()) > 200:
+            raise ValueError("origin must be a non-empty string of at most 200 characters")
+
+    @staticmethod
+    def _validate_membership_priority(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("membership priority must be a non-negative integer")
+        return value
+
+    def _normalize_agent_members(self, members: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized = []
+        positions = []
+        for index, item in enumerate(members):
+            if not isinstance(item, dict) or not isinstance(item.get("ticket_id"), str) or not item["ticket_id"].strip():
+                raise ValueError("members must contain ticket_id")
+            ticket_id = item["ticket_id"].strip()
+            priority = self._validate_membership_priority(item.get("priority", 100))
+            position = item.get("position", index)
+            if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+                raise ValueError("position must be a non-negative integer")
+            if position in positions:
+                raise ValueError("position must be unique")
+            positions.append(position)
+            normalized.append({"ticket_id": ticket_id, "priority": priority, "position": position})
+        if len({item["ticket_id"] for item in normalized}) != len(normalized):
+            raise ValueError("Duplicate ticket IDs are not allowed")
+        return sorted(normalized, key=lambda item: item["position"])
 
     @staticmethod
     def _require_draft(session: DeliverySession) -> None:
