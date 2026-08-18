@@ -455,12 +455,14 @@ class Orchestrator:
         )
         for existing in self.store.children_of(parent.id, process=parent.process):
             if existing.type == child_type and existing.description == description:
+                if child_type == "rework":
+                    self._inherit_rework_session(parent, existing)
                 return existing
         correction_status = next(
             (candidate.id for candidate in self.workflows[parent.process].stages if candidate.kind == "queue" and candidate.pull_to == stage.id),
             stage.id,
         )
-        return self.store.create(
+        child = self.store.create(
             parent.process,
             child_type,
             title,
@@ -472,6 +474,23 @@ class Orchestrator:
             correction_stage=stage.id if child_type == "correction" else None,
             rework_stage=stage.id if child_type == "rework" else None,
         )
+        if child_type == "rework":
+            self._inherit_rework_session(parent, child)
+        return child
+
+    def _inherit_rework_session(self, parent: Ticket, rework: Ticket) -> None:
+        if parent.process != "delivery" or rework.type != "rework":
+            return
+        for session in self.session_store.list():
+            if session.status != "active":
+                continue
+            if parent.id not in self.session_store.effective_ticket_ids(session):
+                continue
+            try:
+                self.session_store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+            except (KeyError, TypeError, ValueError) as exc:
+                log.error("не удалось унаследовать сессию для %s от %s: %s", rework.id, parent.id, exc)
+            return
 
     def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
         spec = _extract_structured_payload(details).get("delivery_tickets", [])
