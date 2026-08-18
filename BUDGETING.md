@@ -45,8 +45,8 @@ legacy или incomplete output получает `source=unknown`; значен�
 
 `BudgetLedger` открывает `.vibe/budgets/ledger.sqlite3`, включает foreign keys,
 WAL, busy timeout и использует `BEGIN IMMEDIATE` для операций записи. Таблицы
-`budgets`, `runs`, `adjustments` и `metadata` хранят scope aggregates, immutable
-run state и append-only corrections. Отсутствующий budget record или
+`budgets`, `runs`, `adjustments`, `reconciliation_facts` и `metadata` хранят scope aggregates, immutable
+run state и append-only corrections/evidence facts. Отсутствующий budget record или
 `mode=legacy` означает bypass без synthetic ledger run.
 
 ## Термины, scopes и ownership
@@ -422,11 +422,25 @@ reference, versioned policy, permission, payload и ровно одну сема
 конфликтующий payload отклоняется.
 
 `increase-limit` увеличивает effective limit только для будущего admission и
-не освобождает reservation. `allow-overrun` принимает только явно названные
+не освобождает reservation. Нулевой `delta` разрешён как обычное аудируемое
+no-op решение: оно не меняет effective limit, available или aggregates.
+Отрицательный, boolean или нецелый delta отклоняется до создания audit row.
+`allow-overrun` принимает только явно названные
 dimensions и ticket/session/run target; wildcard scope запрещён, лимит не
 увеличивается. `resolve-unknown` адресует только конкретный run и принимает
 подтверждаемое evidence/reference либо отдельную accepted estimate с confidence;
 raw provider usage остаётся unknown и immutable.
+
+Evidence-resolution дополнительно создаёт в той же транзакции ровно один
+append-only `reconciliation_facts` для `decision_id`. Fact содержит `run_id`,
+`decision_id`, actor, reference, timestamp, `mode=evidence`, неизменяемый
+`evidence_json` и нормализованный `usage_json` с dimensions `tokens`, `points`,
+`runs` (либо null, если evidence не содержит normalized usage). Ненулевой
+normalized usage увеличивает `finalized` агрегаты, но не переписывает `runs.state`
+или `runs.actual_json`: исходный unknown остаётся raw audit fact. Уникальность
+`decision_id` делает повтор authorization/replay идемпотентным и не допускает
+повторного применения aggregate delta; ошибка валидации откатывает decision и fact
+вместе.
 
 ### Изменения DEL-640D25
 
