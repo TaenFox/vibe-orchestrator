@@ -67,6 +67,31 @@ def test_no_active_session_keeps_legacy_selected_tickets_schedulable():
     assert select_candidates(workflow, [legacy], set())[0].ticket.id == "LEGACY"
 
 
+def test_no_active_session_excludes_deferred_technical_debt():
+    workflow = load_workflow("delivery")
+    debt = ticket("DEBT", "selected_for_session")
+    debt.technical_debt_deferred = True
+
+    assert select_candidates(workflow, [debt], set()) == []
+
+
+def test_deferred_technical_debt_requires_active_session_membership():
+    workflow = load_workflow("delivery")
+    debt = ticket("DEBT", "selected_for_session")
+    debt.technical_debt_deferred = True
+
+    assert select_candidates(workflow, [debt], set(), session_participants=set()) == []
+    assert [candidate.ticket.id for candidate in select_candidates(workflow, [debt], set(), session_participants={"DEBT"})] == ["DEBT"]
+
+
+def test_legacy_ticket_without_marker_loads_schedulable():
+    workflow = load_workflow("delivery")
+    legacy = Ticket.from_dict({"id": "LEGACY", "process": "delivery", "type": "task", "title": "Legacy", "status": "selected_for_session"})
+
+    assert legacy.technical_debt_deferred is False
+    assert select_candidates(workflow, [legacy], set())[0].ticket.id == "LEGACY"
+
+
 def test_active_legacy_session_blocks_external_rework_even_when_wip_exempt():
     workflow = load_workflow("delivery")
     rework = ticket("REWORK", "selected_for_session", wip_exempt=True)

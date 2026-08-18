@@ -35,6 +35,11 @@ def select_candidates(
     for ticket in tickets:
         if ticket.id in running_ids or ticket.active_run or ticket.blocked_by:
             continue
+        # Technical-debt children are deferred until explicitly included in
+        # an active Delivery session. Preserve legacy scheduling for ordinary
+        # tickets when session_participants is None.
+        if ticket.technical_debt_deferred and session_participants is None:
+            continue
         source = by_id.get(ticket.status)
         if not source:
             continue
