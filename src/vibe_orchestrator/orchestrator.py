@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import uuid
@@ -19,6 +20,7 @@ from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
 from .token_usage import unknown_token_usage
+from .budget_ledger import BudgetDenied, BudgetLedger
 
 log = logging.getLogger("vibe")
 
@@ -37,6 +39,7 @@ class Orchestrator:
         self.max_agents = initial_worker_limit
         self._last_worker_limit = initial_worker_limit
         self.tree_manager = GitTreeManager(project, self.store)
+        self.ledger = BudgetLedger(project)
         self.running: dict[str, asyncio.Task[None]] = {}
 
     async def run_forever(self) -> None:
@@ -46,6 +49,7 @@ class Orchestrator:
         while True:
             self._reap_finished()
             self._reconcile_tickets()
+            self.ledger.reconcile()
             await self._schedule_once()
             await asyncio.sleep(self.poll_interval)
 
@@ -117,6 +121,18 @@ class Orchestrator:
                 self._record_failure(ticket, run_id, candidate.target_status, exc, metadata)
                 log.exception("сбой подготовки запуска для %s (%s)", ticket.id, ticket.type)
                 continue
+            session_id = next((s.id for s in self.session_store.list() if s.status == "active" and ticket.id in s.ticket_ids), None)
+            attempt_kind = "rework" if ticket.type == "rework" else "initial"
+            try:
+                reservation = self.ledger.reserve(
+                    contract.run_id, ticket.id, session_id, self._planned_budget(ticket),
+                    attempt_kind=attempt_kind,
+                    parent_ticket_id=ticket.parent,
+                    budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
+                )
+            except BudgetDenied:
+                log.info("запуск %s отклонен budget gate", ticket.id)
+                continue
             ticket.status = candidate.target_status
             ticket.active_run = contract.run_id
             ticket.retry_after = None
@@ -132,7 +148,16 @@ class Orchestrator:
                 **ticket_prompt_metadata(ticket),
             )
             self.store.save(ticket)
-            task = asyncio.create_task(self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace), name=ticket.id)
+            execution = self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace)
+            try:
+                task = asyncio.create_task(execution, name=ticket.id)
+            except Exception as exc:
+                execution.close()
+                if not reservation.legacy:
+                    self.ledger.release(contract.run_id)
+                self._record_failure(ticket, contract.run_id, candidate.target_status, exc, contract.history_metadata())
+                log.exception("сбой создания task для %s (%s)", ticket.id, ticket.type)
+                continue
             self.running[ticket.id] = task
             log.info("запущено %s (%s) -> %s", ticket.id, ticket.type, candidate.target_status)
 
@@ -142,6 +167,12 @@ class Orchestrator:
             log.info("лимит воркеров изменен: %s -> %s", self._last_worker_limit, worker_limit)
             self._last_worker_limit = worker_limit
         return worker_limit
+
+    @staticmethod
+    def _planned_budget(ticket: Ticket) -> dict[str, int | None]:
+        budget = ticket.context.get("budget", {}) if isinstance(ticket.context, dict) else {}
+        planned = budget.get("planned", {}) if isinstance(budget, dict) else {}
+        return {"tokens": planned.get("tokens"), "points": planned.get("points"), "runs": planned.get("runs", 1)}
 
     def _stage_for_ticket(self, workflow: Workflow, stage: Stage, ticket: Ticket) -> Stage:
         if workflow.id != "process_management" or stage.id != "in_progress":
@@ -163,10 +194,23 @@ class Orchestrator:
                 contract = self.runner.prepare_execution_contract(stage, contract)
             else:
                 metadata = contract.history_metadata()
-            if workspace is None:
-                result = await self.runner.run(ticket, stage, contract.run_id, contract=contract)
-            else:
-                result = await self.runner.run(ticket, stage, contract.run_id, contract=contract, workspace=workspace)
+            run_kwargs = {"contract": contract}
+            if workspace is not None:
+                run_kwargs["workspace"] = workspace
+            ledger_run = self.ledger.get_run(contract.run_id)
+            if ledger_run is not None:
+                run_kwargs["on_process_started"] = lambda started_run_id: self.ledger.start(started_run_id)
+            # Keep small test/delivery runner adapters source-compatible while
+            # making the production runner own the subprocess boundary.
+            parameters = inspect.signature(self.runner.run).parameters
+            if "on_process_started" not in parameters and not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                run_kwargs.pop("on_process_started", None)
+            result = await self.runner.run(ticket, stage, contract.run_id, **run_kwargs)
+            ledger_run = self.ledger.get_run(contract.run_id)
+            if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                # Compatibility adapters may not expose the subprocess hook;
+                # a returned result proves that execution passed its boundary.
+                self.ledger.start(contract.run_id)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
             log.info("завершено %s (%s): %s -> %s", ticket_id, self.store.get(ticket_id).type, result.outcome, self.store.get(ticket_id).status)
         except Exception as exc:
@@ -177,6 +221,9 @@ class Orchestrator:
             else:
                 run_id = contract.run_id
                 metadata = metadata or self._run_traceability_metadata(ticket, run_id, stage, fallback=contract.history_metadata())
+            ledger_run = self.ledger.get_run(run_id)
+            if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                self.ledger.release(run_id)
             self._record_failure(ticket, run_id, stage_id, exc, metadata)
             log.exception("сбой воркера для %s (%s)", ticket_id, ticket.type)
 
@@ -208,6 +255,12 @@ class Orchestrator:
         ticket.last_outcome = "failed"
         ticket.last_summary = str(exc)
         self.store.save(ticket)
+        self._ledger_finalize(run_id, "failed")
+
+    def _ledger_finalize(self, run_id: str | None, outcome: str, usage: dict | None = None) -> None:
+        if not run_id or self.ledger.get_run(run_id) is None:
+            return
+        self.ledger.finalize(run_id, outcome if outcome in {"completed", "failed", "unknown"} else "failed", usage or self._run_token_usage(run_id))
 
     def _apply_result(
         self,
@@ -268,6 +321,7 @@ class Orchestrator:
                 token_usage=result.token_usage or self._run_token_usage(active_run),
                 **metadata,
             )
+            self._ledger_finalize(active_run, result.outcome, result.token_usage)
         ticket.active_run = None
         self._handle_follow_up(ticket, workflow, stage, result)
         self.store.save(ticket)
