@@ -102,6 +102,22 @@ def test_agent_ticket_file_artifacts_preserve_path_from_run_root(
     assert entry["artifacts"] == {"path": artifact_path, "links": [expected_link]}
 
 
+def test_agent_ticket_artifact_from_another_run_is_ignored(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Cross-run artifact")
+    artifact = tmp_path / ".vibe" / "runs" / "run-2" / "result.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("result", encoding="utf-8")
+    artifact_path = ".vibe/runs/run-2/result.json"
+    ticket.run_history.append({"run_id": "run-1", "artifacts_path": artifact_path})
+    store.save(ticket)
+
+    entry = ReadOnlyAgentTools(tmp_path).get_ticket(ticket.id)["run_history"][-1]
+
+    assert entry["artifacts"] == {"path": artifact_path, "links": []}
+
+
 def test_agent_ticket_source_artifact_precedence_and_invalid_paths(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()
