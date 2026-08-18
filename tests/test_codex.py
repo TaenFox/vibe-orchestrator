@@ -85,6 +85,58 @@ def test_contract_parser_deduplicates_incremental_and_uses_latest_cumulative_sna
     assert parse_codex_usage(cumulative, expected_run_id="r", model="m", reasoning_effort="low")["total_tokens"] == 16
 
 
+def test_contract_parser_uses_stable_event_ref_when_request_id_repeats():
+    def event(event_id, input_tokens, output_tokens):
+        return json.dumps({
+            "type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00",
+            "run_id": "r", "model": "m", "reasoning_effort": "low",
+            "provider_event_id": event_id, "provider_request_id": "req-1",
+            "usage_semantics": "incremental",
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        })
+
+    usage = parse_codex_usage(
+        "\n".join((event("evt-1", 10, 2), event("evt-2", 5, 1))),
+        expected_run_id="r", model="m", reasoning_effort="low",
+    )
+
+    assert usage["input_tokens"] == 15
+    assert usage["output_tokens"] == 3
+    assert usage["total_tokens"] == 18
+    assert usage["usage_ref"] == "evt-2"
+    assert usage["provider_event_id"] == "evt-2"
+    assert usage["provider_request_id"] == "req-1"
+
+
+def test_contract_parser_rejects_request_only_incremental_event():
+    event = json.dumps({
+        "type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00",
+        "run_id": "r", "model": "m", "reasoning_effort": "low",
+        "provider_request_id": "req-1", "usage_semantics": "incremental",
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+    })
+
+    usage = parse_codex_usage(event, expected_run_id="r", model="m", reasoning_effort="low")
+
+    assert usage["source"] == "unknown"
+
+
+def test_contract_parser_keeps_explicit_usage_ref_without_event_id():
+    event = json.dumps({
+        "type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00",
+        "run_id": "r", "model": "m", "reasoning_effort": "low",
+        "usage_ref": "snapshot-1", "provider_request_id": "req-1",
+        "usage_semantics": "incremental", "usage": {"input_tokens": 10, "output_tokens": 2},
+    })
+
+    usage = parse_codex_usage(event, expected_run_id="r", model="m", reasoning_effort="low")
+
+    assert usage["source"] == "provider"
+    assert usage["usage_ref"] == "snapshot-1"
+    assert usage["provider_event_id"] is None
+    assert usage["provider_request_id"] == "req-1"
+
+
 def test_contract_parser_rejects_cumulative_regression_and_mixed_semantics():
     def event(ref, semantics, input_tokens):
         return json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "r", "model": "m", "reasoning_effort": "low", "usage_ref": ref, "usage_semantics": semantics, "usage": {"input_tokens": input_tokens, "output_tokens": 1}})

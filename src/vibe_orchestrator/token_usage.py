@@ -105,7 +105,9 @@ def parse_codex_usage(
         run_value = _event_value(event, usage, "run_id", "execution_run_id")
         event_model = _event_value(event, usage, "model")
         event_reasoning = _event_value(event, usage, "reasoning_effort")
-        usage_ref = _event_value(event, usage, "usage_ref", "provider_event_id", "provider_request_id")
+        usage_ref = _event_value(event, usage, "usage_ref")
+        if not isinstance(usage_ref, str) or not usage_ref.strip():
+            usage_ref = _event_value(event, usage, "provider_event_id")
         semantics = _event_value(event, usage, "usage_semantics")
         input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
         if (run_value != expected_run_id or event_model != model or event_reasoning != reasoning_effort
@@ -124,8 +126,8 @@ def parse_codex_usage(
             "total_tokens": total, "model": model, "reasoning_effort": reasoning_effort,
             "usage_ref": usage_ref.strip(), "usage_semantics": semantics,
             "captured_at": event_captured_at,
-            "provider_event_id": event.get("provider_event_id"),
-            "provider_request_id": event.get("provider_request_id"),
+            "provider_event_id": _event_value(event, usage, "provider_event_id"),
+            "provider_request_id": _event_value(event, usage, "provider_request_id"),
         })
     if not candidates:
         return unknown_token_usage(run_id=expected_run_id, model=model, reasoning_effort=reasoning_effort)
