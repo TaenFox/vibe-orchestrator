@@ -4,7 +4,7 @@ from vibe_orchestrator.cli import build_parser
 from vibe_orchestrator.config import load_all_workflows
 from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 from vibe_orchestrator.tickets import TicketStore
-from vibe_orchestrator.ui import render_board
+from vibe_orchestrator.ui import AUTO_REFRESH_SECONDS, render_board
 
 
 def test_cli_help_is_localized():
@@ -67,7 +67,7 @@ def test_ui_board_uses_russian_labels(tmp_path: Path):
     assert "setInterval(refresh" in html
     assert "document.querySelector('details[open]')" in html
     assert "document.activeElement?.matches('input, select, textarea')" in html
-    assert "частичное автообновление 5с" in html
+    assert f"частичное автообновление {AUTO_REFRESH_SECONDS}с" in html
     assert "Подробнее" in html
     assert "Показать детали тикета" in html
     assert "Родитель" in html

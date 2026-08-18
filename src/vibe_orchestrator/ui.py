@@ -27,89 +27,69 @@ CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-seri
 CSS = """:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#e6edf3;background:#0d1117}*{box-sizing:border-box}body{margin:0;overflow-x:hidden}header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid #30363d;position:sticky;top:0;background:#0d1117;z-index:2}header form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}header button{margin-top:0}input,select,textarea{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:5px;padding:6px;max-width:100%;font:inherit}input[type=number]{width:72px}.create-form{display:grid;gap:10px}.create-form input[name=title],.create-form textarea[name=description]{min-width:220px}.create-form textarea{min-height:90px;resize:vertical}.create-dialog{width:min(560px,calc(100vw - 24px));color:#e6edf3;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px}.create-dialog::backdrop{background:rgb(0 0 0 / 65%)}.create-dialog h2{margin:0}.create-dialog .form-actions{display:flex;gap:8px;justify-content:flex-end}.create-dialog label{display:grid;gap:4px}.create-dialog .hint{color:#8b949e;font-size:12px}a{color:#58a6ff;text-decoration:none}a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #f0c674;outline-offset:2px}.board-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid #30363d}.board{display:flex;gap:12px;padding:14px;align-items:flex-start;overflow-x:auto;min-height:calc(100vh - 120px)}.compact-group{display:flex;flex-direction:column;gap:8px;width:260px;min-width:260px}.compact-group>.column{width:100%;min-width:0}.column{width:260px;min-width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px}.column h3{font-size:13px;margin:0 0 10px;color:#8b949e;text-transform:uppercase}.card{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:10px;margin-bottom:9px}.card strong{display:block;font-size:14px;margin:4px 0;overflow-wrap:anywhere}.meta{color:#8b949e;font-size:12px}.badge{display:inline-block;border:1px solid #30363d;border-radius:999px;padding:2px 6px;font-size:11px;margin-right:4px}button{background:#238636;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;margin-top:8px}.summary{margin-top:7px;color:#c9d1d9;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}.details{margin-top:8px;border-top:1px solid #30363d;padding-top:8px}.details summary{cursor:pointer;color:#58a6ff;font-size:12px}.details-body{margin-top:8px;display:grid;gap:6px}.details-row{font-size:12px;color:#c9d1d9;white-space:pre-wrap;overflow-wrap:anywhere}.details-row .meta{display:block;margin-bottom:2px}.flat-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-items:start;overflow-x:hidden}.flat-list .column{width:auto;min-width:0}.board-empty{padding:24px;color:#8b949e}@media (max-width:700px){header{gap:10px;padding:10px}header form,.board-toolbar{width:100%}.create-dialog{padding:14px}.board{padding:10px;gap:8px}.compact-group{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}.column{width:min(260px,calc(100vw - 20px));min-width:min(260px,calc(100vw - 20px))}}"""
 # End merged UI styling.
 CSS += ".drawer-backdrop{position:fixed;inset:0;background:#0008;z-index:10}.ticket-drawer{position:fixed;top:0;right:0;width:min(560px,100vw);height:100vh;overflow-y:auto;background:#161b22;border-left:1px solid #30363d;padding:20px;z-index:11;box-shadow:-12px 0 30px #0008}.drawer-header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.drawer-header h2{margin:0;overflow-wrap:anywhere}.drawer-close{background:#30363d;margin:0}.drawer-section{border-top:1px solid #30363d;margin-top:16px;padding-top:12px}.drawer-section h3{font-size:12px;text-transform:uppercase;color:#8b949e;margin:0 0 8px}.drawer-description{white-space:pre-wrap;overflow-wrap:anywhere}.drawer-actions{display:flex;flex-wrap:wrap;gap:7px}.drawer-actions form{display:inline}.drawer-actions button{margin:0}.run-history{display:grid;gap:8px}.run-entry{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px}.run-entry.active-run{border-color:#f0c674}.run-entry a{display:inline-block;margin-top:4px}"
-AUTO_REFRESH_SECONDS = 5
+AUTO_REFRESH_SECONDS = 8
 AUTO_REFRESH_SCRIPT = f"""<script>
 (() => {{
   const key = 'vibe-board-state';
-  const storage = {{ get: () => {{ try {{ return sessionStorage.getItem(key) || '{{}}'; }} catch (_) {{ return '{{}}'; }} }}, set: value => {{ try {{ sessionStorage.setItem(key, value); }} catch (_) {{ /* storage can be disabled */ }} }} }};
+  const storage = {{ get: () => {{ try {{ return sessionStorage.getItem(key) || '{{}}'; }} catch (_) {{ return '{{}}'; }} }}, set: value => {{ try {{ sessionStorage.setItem(key, value); }} catch (_) {{}} }} }};
   const state = () => {{ try {{ return JSON.parse(storage.get()); }} catch (_) {{ return {{}}; }} }};
   const save = (extra = {{}}) => storage.set(JSON.stringify({{...state(), process: new URLSearchParams(location.search).get('process') || 'discovery', ...extra}}));
   const controls = () => [...document.querySelectorAll('input,select,textarea')];
-  const controlKey = (el) => el.dataset.boardStateKey || `${{el.form?.getAttribute('action') || ''}}:${{el.name || el.type || el.tagName.toLowerCase()}}`;
-  const inputState = () => controls().map(el => [controlKey(el), el.value]);
+  const controlKey = el => el.dataset.boardStateKey || `${{el.form?.getAttribute('action') || ''}}:${{el.name || el.type || el.tagName.toLowerCase()}}`;
   const detailsState = () => [...document.querySelectorAll('details[data-ticket-details]')].map(el => [el.dataset.ticketDetails, el.open]);
+  const remember = () => {{
+    const active = document.activeElement; const board = document.querySelector('.board');
+    const inputs = controls().map(el => [controlKey(el), el.value]);
+    save({{mode: document.querySelector('[data-board-mode]')?.value || 'compact', ticket: document.querySelector('.card[data-ticket].selected')?.dataset.ticket || state().ticket, boardScrollX: board?.scrollLeft || 0, scrollY: window.scrollY || document.scrollingElement?.scrollTop || 0, inputs, details: detailsState(), focus: active ? controls().indexOf(active) : -1}});
+  }};
   const restore = () => {{
-    const restored = state();
-    const savedInputs = new Map(restored.inputs || []);
+    const restored = state(); const savedInputs = new Map(restored.inputs || []); const savedDetails = new Map(restored.details || []);
     controls().forEach(el => {{ const value = savedInputs.get(controlKey(el)); if (value !== undefined && !el.matches(':focus')) el.value = value; }});
-    const savedDetails = new Map(restored.details || []);
     document.querySelectorAll('details[data-ticket-details]').forEach(el => {{ if (savedDetails.has(el.dataset.ticketDetails)) el.open = savedDetails.get(el.dataset.ticketDetails); }});
   }};
-  const remember = () => {{
-    const active = document.activeElement;
-    const board = document.querySelector('.board');
-    save({{mode: document.querySelector('[data-board-mode]')?.value || 'compact', ticket: document.querySelector('.card[data-ticket].selected')?.dataset.ticket || state().ticket, boardScrollX: board?.scrollLeft || 0, scrollY: window.scrollY || document.scrollingElement?.scrollTop || 0, inputs: inputState(), details: detailsState()}});
-    if (active) save({{focus: controls().indexOf(active)}});
+  let inFlight = false; let lastInteraction = 0;
+  const toggle = () => document.querySelector('[data-refresh-toggle]');
+  const updateToggle = () => {{ const paused = state().refreshPaused === true; const button = toggle(); if (button) {{ button.textContent = paused ? 'Обновление: пауза' : 'Обновление: включено'; button.setAttribute('aria-pressed', String(paused)); }} }};
+  const busy = force => {{
+    if (force) return false;
+    const drawer = document.querySelector('[data-ticket-drawer]');
+    return document.hidden || Date.now() - lastInteraction < 1200 || drawer && !drawer.hidden || document.querySelector('details[open]') || document.activeElement?.matches('input, select, textarea');
   }};
   const refresh = async (force = false) => {{
-    if (document.hidden || (!force && (document.querySelector('details[open]') || document.activeElement?.matches('input, select, textarea')))) return;
-    remember(); const current = state();
+    if (inFlight || state().refreshPaused === true || busy(force)) return;
+    inFlight = true; remember(); const current = state();
     const params = new URLSearchParams({{process: current.process || 'discovery', mode: current.mode || 'compact', search: current.search || '', status: current.status || '', active: current.active ? '1' : ''}});
-    const refreshDrawer = async (ticketId) => {{
-      const drawer = document.querySelector('[data-ticket-drawer]');
-      const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`);
-      if (!drawer || !panel || drawer.hidden) return;
-      try {{
-        const response = await fetch('/drawer?' + new URLSearchParams({{process: current.process || 'discovery', ticket: ticketId}}));
-        if (!response.ok) return;
-        const updated = document.createRange().createContextualFragment(await response.text()).firstElementChild;
-        if (!updated) return;
-        updated.hidden = false;
-        panel.replaceWith(updated);
-        updated.focus();
-      }} catch (_) {{ /* transient server/network failure: keep the current drawer */ }}
-    }};
-    try {{ const response = await fetch('/fragment?' + params); if (!response.ok) return; const fragment = await response.text();
-      const board = document.querySelector('.board'); if (!board) return; board.outerHTML = fragment;
-      const restored = state(); restore();
+    try {{
+      const response = await fetch('/fragment?' + params, {{cache: 'no-store'}}); if (!response.ok) return;
+      const fragment = await response.text(); const board = document.querySelector('.board');
+      if (!board || fragment === board.outerHTML) return;
+      board.outerHTML = fragment; restore(); const restored = state();
       if (restored.ticket) document.querySelector(`.card[data-ticket="${{CSS.escape(restored.ticket)}}"]`)?.classList.add('selected');
-      const refreshedBoard = document.querySelector('.board'); if (refreshedBoard && restored.boardScrollX != null) refreshedBoard.scrollLeft = restored.boardScrollX; if (restored.scrollY != null) window.scrollTo(0, restored.scrollY); if (restored.focus >= 0) controls()[restored.focus]?.focus();
-      if (restored.ticket) await refreshDrawer(restored.ticket);
-    }} catch (_) {{ /* transient server/network failure: keep the current board */ }}
+      const refreshedBoard = document.querySelector('.board'); if (refreshedBoard && restored.boardScrollX != null) refreshedBoard.scrollLeft = restored.boardScrollX;
+      if (restored.scrollY != null) window.scrollTo(0, restored.scrollY); if (restored.focus >= 0) controls()[restored.focus]?.focus();
+    }} catch (_) {{ /* transient server/network failure: keep the current board */ }} finally {{ inFlight = false; }}
   }};
   let ticketCreationInProgress = false;
   document.addEventListener('submit', event => {{
-    const form = event.target.closest?.('form[action="/create"]');
-    if (!form || ticketCreationInProgress) return;
-    event.preventDefault();
-    ticketCreationInProgress = true;
-    const submit = form.querySelector('button[type="submit"]');
-    if (submit) submit.disabled = true;
-    const dialog = form.closest('dialog');
-    dialog?.close();
-    const process = form.elements.process?.value || 'discovery';
-    save({{process}});
-    fetch('/create', {{method: 'POST', body: new URLSearchParams(new FormData(form))}})
-      .then(response => {{
-        if (!response.ok) throw new Error('Не удалось создать тикет');
-        form.reset();
-        remember();
-        return refresh(true);
-      }})
-      .catch(() => dialog?.showModal())
-      .finally(() => {{ ticketCreationInProgress = false; if (submit) submit.disabled = false; }});
+    const form = event.target.closest?.('form[action="/create"]'); if (!form || ticketCreationInProgress) return;
+    event.preventDefault(); ticketCreationInProgress = true; lastInteraction = Date.now(); const submit = form.querySelector('button[type="submit"]'); if (submit) submit.disabled = true;
+    const dialog = form.closest('dialog'); dialog?.close(); const process = form.elements.process?.value || 'discovery'; save({{process}});
+    fetch('/create', {{method: 'POST', body: new URLSearchParams(new FormData(form))}}).then(response => {{ if (!response.ok) throw new Error('Не удалось создать тикет'); form.reset(); return refresh(true); }}).catch(() => dialog?.showModal()).finally(() => {{ ticketCreationInProgress = false; if (submit) submit.disabled = false; }});
   }});
-  document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) remember(); }});
-  document.addEventListener('change', event => {{ if (event.target.matches('[data-board-mode], [data-board-search], [data-board-status], [data-board-active]')) {{ const value = event.target.value; save(event.target.matches('[data-board-mode]') ? {{mode:value}} : event.target.matches('[data-board-search]') ? {{search:value}} : event.target.matches('[data-board-status]') ? {{status:value}} : {{active:value === '1'}}); refresh(true); }} }});
-  document.addEventListener('toggle', event => {{ if (event.target.matches('details[data-ticket-details]')) remember(); }}, true);
-  const closeDrawer = () => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (!drawer) return; drawer.hidden = true; if (backdrop) backdrop.hidden = true; drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.hidden = true); drawer.setAttribute('aria-hidden', 'true'); document.body.classList.remove('drawer-open'); if (drawer.dataset.previousFocus) document.getElementById(drawer.dataset.previousFocus)?.focus(); }};
-  const openDrawer = (ticketId, trigger) => {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`); if (!drawer || !panel) return; drawer.querySelectorAll('[data-drawer-ticket]').forEach(item => item.hidden = item !== panel); panel.hidden = false; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.dataset.previousFocus = trigger?.id || ''; document.body.classList.add('drawer-open'); panel.focus(); save({{ticket: ticketId}}); }};
-  document.addEventListener('click', event => {{ const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }} const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); openDrawer(open.dataset.openTicket, open); return; }} if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) closeDrawer(); const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }} }});
+  document.addEventListener('input', event => {{ if (event.target.matches('input,select,textarea')) {{ lastInteraction = Date.now(); remember(); }} }});
+  document.addEventListener('change', event => {{ if (event.target.matches('[data-board-mode], [data-board-search], [data-board-status], [data-board-active]')) {{ lastInteraction = 0; const value = event.target.value; save(event.target.matches('[data-board-mode]') ? {{mode:value}} : event.target.matches('[data-board-search]') ? {{search:value}} : event.target.matches('[data-board-status]') ? {{status:value}} : {{active:value === '1'}}); refresh(true); }} }});
+  document.addEventListener('toggle', event => {{ if (event.target.matches('details[data-ticket-details]')) {{ lastInteraction = Date.now(); remember(); }} }}, true);
+  document.addEventListener('click', event => {{
+    lastInteraction = Date.now(); const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }}
+    const toggleButton = event.target.closest('[data-refresh-toggle]'); if (toggleButton) {{ save({{refreshPaused: state().refreshPaused !== true}}); updateToggle(); return; }}
+    const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const ticketId = open.dataset.openTicket; const panel = drawer?.querySelector(`[data-drawer-ticket="${{CSS.escape(ticketId)}}"]`); if (!drawer || !panel) return; drawer.querySelectorAll('[data-drawer-ticket]').forEach(item => item.hidden = item !== panel); panel.hidden = false; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.dataset.previousFocus = open.id || ''; document.body.classList.add('drawer-open'); panel.focus(); save({{ticket: ticketId}}); fetch('/drawer?' + new URLSearchParams({{process: state().process || 'discovery', ticket: ticketId}}), {{cache: 'no-store'}}).then(response => response.ok ? response.text() : '').then(text => {{ if (!text) return; const updated = document.createRange().createContextualFragment(text).firstElementChild; if (updated) {{ updated.hidden = false; panel.replaceWith(updated); updated.focus(); }} }}).catch(() => {{}}); return; }}
+    if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (drawer) {{ drawer.hidden = true; drawer.setAttribute('aria-hidden', 'true'); drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.hidden = true); }} if (backdrop) backdrop.hidden = true; document.body.classList.remove('drawer-open'); refresh(true); }}
+    const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }}
+  }});
   document.addEventListener('keydown', event => {{
-    const drawer = document.querySelector('[data-ticket-drawer]');
-    const panel = drawer?.querySelector('[data-drawer-ticket]:not([hidden])');
+    const drawer = document.querySelector('[data-ticket-drawer]'); const panel = drawer?.querySelector('[data-drawer-ticket]:not([hidden])');
     if (!drawer || drawer.hidden || !panel) return;
-    if (event.key === 'Escape') {{ closeDrawer(); return; }}
+    if (event.key === 'Escape') {{ const close = document.querySelector('[data-drawer-close]'); if (close) close.click(); return; }}
     if (event.key !== 'Tab') return;
     const focusable = [...panel.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(item => !item.hidden && item.getAttribute('aria-hidden') !== 'true');
     if (!focusable.length) {{ event.preventDefault(); panel.focus(); return; }}
@@ -117,7 +97,9 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     if (event.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {{ event.preventDefault(); last.focus(); }}
     else if (!event.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {{ event.preventDefault(); first.focus(); }}
   }});
-  const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); const activeControl = document.querySelector('[data-board-active]'); if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; if (activeControl && current.active) activeControl.value = '1'; restore(); if (current.ticket) {{ document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`)?.classList.add('selected'); openDrawer(current.ticket); }} const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
+  const current = state(); const modeControl = document.querySelector('[data-board-mode]'); const searchControl = document.querySelector('[data-board-search]'); const statusControl = document.querySelector('[data-board-status]'); const activeControl = document.querySelector('[data-board-active]');
+  if (modeControl && current.mode) modeControl.value = current.mode; if (searchControl && current.search) searchControl.value = current.search; if (statusControl && current.status) statusControl.value = current.status; if (activeControl && current.active) activeControl.value = '1'; restore(); updateToggle();
+  if (current.ticket) {{ const selected = document.querySelector(`.card[data-ticket="${{CSS.escape(current.ticket)}}"]`); if (selected) selected.classList.add('selected'); }} const initialBoard = document.querySelector('.board'); if (initialBoard && current.boardScrollX != null) initialBoard.scrollLeft = current.boardScrollX; if (current.scrollY != null) window.scrollTo(0, current.scrollY); setInterval(refresh, {AUTO_REFRESH_SECONDS * 1000});
 }})();
 </script>"""
 
@@ -223,7 +205,9 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
             self.send_error(404)
         def log_message(self, fmt, *args): return
         def _html(self, text):
-            payload=text.encode("utf-8"); self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            payload=text.encode("utf-8"); self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(payload))); self.end_headers()
+            try: self.wfile.write(payload)
+            except BrokenPipeError: pass
         def _json(self,obj):
             payload=json.dumps(obj,ensure_ascii=False,indent=2).encode("utf-8"); self.send_response(200); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload)
         def _redirect(self,location): self.send_response(303); self.send_header("Location",location); self.end_headers()
@@ -352,7 +336,8 @@ def render_board(store, workflows, process: str, worker_control: WorkerControl |
     create_form = _create_ticket_form(store, workflow.id, workflows)
     sessions_html = _sessions_html(store, session_store) if process == "delivery" else ""
     drawer = _ticket_drawer_html(store, workflows, process, tickets, tree_manager, session_store)
-    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}{toolbar}{board}{drawer}</body></html>'
+    refresh_control = '<button type="button" data-refresh-toggle aria-pressed="false">Обновление: включено</button>'
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>vibe · {html.escape(workflow.title)}</title><style>{CSS}</style>{AUTO_REFRESH_SCRIPT}</head><body><header><strong>vibe-orchestrator</strong>{nav}{worker_form}{refresh_control}<span class="meta">{html.escape(str(store.project))}</span><span class="meta">{html.escape(refresh_hint)}</span></header>{create_form}{sessions_html}{toolbar}{board}{drawer}</body></html>'
 
 
 def render_board_fragment(store, workflows, process: str, worker_control=None, tree_manager=None, session_store=None, *, mode="compact", search="", status="", active="") -> str:

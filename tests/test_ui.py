@@ -257,6 +257,7 @@ let timer;
 assert.equal(timer.milliseconds, {AUTO_REFRESH_SECONDS * 1000});
     timer.callback();
     assert.equal(fetches, 1);
+    await new Promise(resolve => setImmediate(resolve));
 document.hidden = true;
 timer.callback();
     assert.equal(fetches, 1);
