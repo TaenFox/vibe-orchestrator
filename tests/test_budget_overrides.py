@@ -51,7 +51,7 @@ def test_zero_increase_limit_is_audited_noop(tmp_path):
     assert len(ledger.list_decisions()) == 1
 
 
-def test_consumed_one_shot_resolve_blocks_unknown_again(tmp_path):
+def test_consumed_one_shot_resolve_stays_applied_after_refresh_and_reserve(tmp_path):
     ledger = BudgetLedger(tmp_path, authorizer=authorizer)
     ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
     ledger.reserve("run-a", "T", None, {"runs": 1})
@@ -59,7 +59,25 @@ def test_consumed_one_shot_resolve_blocks_unknown_again(tmp_path):
     ledger.finalize("run-a", "unknown", {"points": None})
     ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
                           estimate={"points": 1}, confidence=0.8, one_shot=True, decision_id="resolve-1")
-    assert ledger.list_decisions(operation="resolve-unknown")[0]["consumed_at"] is not None
+    decision = ledger.list_decisions(operation="resolve-unknown")[0]
+    assert decision["consumed_at"] is not None
+    assert decision["decision_id"] == "resolve-1"
+    assert decision["payload"]["estimate"] == {"points": 1}
+    assert ledger.get_budget("ticket:T")["status"] != "blocked_unknown"
+    ledger.reserve("run-b", "T", None, {"runs": 1})
+    assert ledger.get_budget("ticket:T")["status"] != "blocked_unknown"
+
+
+def test_one_shot_resolve_is_scoped_to_target_run(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
+    for run_id in ("run-a", "run-b"):
+        ledger.reserve(run_id, "T", None, {"runs": 1})
+    for run_id in ("run-a", "run-b"):
+        ledger.start(run_id)
+        ledger.finalize(run_id, "unknown", {"points": None})
+    ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
+                          estimate={"points": 1}, confidence=0.8, one_shot=True, decision_id="resolve-a")
     assert ledger.get_budget("ticket:T")["status"] == "blocked_unknown"
 
 
@@ -87,18 +105,19 @@ def test_evidence_resolution_records_immutable_fact_and_applies_usage_once(tmp_p
     evidence = {"operator": "confirmed", "usage": {"tokens": 7, "points": 2, "runs": 1},
                 "normalization": "tokens_per_1000.v1"}
     ledger.resolve_unknown(actor="alice", run_id="run-a", reason="verified", reference="E-1",
-                           evidence=evidence, expires_at="2999-01-01T00:00:00+00:00", decision_id="e-1")
+                           evidence=evidence, one_shot=True, decision_id="e-1")
     facts = ledger.list_reconciliation_facts(run_id="run-a")
     assert len(facts) == 1
     assert facts[0]["decision_id"] == "e-1"
     assert facts[0]["actor"] == "alice"
     assert facts[0]["reference"] == "E-1"
     assert facts[0]["evidence"] == evidence
+    assert ledger.list_decisions(operation="resolve-unknown")[0]["consumed_at"] is not None
     assert ledger.get_run("run-a")["state"] == raw["state"] == "unknown"
     assert ledger.get_run("run-a")["actual_json"] == raw["actual_json"]
     assert ledger.get_budget("ticket:T")["aggregates"]["finalized"] == {"tokens": 7, "points": 2, "runs": 1}
     ledger.resolve_unknown(actor="alice", run_id="run-a", reason="verified", reference="E-1",
-                           evidence=evidence, expires_at="2999-01-01T00:00:00+00:00", decision_id="e-1")
+                           evidence=evidence, one_shot=True, decision_id="e-1")
     assert len(ledger.list_reconciliation_facts(decision_id="e-1")) == 1
     assert ledger.get_budget("ticket:T")["aggregates"]["finalized"] == {"tokens": 7, "points": 2, "runs": 1}
 

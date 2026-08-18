@@ -463,8 +463,8 @@ class BudgetLedger:
                 """SELECT 1 FROM runs r WHERE r.state='unknown' AND (r.ticket_budget_id=? OR r.session_budget_id=?)
                    AND NOT EXISTS (SELECT 1 FROM budget_decisions d WHERE d.operation='resolve-unknown'
                      AND d.target_scope='run' AND d.target_id=r.run_id
-                     AND d.consumed_at IS NULL
-                     AND (d.expires_at IS NULL OR d.expires_at>?)) LIMIT 1""",
+                     AND (d.one_shot=1 OR (d.consumed_at IS NULL
+                       AND (d.expires_at IS NULL OR d.expires_at>?)))) LIMIT 1""",
                 (budget_id, budget_id, now),
             ).fetchone() is not None
             over_budget = any(
