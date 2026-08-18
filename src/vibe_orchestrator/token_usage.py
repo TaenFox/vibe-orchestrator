@@ -145,6 +145,13 @@ def parse_codex_usage(
         output_total = sum(item["output_tokens"] for item in selected)
     else:
         ordered = list(candidates)
+        seen_counts: dict[str, tuple[int, int]] = {}
+        for item in ordered:
+            counts = (item["input_tokens"], item["output_tokens"])
+            previous_counts = seen_counts.get(item["usage_ref"])
+            if previous_counts is not None and previous_counts != counts:
+                return unknown_token_usage(run_id=expected_run_id, model=model, reasoning_effort=reasoning_effort)
+            seen_counts[item["usage_ref"]] = counts
         for previous, current in zip(ordered, ordered[1:]):
             if current["input_tokens"] < previous["input_tokens"] or current["output_tokens"] < previous["output_tokens"]:
                 return unknown_token_usage(run_id=expected_run_id, model=model, reasoning_effort=reasoning_effort)

@@ -94,6 +94,15 @@ def test_contract_parser_rejects_cumulative_regression_and_mixed_semantics():
     assert parse_codex_usage(mixed, expected_run_id="r", model="m", reasoning_effort="low")["source"] == "unknown"
 
 
+def test_contract_parser_rejects_cumulative_duplicate_with_changed_counts():
+    def event(input_tokens):
+        return json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "r", "model": "m", "reasoning_effort": "low", "usage_ref": "evt-1", "usage_semantics": "cumulative", "usage": {"input_tokens": input_tokens, "output_tokens": 1}})
+
+    events = "\n".join((event(10), event(20)))
+
+    assert parse_codex_usage(events, expected_run_id="r", model="m", reasoning_effort="low")["source"] == "unknown"
+
+
 def test_contract_parser_rejects_missing_timestamp_without_fallback():
     event = json.dumps({"type": "turn.completed", "run_id": "r", "model": "m", "reasoning_effort": "low",
                         "usage_ref": "evt-1", "usage_semantics": "incremental",
