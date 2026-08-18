@@ -42,20 +42,47 @@ def _page(items: list[dict[str, Any]], *, offset: int, limit: int) -> dict[str, 
     }
 
 
-def _artifact_links(project: Path, entry: dict[str, Any]) -> dict[str, Any] | None:
+def _url_path(*parts: str) -> str:
+    return "/artifacts/" + "/".join(quote(part, safe="") for part in parts)
+
+
+def _files_below(candidate: Path, root: Path, *, recursive: bool) -> list[Path]:
+    if not candidate.is_dir():
+        return [candidate] if candidate.is_file() and root in candidate.resolve().parents else []
+    paths = candidate.rglob("*") if recursive else candidate.iterdir()
+    files = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if root in resolved.parents:
+            files.append(path)
+    return sorted(files)
+
+
+def _artifact_links(project: Path, entry: dict[str, Any], *, source: bool = False) -> dict[str, Any] | None:
     run_id = entry.get("run_id")
-    artifact_path = entry.get("artifacts_path")
-    if not isinstance(run_id, str) or not run_id or not isinstance(artifact_path, str):
+    field = "source_artifacts" if source else "artifacts_path"
+    artifact_path = entry.get(field)
+    if not isinstance(run_id, str) or not run_id:
         return None
-    run_dir = (project / artifact_path).resolve()
-    runs_root = (project / ".vibe" / "runs").resolve()
-    if runs_root not in run_dir.parents or not run_dir.is_dir():
+    if not isinstance(artifact_path, str):
+        return {"path": artifact_path, "links": []} if source else None
+    path_parts = Path(artifact_path).parts
+    if Path(artifact_path).is_absolute() or ".." in path_parts:
         return {"path": artifact_path, "links": []}
-    names = [path.name for path in sorted(run_dir.iterdir()) if path.is_file()]
-    return {
-        "path": artifact_path,
-        "links": [f"/artifacts/{quote(run_id, safe='')}/{quote(name, safe='')}" for name in names],
-    }
+
+    runs_root = (project / ".vibe" / "runs").resolve()
+    candidate = (project / artifact_path).resolve()
+    allowed_root = (runs_root / run_id).resolve() if source else runs_root
+    if allowed_root not in candidate.parents and candidate != allowed_root:
+        return {"path": artifact_path, "links": []}
+    files = _files_below(candidate, allowed_root, recursive=source)
+    links = []
+    for path in files:
+        relative = path.resolve().relative_to(allowed_root if source else candidate)
+        links.append(_url_path(run_id, *relative.parts))
+    return {"path": artifact_path, "links": links}
 
 
 def _ticket_payload(store: TicketStore, ticket: Ticket, *, history_limit: int) -> dict[str, Any]:
@@ -67,10 +94,11 @@ def _ticket_payload(store: TicketStore, ticket: Ticket, *, history_limit: int) -
         if artifacts is not None:
             entry["artifacts"] = artifacts
         # These optional fields are used by integrations that attach source
-        # files to a run. Keep them as links only when they are present.
+        # files to a run. Normalize them to the same safe link contract.
         source = entry.get("source_artifacts") or entry.get("source_artifact_path")
         if source:
-            entry["source_artifacts"] = source
+            source_entry = dict(entry, source_artifacts=source)
+            entry["source_artifacts"] = _artifact_links(store.project, source_entry, source=True)
     payload["run_history"] = history
     payload["run_history_truncated"] = len(ticket.run_history) > len(history)
     return payload
