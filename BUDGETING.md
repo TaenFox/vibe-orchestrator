@@ -275,6 +275,14 @@ finalized без доказуемого `usage_ref` и версий нормал
 переводит подтверждённый запуск в `started`, а неоднозначный оставляет с
 marker `ambiguous_start`.
 
+Lifecycle invariant: `finalize` разрешён только для `started`; попытка завершить
+`reserved_pending_start` отклоняется без изменения reservation или aggregates.
+После terminal transition status scope вычисляется из текущих aggregates и
+unknown runs с precedence `over_budget` → `blocked_unknown` → `stop_new_runs` →
+`completed` → `exhausted` → `active`. Для finalized run actual сохраняется с
+`runs: 1`, если usage не указал это измерение, а повторная terminal обработка
+остаётся идемпотентной.
+
 ## Acceptance scenarios
 
 1. Если до нового запуска `available=30`, а `requested_planned=20`, gate
@@ -301,6 +309,12 @@ marker `ambiguous_start`.
 8. Изменение policy/rate card не меняет прошлые planned/actual; исправление —
    отдельный immutable adjustment.
 9. Legacy migration сохраняет lifecycle и `run_history` без их переписывания.
+10. AC-4: pre-start finalize отклоняется; после `start` тот же run финализируется.
+11. AC-7: finalized overrun даёт `over_budget`, нулевой available даёт
+    `exhausted`, а unknown блокирует scope только при недоступном enforced points.
+    При `limit_points: null` подтверждённые остальные измерения финализируются.
+12. AC-8: каждый finalized run увеличивает `finalized.runs` ровно на один;
+    повторный finalize не меняет агрегат.
 
 ## Зависимости и открытые решения
 

@@ -32,6 +32,7 @@ def test_finalize_release_and_unknown_are_idempotent(tmp_path: Path):
     assert ledger.get_budget("ticket:DEL-1")["aggregates"]["reserved"] == {"tokens": 0, "points": 0, "runs": 0}
 
     ledger.reserve("run-2", "DEL-1", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-2")
     ledger.finalize("run-2", "unknown", {"input_tokens": None, "output_tokens": None})
     assert ledger.get_run("run-2")["state"] == "unknown"
 
@@ -40,6 +41,7 @@ def test_unknown_blocks_point_limited_scope_and_reserve(tmp_path: Path):
     ledger = BudgetLedger(tmp_path)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 100, "points": 10, "runs": 3})
     ledger.reserve("run-1", "DEL-1", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-1")
     ledger.finalize("run-1", "unknown", {"points": None, "points_status": "unavailable"})
     assert ledger.get_budget("ticket:DEL-1")["status"] == "blocked_unknown"
     with pytest.raises(BudgetDenied):
@@ -75,6 +77,7 @@ def test_terminal_run_can_only_be_corrected_by_append_only_adjustment(tmp_path: 
     ledger = BudgetLedger(tmp_path)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 50, "points": 50, "runs": 5})
     ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "points": 1, "runs": 1})
+    ledger.start("run-1")
     ledger.finalize("run-1", "completed", {"total_tokens": 5, "points": 1, "points_status": "available"})
     adjustment_id = ledger.adjustment("run-1", {"tokens": 2, "points": 1, "runs": 0}, reason="provider correction", author="operator")
     assert adjustment_id == 1
@@ -85,6 +88,7 @@ def test_adjustment_accepts_signed_delta_and_rejects_underflow_atomically(tmp_pa
     ledger = BudgetLedger(tmp_path)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 50, "points": 50, "runs": 5})
     ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "points": 1, "runs": 1})
+    ledger.start("run-1")
     ledger.finalize("run-1", "completed", {"total_tokens": 5, "points": 1, "points_status": "available"})
     ledger.adjustment("run-1", {"tokens": -1, "points": 0, "runs": 0}, reason="correction", author="operator")
     assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"]["tokens"] == 4
@@ -109,3 +113,57 @@ def test_rework_reserves_parent_ticket_scope_but_keeps_child_run_metadata(tmp_pa
     assert run["ticket_budget_id"] == "ticket:PARENT"
     assert ledger.get_budget("ticket:PARENT")["aggregates"]["reserved"] == {"tokens": 5, "points": 1, "runs": 1}
     assert ledger.get_budget("ticket:CHILD")["aggregates"]["reserved"] == {"tokens": 0, "points": 0, "runs": 0}
+
+
+def test_finalize_requires_started_state(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 20, "points": 20, "runs": 2})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "points": 1, "runs": 1})
+    with pytest.raises(ValueError, match="invalid transition"):
+        ledger.finalize("run-1", "completed", {"total_tokens": 5, "points": 1})
+    assert ledger.get_run("run-1")["state"] == "reserved_pending_start"
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["reserved"] == {"tokens": 5, "points": 1, "runs": 1}
+    ledger.start("run-1")
+    ledger.finalize("run-1", "completed", {"total_tokens": 5, "points": 1})
+
+
+def test_status_becomes_over_budget_after_finalize_overrun(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 5, "points": 10, "runs": 2})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 2, "points": 1, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "completed", {"total_tokens": 9, "points": 2})
+    budget = ledger.get_budget("ticket:DEL-1")
+    assert budget["status"] == "over_budget"
+    assert budget["aggregates"]["finalized"] == {"tokens": 9, "points": 2, "runs": 1}
+
+
+def test_status_becomes_exhausted_when_available_reaches_zero(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 5, "points": None, "runs": 2})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "runs": 1})
+    assert ledger.get_budget("ticket:DEL-1")["status"] == "exhausted"
+    with pytest.raises(BudgetDenied):
+        ledger.reserve("run-2", "DEL-1", None, {"tokens": 1, "runs": 1})
+
+
+def test_unlimited_points_can_finalize_without_points(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 20, "points": None, "runs": 2})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "completed", {"tokens": 5, "points": None, "points_status": "unavailable"})
+    run = ledger.get_run("run-1")
+    assert run["state"] == "finalized"
+    assert run["actual"]["points"] is None
+    assert ledger.get_budget("ticket:DEL-1")["status"] == "active"
+
+
+def test_finalized_runs_counts_each_run_once(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 20, "points": None, "runs": 3})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "completed", {"total_tokens": 5, "runs": 99})
+    ledger.finalize("run-1", "completed", {"total_tokens": 99})
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"]["runs"] == 1
