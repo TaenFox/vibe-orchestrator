@@ -324,6 +324,13 @@ suggested_scope и evidence; basis сохраняется immutable. Поиск 
 нового audit event, ambiguous возвращает стабильных кандидатов, done и legacy
 тикеты без basis не блокируют создание.
 
+При replay `technical_analysis` с тем же canonical tech-debt key exact active
+ticket остается неизменным: сохраняются его parent, status, metadata,
+`audit_events` и YAML-представление. Такой ticket считается результатом текущей
+reconciliation по своему ID и не деактивируется, даже если его нет в обычном
+`delivery_tickets` snapshot. Повтор с тем же `source_run` сохраняет ровно один
+active matching ticket.
+
 При `create_ticket` новый тикет сначала полностью формируется в памяти: в него
 попадают `run_history.created` и обязательное событие `ticket_created`, после
 чего выполняется одна atomic-замена YAML. Тикет без соответствующего audit event

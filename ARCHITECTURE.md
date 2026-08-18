@@ -124,6 +124,12 @@ Tech-debt пока не отдельный domain type: агент создае�
 canonical `tech_debt.v1:<sha256>` по problem/area/evidence. Exact active match
 возвращается без записи, ambiguous возвращает стабильный список кандидатов;
 technical analysis и safe agent create используют этот единый boundary.
+При replay technical analysis exact active tech-debt ticket защищается по ID
+результата dedup: его parent, status, metadata и audit_events не изменяются и
+он не попадает в deactivation reconciliation, даже если отсутствует в обычном
+`delivery_tickets` snapshot. Повтор с тем же source_run оставляет один active
+matching ticket; обычные отсутствующие delivery children деактивируются по
+прежним правилам.
 
 Рекомендованный порядок расследования:
 
