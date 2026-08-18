@@ -1,4 +1,6 @@
 import asyncio
+import json
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -8,7 +10,8 @@ from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.scheduler import Candidate, select_candidates
-from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
+from vibe_orchestrator.technical_debt import TechnicalDebtError, technical_debt_basis
+from vibe_orchestrator.tickets import TicketWriteService, next_status_for_ticket, reset_failed_retry
 
 
 CONFIRMED_USAGE = {
@@ -94,6 +97,22 @@ class FailingRunner:
 
     async def run(self, ticket, stage, run_id=None, *, contract=None):
         raise RuntimeError("agent crashed")
+
+
+class ContractErrorRunner(SuccessfulRunner):
+    async def run(self, ticket, stage, run_id=None, *, contract=None):
+        return AgentResult(
+            outcome="completed",
+            summary="Технический анализ завершен",
+            details="""```yaml
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates: []
+  unexpected: true
+```""",
+        )
 
 
 class BrokenPromptRunner(FailingRunner):
@@ -527,6 +546,163 @@ def test_execute_records_failed_run_history(tmp_path: Path):
     assert ticket.run_history[-1]["retry_after"] == ticket.retry_after
 
 
+def test_technical_debt_contract_error_does_not_enter_correction_flow(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Reject malformed debt", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    idea.blocked_by = ["existing-child"]
+    idea.context = {"unchanged": True}
+    idea.context_revision = 3
+    orchestrator.store.save(idea)
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        orchestrator._apply_result(
+            load_workflow("discovery"),
+            idea.id,
+            load_workflow("discovery").by_id["technical_analysis"],
+            AgentResult(
+                outcome="completed",
+                summary="Технический анализ завершен",
+                details="""```yaml
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates: []
+  unexpected: true
+```""",
+            ),
+        )
+
+    assert caught.value.envelope["contract_version"] == "orchestrator.errors.v1"
+    assert caught.value.code == "TECH_DEBT_INVALID"
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
+
+
+@pytest.mark.parametrize(
+    "manifest_metadata",
+    [
+        {"run_id": "run-other", "ticket_id": "__SOURCE_ID__", "stage": "technical_analysis"},
+        {"run_id": "run-source", "stage": "technical_analysis"},
+    ],
+)
+def test_technical_debt_source_mismatch_does_not_mutate_control_plane(tmp_path: Path, manifest_metadata: dict):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Reject foreign evidence", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    idea.context = {"unchanged": True}
+    orchestrator.store.save(idea)
+    run_dir = tmp_path / ".vibe" / "runs" / "run-source"
+    run_dir.mkdir(parents=True)
+    manifest = {
+        key: idea.id if value == "__SOURCE_ID__" else value
+        for key, value in manifest_metadata.items()
+    }
+    (run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        orchestrator._apply_result(
+            load_workflow("discovery"),
+            idea.id,
+            load_workflow("discovery").by_id["technical_analysis"],
+            AgentResult(
+                outcome="completed",
+                summary="Технический анализ завершен",
+                details="""
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates:
+    - problem: "Foreign source"
+      evidence:
+        path: README.md
+        identifier: "Traceability MVP"
+        observation: "Наблюдение"
+      impact: "Риск"
+      suggested_scope: "Проверить источник"
+      source_ticket: "%s"
+      source_stage: technical_analysis
+      source_run: run-source
+      type: task
+      urgency: medium
+      priority: 10
+""" % idea.id,
+            ),
+        )
+
+    assert caught.value.code == "TECH_DEBT_SOURCE_MISMATCH"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].source_run"
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
+
+
+def test_technical_debt_observation_capability_error_does_not_mutate_control_plane(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Reject unverified evidence", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    orchestrator.store.save(idea)
+    run_dir = tmp_path / ".vibe" / "runs" / "run-source"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({"run_id": "run-source", "ticket_id": idea.id, "stage": "technical_analysis"}), encoding="utf-8")
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        orchestrator._apply_result(
+            load_workflow("discovery"),
+            idea.id,
+            load_workflow("discovery").by_id["technical_analysis"],
+            AgentResult(
+                outcome="completed",
+                summary="Технический анализ завершен",
+                details="""
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates:
+    - problem: "Unverified source"
+      evidence:
+        path: README.md
+        identifier: "Traceability MVP"
+        observation: "Наблюдение"
+      impact: "Риск"
+      suggested_scope: "Проверить источник"
+      source_ticket: "%s"
+      source_stage: technical_analysis
+      source_run: run-source
+      type: task
+      urgency: medium
+      priority: 10
+""" % idea.id,
+            ),
+        )
+
+    assert caught.value.code == "TECH_DEBT_PREFLIGHT_UNAVAILABLE"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].evidence.observation"
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
+
+
+def test_execute_does_not_record_technical_debt_contract_error(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = ContractErrorRunner()
+    idea = orchestrator.store.create("discovery", "idea", "Reject malformed debt", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    orchestrator.store.save(idea)
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    asyncio.run(orchestrator._execute(load_workflow("discovery"), idea.id, "technical_analysis", "run-contract-error"))
+
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
+
+
 def test_agent_failure_stops_after_three_attempts_and_can_be_reset(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     orchestrator.runner = FailingRunner()
@@ -854,6 +1030,95 @@ delivery_tickets:
     assert orchestrator.store.get(idea.id).status == "ready_for_validation"
 
 
+def test_technical_debt_exact_replay_preserves_existing_child_during_reconciliation(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Existing technical debt", status="technical_analysis")
+    candidate = {
+        "problem": "Stale adapter boundary",
+        "impact": "Risk",
+        "suggested_scope": "Extract the adapter",
+        "evidence": {"path": "README.md", "identifier": "Traceability MVP", "observation": "Observed"},
+        "source_ticket": idea.id,
+        "source_run": "run-ta-1",
+    }
+    key, basis = technical_debt_basis(candidate, tmp_path)
+    existing_result = TicketWriteService(tmp_path).create_technical_debt_ticket(
+        problem=candidate["problem"],
+        evidence=candidate["evidence"],
+        impact=candidate["impact"],
+        suggested_scope=candidate["suggested_scope"],
+        source_ticket=candidate["source_ticket"],
+        source_stage="technical_analysis",
+        source_run=candidate["source_run"],
+        dedup_key=key,
+        dedup_basis=basis,
+        priority=7,
+        origin="technical_analysis:run-ta-1",
+        actor="test",
+    )
+    assert existing_result.ticket is not None
+    existing = existing_result.ticket
+    assert existing.status == "todo"
+    assert existing.mandatory is False
+    assert existing.parent is None
+    assert existing.blocked_by == []
+    assert existing.technical_debt_deferred is True
+    assert existing.context["problem"] == candidate["problem"]
+    assert existing.context["evidence"] == candidate["evidence"]
+    assert existing.context["impact"] == candidate["impact"]
+    assert existing.context["suggested_scope"] == candidate["suggested_scope"]
+    assert existing.context["origin"] == {
+        "source_ticket": idea.id,
+        "source_stage": "technical_analysis",
+        "source_run": "run-ta-1",
+        "dedup_key": key,
+    }
+    assert "technical_debt_deferred: true" in orchestrator.store.ticket_path(existing).read_text(encoding="utf-8")
+    assert existing.run_history[-1]["event"] == "created"
+    existing.status = "selected_for_session"
+    orchestrator.store.save(existing)
+    before = orchestrator.store.get(existing.id).to_dict()
+    before_audit = list(existing.audit_events)
+
+    details = textwrap.dedent("""
+implementation_required: true
+delivery_tickets:
+  - type: task
+    title: Stale adapter boundary
+    description: Rewritten by ordinary synchronization
+    priority: 99
+    mandatory: true
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates:
+    - problem: Stale adapter boundary
+      suggested_scope: Extract the adapter
+      evidence:
+        path: README.md
+        identifier: Traceability MVP
+        observation: Observed
+      impact: Risk
+      source_ticket: %s
+      source_stage: technical_analysis
+      source_run: run-ta-1
+      type: task
+      urgency: medium
+      priority: 7
+    """ % idea.id)
+
+    orchestrator._create_delivery_children(idea, details)
+    orchestrator._create_delivery_children(idea, details)
+
+    active_matches = [
+        child for child in orchestrator.store.list("delivery")
+        if child.dedup_key == key and not orchestrator.store.is_done(child)
+    ]
+    replayed = orchestrator.store.get(existing.id)
+    assert [child.id for child in active_matches] == [existing.id]
+    assert replayed.to_dict() == before
+    assert replayed.audit_events == before_audit
+
+
 def test_technical_analysis_resets_unselected_existing_child_to_todo(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     idea = orchestrator.store.create("discovery", "idea", "Restore delivery queue", status="technical_analysis")
@@ -1042,6 +1307,63 @@ delivery_tickets:
     assert len(second_children) == 2
     assert all(child.status == "todo" for child in second_children)
     assert [child.mandatory for child in second_children] == [True, False]
+
+
+@pytest.mark.parametrize("session_status", ["draft", "active"])
+def test_technical_analysis_retry_preserves_selected_child_in_open_session(tmp_path: Path, session_status: str):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Session-aware onboarding", status="technical_analysis")
+    child = orchestrator.store.create(
+        "delivery", "story", "Story onboarding shell", parent=idea.id, status="selected_for_session"
+    )
+    session = orchestrator.session_store.create()
+    orchestrator.session_store.add_ticket(session, child.id)
+    if session_status == "active":
+        orchestrator.session_store.activate(session)
+
+    details = """```yaml
+implementation_required: true
+delivery_tickets:
+  - type: story
+    title: Story onboarding shell
+    description: Собрать базовый сценарий онбординга.
+```"""
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    orchestrator._apply_result(
+        load_workflow("discovery"),
+        idea.id,
+        load_workflow("discovery").by_id["technical_analysis"],
+        AgentResult(outcome="completed", summary="Готово", details=details),
+    )
+
+    assert orchestrator.store.get(child.id).status == "selected_for_session"
+
+
+def test_technical_analysis_retry_moves_legacy_selected_child_back_to_todo(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Legacy onboarding", status="technical_analysis")
+    child = orchestrator.store.create(
+        "delivery", "story", "Story onboarding shell", parent=idea.id, status="selected_for_session"
+    )
+    details = """```yaml
+implementation_required: true
+delivery_tickets:
+  - type: story
+    title: Story onboarding shell
+```"""
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    orchestrator._apply_result(
+        load_workflow("discovery"),
+        idea.id,
+        load_workflow("discovery").by_id["technical_analysis"],
+        AgentResult(outcome="completed", summary="Готово", details=details),
+    )
+
+    assert orchestrator.store.get(child.id).status == "todo"
 
 
 def test_technical_analysis_retry_removes_stale_delivery_children_from_implementation(tmp_path: Path):
@@ -1318,3 +1640,60 @@ delivery_tickets:
 
     assert orchestrator.store.get(correction.id).status == "done"
     assert orchestrator.store.children_of(correction.id, process="delivery") == []
+
+
+def test_deferred_technical_debt_is_not_scheduled_without_active_session(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = CapturingRunner()
+    source = orchestrator.store.create("discovery", "idea", "Source", status="technical_analysis")
+    candidate = {
+        "problem": "Deferred scheduling gap",
+        "impact": "Unexpected launch",
+        "suggested_scope": "Add scheduler guard",
+        "evidence": {"path": "README.md", "identifier": "Scheduler", "observation": "Observed"},
+    }
+    key, basis = technical_debt_basis({**candidate, "source_ticket": source.id}, tmp_path)
+    result = TicketWriteService(tmp_path).create_technical_debt_ticket(
+        **candidate,
+        source_ticket=source.id,
+        source_stage="technical_analysis",
+        source_run="run-source",
+        dedup_key=key,
+        dedup_basis=basis,
+        priority=7,
+        origin="technical_analysis:run-source",
+        actor="test",
+    )
+    assert result.ticket is not None
+    debt = result.ticket
+    debt.status = "selected_for_session"
+    orchestrator.store.save(debt)
+
+    asyncio.run(orchestrator._schedule_once())
+
+    scheduled = orchestrator.store.get(debt.id)
+    assert scheduled.status == "selected_for_session"
+    assert scheduled.active_run is None
+    assert [entry["event"] for entry in scheduled.run_history] == ["created"]
+    assert orchestrator.runner.contracts == []
+
+
+def test_deferred_technical_debt_is_non_blocking_for_other_delivery_work(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = CapturingRunner()
+    orchestrator.worker_control.set_limit(1)
+
+    debt = orchestrator.store.create("delivery", "task", "Deferred debt", status="selected_for_session")
+    debt.technical_debt_deferred = True
+    orchestrator.store.save(debt)
+    regular = orchestrator.store.create("delivery", "task", "Regular work", status="selected_for_session")
+
+    asyncio.run(orchestrator._schedule_once())
+
+    assert orchestrator.store.get(debt.id).status == "selected_for_session"
+    assert orchestrator.store.get(debt.id).active_run is None
+    regular_after = orchestrator.store.get(regular.id)
+    assert [contract.run_id for contract in orchestrator.runner.contracts] == [
+        entry["run_id"] for entry in regular_after.run_history if entry["event"] == "started"
+    ]
+    assert regular_after.status != "selected_for_session"

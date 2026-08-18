@@ -82,6 +82,15 @@ queue обычный тикет не допускается, если WIP цел
 позиции workflow, затем по exempt-классу, `priority`, возрасту и ID. Это gate
 планировщика, а не бизнес-правило закрытия и не бюджетный контроль.
 
+Deferred technical-debt Delivery-задачи имеют явный сохраняемый маркер
+`technical_debt_deferred: true`. При отсутствии активной Delivery-сессии такой
+тикет исключается из selection даже если его статус вручную установлен в
+`selected_for_session`; marker-фильтр выполняется до подготовки execution
+contract, reservation и запуска runner. При активной сессии действует обычная
+проверка effective membership: внешний тикет не является кандидатом, а член
+сессии проходит последующие budget/WIP gates. Для немаркированных обычных и
+legacy-тикетов режим без активной сессии остается совместимым.
+
 ## Контракт traceability
 
 Аудит опирается на два источника, и у них разная роль:
@@ -99,6 +108,61 @@ queue обычный тикет не допускается, если WIP цел
 - `prompt_version` должен воспроизводимо пересчитываться из сохраненных артефактов запуска: канонический prompt-контракт сериализуется в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`, после чего аудитор может проверить `sha256` без доступа к исходному workflow-коду.
 - `result.json` является source of truth для структурированного ответа агента.
 - `events.jsonl` нужен как низкоуровневый сырой след исполнения и не заменяет `run_history`.
+
+### Agent write boundary
+
+Агентский write API проходит через `TicketWriteService`. Он принимает allowlist
+metadata-полей и отклоняет неизвестные поля, а также `status`, `process`, `type`,
+`active_run`, `run_history` и остальные lifecycle-поля при update. Внутренние
+создания corrective/rework и переходы scheduler остаются privileged-вызовами
+оркестратора. Создание агента всегда использует initial status workflow
+(Delivery: `todo`), а parent и blocked_by валидируются до изменения.
+
+`Ticket.audit_events[]` хранится в том же YAML и добавляется только после
+успешной проверки. Событие содержит operation, actor, origin, ticket ID,
+ timestamp, sorted `changed_fields`, before/after и при необходимости
+ idempotency key. Write service сериализует операции внутрипроцессным и
+ межпроцессным lock-ом, а `TicketStore.save`
+завершает запись атомарной заменой временного файла; legacy ticket без
+`audit_events` загружается с пустым списком.
+
+Повторный create с тем же idempotency key и payload возвращает исходный тикет без
+нового события; другой payload или stale `expected_updated_at` дает conflict.
+Tech-debt пока не отдельный domain type: агент создает Delivery `task` и не
+получает права менять lifecycle. Для immutable validated basis используется
+canonical `tech_debt.v1:<sha256>` по problem/area/evidence. Exact active match
+возвращается без записи, ambiguous возвращает стабильный список кандидатов;
+technical analysis и safe agent create используют этот единый boundary.
+При replay technical analysis exact active tech-debt ticket защищается по ID
+результата dedup: его parent, status, metadata и audit_events не изменяются и
+он не попадает в deactivation reconciliation, даже если отсутствует в обычном
+`delivery_tickets` snapshot. Повтор с тем же source_run оставляет один active
+matching ticket; обычные отсутствующие delivery children деактивируются по
+прежним правилам.
+
+### Контракт technical debt и non-blocking правило
+
+`tech_debt_candidates.v1` — необязательный root-level YAML с точными полями
+`problem`, `evidence(path, identifier, observation)`, `impact`, `suggested_scope`,
+`source_ticket`, `source_stage`, `source_run`, `type=task`, `urgency` и
+неотрицательным `priority`. Весь список валидируется до mutation; preflight
+проверяет source/workflow, точную identity запуска в history или существующем
+`run.json`, безопасный путь и содержимое evidence. Отсутствующий блок равен
+пустому списку.
+
+Materialization создает независимый Delivery `task` в `todo` с `parent=null`,
+`mandatory=false` и `technical_debt_deferred=true`; source/evidence сохраняются
+в context. Canonical basis из problem/scope/evidence хешируется в
+`tech_debt.v1:<sha256>`. Exact active match — no-op, ambiguous match — ответ без
+mutation, exact replay не участвует в обычной deactivation reconciliation.
+
+Lifecycle gate: `todo -> selected_for_session -> system_analysis`, причем выбор в
+сессию выполняет человек. Без active Delivery-сессии deferred marker исключает
+задачу до execution contract, reservation и runner; это non-blocking правило для
+других очередей и legacy-текетов. При active-сессии проходят только effective
+members, затем обычные `active_run`, blocked-by, WIP, budget и retry checks.
+Agent tools дают read-запросы, metadata writes и draft membership writes; lifecycle,
+materialization и scheduler transitions остаются privileged.
 
 Рекомендованный порядок расследования:
 
@@ -170,6 +234,7 @@ release), Discovery Correction — только в `done`. После разре
 
 - `.vibe/runs/` намеренно остается локальным и игнорируется Git, поэтому для долгого хранения аудит опирается на `run_history` в YAML тикета.
 - Протокол traceability не защищает от ручного редактирования файлов `.vibe/tickets/**`; доверие к аудиту опирается на дисциплину репозитория и Git history.
+- `origin` и actor обеспечивают traceability, но не являются полноценной системой авторизации; browser-level DOM/focus/viewport проверки выполняются только вручную или внешним runner.
 - Enforcement budget.v1, cost model, capacity planning и агрегированные
   финансовые/трудовые показатели не реализованы; `priority`, `wip`, `mandatory`
   и статусы не следует интерпретировать как бюджетные значения. Модель и

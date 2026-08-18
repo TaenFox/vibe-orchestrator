@@ -17,8 +17,9 @@ from .config import Stage, Workflow, load_all_workflows
 from .control import WorkerControl
 from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
-from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
+from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore, TicketWriteService
 from .sessions import SessionStore
+from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_technical_debt, preflight_technical_debt, technical_debt_basis
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 
@@ -26,7 +27,13 @@ log = logging.getLogger("vibe")
 
 
 class Orchestrator:
-    def __init__(self, project: Path, poll_interval: float = 2.0, max_agents: int | None = None):
+    def __init__(
+        self,
+        project: Path,
+        poll_interval: float = 2.0,
+        max_agents: int | None = None,
+        observation_verifier: ObservationVerifier | None = None,
+    ):
         self.store = TicketStore(project)
         self.store.init()
         self.workflows = load_all_workflows()
@@ -38,6 +45,7 @@ class Orchestrator:
         self.worker_control.set_limit(initial_worker_limit)
         self.max_agents = initial_worker_limit
         self._last_worker_limit = initial_worker_limit
+        self.observation_verifier = observation_verifier
         self.tree_manager = GitTreeManager(project, self.store)
         self.ledger = BudgetLedger(project)
         self.running: dict[str, asyncio.Task[None]] = {}
@@ -264,6 +272,16 @@ class Orchestrator:
                 self.ledger.start(contract.run_id)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
             log.info("завершено %s (%s): %s -> %s", ticket_id, self.store.get(ticket_id).type, result.outcome, self.store.get(ticket_id).status)
+        except TechnicalDebtError as exc:
+            # Contract rejection is deliberately not an agent failure: recording it
+            # would mutate the source ticket and route it through correction flow.
+            # Keep the envelope intact for the caller/operator and only release
+            # bookkeeping that has not crossed the subprocess boundary.
+            if not isinstance(contract, str):
+                ledger_run = self.ledger.get_run(contract.run_id)
+                if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                    self.ledger.release(contract.run_id)
+            log.error("отклонен tech_debt_candidates контракт для %s: %s", ticket_id, yaml.safe_dump(exc.envelope, allow_unicode=True, sort_keys=False))
         except Exception as exc:
             ticket = self.store.get(ticket_id)
             if isinstance(contract, str):
@@ -329,6 +347,17 @@ class Orchestrator:
         if workflow.id == "discovery" and stage.id == "technical_analysis" and result.outcome == "completed":
             try:
                 _technical_analysis_plan(result.details)
+                debt_candidates = parse_technical_debt(result.details)
+                if debt_candidates:
+                    preflight_technical_debt(
+                        debt_candidates,
+                        project=self.store.project,
+                        ticket_store=self.store,
+                        session_store=self.session_store,
+                        observation_verifier=self.observation_verifier,
+                    )
+            except TechnicalDebtError:
+                raise
             except ValueError as exc:
                 result = AgentResult(
                     outcome="needs_correction",
@@ -484,6 +513,29 @@ class Orchestrator:
             return
 
     def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
+        debt_tickets: list[Ticket] = []
+        exact_debt_ticket_ids: set[str] = set()
+        debt_service = TicketWriteService(self.store.project)
+        for candidate in parse_technical_debt(details):
+            key, basis = technical_debt_basis(candidate, self.store.project)
+            result = debt_service.create_technical_debt_ticket(
+                problem=candidate["problem"].strip(),
+                evidence=candidate["evidence"],
+                impact=candidate["impact"],
+                suggested_scope=candidate["suggested_scope"],
+                source_ticket=candidate["source_ticket"],
+                source_stage=candidate["source_stage"],
+                source_run=candidate["source_run"],
+                dedup_key=key,
+                dedup_basis=basis,
+                priority=candidate["priority"],
+                origin=f"technical_analysis:{candidate['source_run']}",
+                actor="orchestrator",
+            )
+            if result.ticket is not None:
+                debt_tickets.append(result.ticket)
+                if result.status == "exact":
+                    exact_debt_ticket_ids.add(result.ticket.id)
         spec = _extract_structured_payload(details).get("delivery_tickets", [])
         existing_children = {
             (child.type, child.title.strip()): child
@@ -491,7 +543,7 @@ class Orchestrator:
             if child.type in {"story", "task", "bug"}
         }
         active_keys: set[tuple[str, str]] = set()
-        synced: list[Ticket] = []
+        synced: list[Ticket] = debt_tickets
         for item in spec:
             if not isinstance(item, dict):
                 continue
@@ -508,14 +560,19 @@ class Orchestrator:
             active_keys.add(key)
             existing = existing_children.get(key)
             if existing:
+                if existing.id in exact_debt_ticket_ids:
+                    synced.append(existing)
+                    continue
                 changed = False
-                if existing.status == "selected_for_session" and not self._is_delivery_session_member(existing.id):
-                    existing.status = "todo"
-                    changed = True
                 if existing.description != description or existing.priority != priority or existing.mandatory != mandatory:
                     existing.description = description
                     existing.priority = priority
                     existing.mandatory = mandatory
+                    changed = True
+                if existing.status == "selected_for_session" and not self._is_open_delivery_session_member(existing.id):
+                    # Старые результаты technical_analysis могли ошибочно выбрать ребёнка
+                    # без явного включения в draft/active Delivery-сессию.
+                    existing.status = "todo"
                     changed = True
                 if changed:
                     self.store.save(existing)
@@ -535,12 +592,12 @@ class Orchestrator:
             existing_children[key] = child
             synced.append(child)
         for key, child in existing_children.items():
-            if key in active_keys:
+            if key in active_keys or child.id in exact_debt_ticket_ids:
                 continue
             self._deactivate_delivery_child(child)
         return synced
 
-    def _is_delivery_session_member(self, ticket_id: str) -> bool:
+    def _is_open_delivery_session_member(self, ticket_id: str) -> bool:
         return any(
             session.status in {"draft", "active"}
             and ticket_id in self.session_store.effective_ticket_ids(session)
