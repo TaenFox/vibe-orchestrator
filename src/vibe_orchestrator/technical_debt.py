@@ -143,7 +143,8 @@ def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path,
             raise _error(f"{base}.source_stage", "Стадия отсутствует в workflow исходного тикета.", code="TECH_DEBT_SOURCE_NOT_FOUND") from exc
         matching_history = [entry for entry in source.run_history if entry.get("run_id") == candidate["source_run"]]
         manifest = store.run_path(candidate["source_run"]) / "run.json"
-        if manifest.exists():
+        manifest_present = manifest.exists()
+        if manifest_present:
             try:
                 manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
@@ -163,7 +164,12 @@ def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path,
                 expected=candidate["source_run"],
                 actual=metadata.get("run_id"),
             )
-        if metadata.get("ticket_id") not in (None, source.id) or metadata.get("stage") not in (None, candidate["source_stage"]):
+        if manifest_present and any(
+            not isinstance(metadata.get(field), str)
+            or not metadata[field].strip()
+            or metadata[field] != expected
+            for field, expected in (("ticket_id", source.id), ("stage", candidate["source_stage"]))
+        ):
             raise _error(f"{base}.source_run", "Метаданные запуска не согласованы с источником.", code="TECH_DEBT_SOURCE_MISMATCH")
         evidence_path = (root / candidate["evidence"]["path"]).resolve()
         try:
