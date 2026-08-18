@@ -6,6 +6,7 @@ import os
 import shutil
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable
@@ -149,6 +150,9 @@ class CodexRunner:
             expected_run_id=contract.run_id,
             model=contract.model,
             reasoning_effort=contract.reasoning_effort,
+            runner_run_id=contract.run_id,
+            profile={"model": contract.model, "reasoning_effort": contract.reasoning_effort},
+            captured_at=datetime.now(timezone.utc).isoformat(),
         )
         manifest["token_usage"] = token_usage
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
