@@ -14,6 +14,10 @@ def _details(**overrides):
     return yaml.safe_dump({"tech_debt_candidates": {"version": CONTRACT_VERSION, "candidates": [fields]}}, allow_unicode=True)
 
 
+def _verified(_content: str, _identifier: str, _observation: str) -> bool:
+    return True
+
+
 def test_missing_key_and_empty_list_are_noops():
     assert parse_technical_debt("summary only") == []
     assert parse_technical_debt(yaml.safe_dump({"tech_debt_candidates": {"version": CONTRACT_VERSION, "candidates": []}})) == []
@@ -44,7 +48,7 @@ def test_preflight_checks_source_and_evidence_read_only(tmp_path: Path):
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text('{"run_id":"run-1","ticket_id":"%s","stage":"technical_analysis"}' % source.id, encoding="utf-8")
     candidates = parse_technical_debt(_details(source_ticket=source.id))
-    assert preflight_technical_debt(candidates, project=tmp_path, ticket_store=store) == candidates
+    assert preflight_technical_debt(candidates, project=tmp_path, ticket_store=store, observation_verifier=_verified) == candidates
     with pytest.raises(TechnicalDebtError) as caught:
         preflight_technical_debt(parse_technical_debt(_details(source_ticket="DISC-MISSING")), project=tmp_path, ticket_store=store)
     assert caught.value.code == "TECH_DEBT_SOURCE_NOT_FOUND"
@@ -117,4 +121,68 @@ def test_preflight_uses_history_only_when_manifest_is_absent(tmp_path: Path):
     store.save(source)
 
     candidates = parse_technical_debt(_details(source_ticket=source.id))
-    assert preflight_technical_debt(candidates, project=tmp_path, ticket_store=store) == candidates
+    assert preflight_technical_debt(candidates, project=tmp_path, ticket_store=store, observation_verifier=_verified) == candidates
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("ticket_id", None), ("ticket_id", ""), ("ticket_id", "   "), ("ticket_id", 123),
+     ("stage", None), ("stage", ""), ("stage", "   "), ("stage", 123), ("stage", "review")],
+)
+def test_preflight_rejects_incomplete_history_identity_without_trying_another_entry(tmp_path: Path, field, value):
+    store = TicketStore(tmp_path)
+    store.init()
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    source = store.create("discovery", "idea", "Источник", status="technical_analysis")
+    source.run_history.extend([
+        {"run_id": "run-1", "ticket_id": source.id, "stage": "technical_analysis", "event": "started"},
+        {"run_id": "run-1", "ticket_id": source.id, "stage": "technical_analysis", "event": "completed"},
+    ])
+    source.run_history[-1][field] = value
+    store.save(source)
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        preflight_technical_debt(parse_technical_debt(_details(source_ticket=source.id)), project=tmp_path, ticket_store=store, observation_verifier=_verified)
+
+    assert caught.value.code == "TECH_DEBT_SOURCE_MISMATCH"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].source_run"
+
+
+def test_preflight_requires_observation_verifier(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    source = store.create("discovery", "idea", "Источник", status="technical_analysis")
+    source.run_history.append({"run_id": "run-1", "ticket_id": source.id, "stage": "technical_analysis", "event": "completed"})
+    store.save(source)
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        preflight_technical_debt(parse_technical_debt(_details(source_ticket=source.id)), project=tmp_path, ticket_store=store)
+
+    assert caught.value.code == "TECH_DEBT_PREFLIGHT_UNAVAILABLE"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].evidence.observation"
+
+
+@pytest.mark.parametrize("verdict,code", [(False, "TECH_DEBT_SOURCE_MISMATCH"), (True, None)])
+def test_preflight_uses_observation_verifier_verdict(tmp_path: Path, verdict, code):
+    store = TicketStore(tmp_path)
+    store.init()
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    source = store.create("discovery", "idea", "Источник", status="technical_analysis")
+    source.run_history.append({"run_id": "run-1", "ticket_id": source.id, "stage": "technical_analysis", "event": "completed"})
+    store.save(source)
+    calls = []
+
+    def verifier(content: str, identifier: str, observation: str) -> bool:
+        calls.append((content, identifier, observation))
+        return verdict
+
+    candidates = parse_technical_debt(_details(source_ticket=source.id))
+    if code:
+        with pytest.raises(TechnicalDebtError) as caught:
+            preflight_technical_debt(candidates, project=tmp_path, ticket_store=store, observation_verifier=verifier)
+        assert caught.value.code == code
+        assert caught.value.path == "tech_debt_candidates.candidates[0].evidence.observation"
+    else:
+        assert preflight_technical_debt(candidates, project=tmp_path, ticket_store=store, observation_verifier=verifier) == candidates
+    assert calls == [("Traceability MVP\n", "Traceability MVP", "Наблюдение")]

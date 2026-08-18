@@ -640,6 +640,54 @@ tech_debt_candidates:
     assert orchestrator.store.children_of(idea.id) == []
 
 
+def test_technical_debt_observation_capability_error_does_not_mutate_control_plane(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Reject unverified evidence", status="technical_analysis")
+    idea.active_run = "run-contract-error"
+    orchestrator.store.save(idea)
+    run_dir = tmp_path / ".vibe" / "runs" / "run-source"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({"run_id": "run-source", "ticket_id": idea.id, "stage": "technical_analysis"}), encoding="utf-8")
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    before = orchestrator.store.get(idea.id).to_dict()
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        orchestrator._apply_result(
+            load_workflow("discovery"),
+            idea.id,
+            load_workflow("discovery").by_id["technical_analysis"],
+            AgentResult(
+                outcome="completed",
+                summary="Технический анализ завершен",
+                details="""
+implementation_required: false
+delivery_tickets: []
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates:
+    - problem: "Unverified source"
+      evidence:
+        path: README.md
+        identifier: "Traceability MVP"
+        observation: "Наблюдение"
+      impact: "Риск"
+      suggested_scope: "Проверить источник"
+      source_ticket: "%s"
+      source_stage: technical_analysis
+      source_run: run-source
+      type: task
+      urgency: medium
+      priority: 10
+""" % idea.id,
+            ),
+        )
+
+    assert caught.value.code == "TECH_DEBT_PREFLIGHT_UNAVAILABLE"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].evidence.observation"
+    assert orchestrator.store.get(idea.id).to_dict() == before
+    assert orchestrator.store.children_of(idea.id) == []
+
+
 def test_execute_does_not_record_technical_debt_contract_error(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     orchestrator.runner = ContractErrorRunner()
