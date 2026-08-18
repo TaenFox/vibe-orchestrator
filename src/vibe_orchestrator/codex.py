@@ -139,7 +139,12 @@ class CodexRunner:
             on_process_started(run_id)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
         events_path.write_bytes(stdout or b"")
-        token_usage = parse_codex_usage(stdout or b"")
+        token_usage = parse_codex_usage(
+            stdout or b"",
+            expected_run_id=contract.run_id,
+            model=contract.model,
+            reasoning_effort=contract.reasoning_effort,
+        )
         manifest["token_usage"] = token_usage
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if process.returncode != 0:

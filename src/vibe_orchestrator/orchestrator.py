@@ -19,7 +19,7 @@ from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
 from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
 from .sessions import SessionStore
-from .token_usage import unknown_token_usage
+from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger
 
 log = logging.getLogger("vibe")
@@ -308,6 +308,18 @@ class Orchestrator:
             target_status = "ready_for_release" if self.tree_manager.enabled() else "done"
         ticket.status = target_status
         if active_run:
+            token_usage = result.token_usage or self._run_token_usage(active_run)
+            if not is_confirmed_token_usage(
+                token_usage,
+                run_id=active_run,
+                model=contract.model if contract else None,
+                reasoning_effort=contract.reasoning_effort if contract else None,
+            ):
+                token_usage = unknown_token_usage(
+                    run_id=active_run,
+                    model=contract.model if contract else None,
+                    reasoning_effort=contract.reasoning_effort if contract else None,
+                )
             self.store.record_run_event(
                 ticket,
                 run_id=active_run,
@@ -318,10 +330,10 @@ class Orchestrator:
                 to_status=ticket.status,
                 context_revision_before=context_before,
                 context_revision_after=ticket.context_revision,
-                token_usage=result.token_usage or self._run_token_usage(active_run),
+                token_usage=token_usage,
                 **metadata,
             )
-            self._ledger_finalize(active_run, result.outcome, result.token_usage)
+            self._ledger_finalize(active_run, result.outcome, token_usage)
         ticket.active_run = None
         self._handle_follow_up(ticket, workflow, stage, result)
         self.store.save(ticket)

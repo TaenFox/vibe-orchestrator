@@ -170,8 +170,8 @@ def test_ticket_api_exposes_latest_usage_and_confirmed_aggregate(http_server, pr
         "source": "unknown", "captured_at": None,
     }
     assert item["token_usage_aggregate"] == {
-        "confirmed_runs": 1, "input_tokens": 10, "output_tokens": 4,
-        "total_tokens": 14, "latest_captured_at": "2026-08-17T10:00:00+00:00",
+        "confirmed_runs": 0, "input_tokens": 0, "output_tokens": 0,
+        "total_tokens": 0, "latest_captured_at": None,
     }
 
 
@@ -191,8 +191,8 @@ def test_ticket_api_aggregates_confirmed_usage_without_timestamp(http_server, pr
     assert item["token_usage"]["total_tokens"] == 14
     assert item["token_usage"]["captured_at"] is None
     assert item["token_usage_aggregate"] == {
-        "confirmed_runs": 1, "input_tokens": 10, "output_tokens": 4,
-        "total_tokens": 14, "latest_captured_at": None,
+        "confirmed_runs": 0, "input_tokens": 0, "output_tokens": 0,
+        "total_tokens": 0, "latest_captured_at": None,
     }
 
 
@@ -207,7 +207,7 @@ def test_ui_shows_unknown_timestamp_for_confirmed_usage(project):
 
     page = render_board(store, load_all_workflows(), "delivery")
 
-    assert "Токены (актуальный источник)</span>14 (input 10 · output 4) · неизвестно" in page
+    assert "Токены (актуальный источник)</span>unknown" in page
 
 
 def test_ui_shows_unknown_usage_without_mixing_budget_or_cost(project):

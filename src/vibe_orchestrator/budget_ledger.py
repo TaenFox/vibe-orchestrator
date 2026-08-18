@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .token_usage import is_confirmed_token_usage
+
 DIMENSIONS = ("tokens", "points", "runs")
 TERMINAL = {"finalized", "released", "unknown"}
 STATES = {"reserved_pending_start", "started", *TERMINAL}
@@ -287,6 +289,15 @@ class BudgetLedger:
     def finalize(self, run_id: str, terminal_outcome: str, usage: Mapping[str, Any]) -> dict[str, Any]:
         if terminal_outcome not in {"completed", "failed", "unknown"}: raise ValueError("invalid terminal outcome")
         actual = dict(usage)
+        # Usage is a fact, not a best-effort estimate.  Invalid provider
+        # evidence is retained for audit but can only enter the unknown state.
+        confirmed = is_confirmed_token_usage(actual, run_id=run_id)
+        if not confirmed and terminal_outcome != "unknown":
+            actual.setdefault("run_id", run_id)
+            actual.setdefault("points", None)
+            actual["points_status"] = "unavailable"
+            actual["normalization_version"] = None
+            return self._transition(run_id, "unknown", actual)
         if "total_tokens" not in actual and actual.get("input_tokens") is not None and actual.get("output_tokens") is not None:
             actual["total_tokens"] = actual["input_tokens"] + actual["output_tokens"]
         if actual.get("tokens") is None:

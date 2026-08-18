@@ -201,6 +201,32 @@ audit-сигналом, но не блокирует scope; остальные �
 
 ## Lifecycle, usage и overrun
 
+### Baseline текущего MVP и подтверждённый usage fact
+
+Delivery run проходит состояния `reserved_pending_start -> started -> finalized|unknown|released`. Provider usage является единственным источником фактических токенов; prompt, summary, details, result payload и длина текста не являются usage-доказательством.
+
+Normalized usage fact содержит `run_id`, raw `input_tokens`, `output_tokens`, `total_tokens`, `model`, `reasoning_effort`, `source`, `usage_ref`, `captured_at` и `normalization_version`. Для confirmed provider и runner fallback все эти provenance-поля и `captured_at` обязательны и непусты; provider event принимается только при exact correlation с run/profile, непустом stable ref и `total_tokens == input_tokens + output_tokens`.
+
+Для contract-aware provider adapter `usage_ref` обязан быть stable reference уровня
+event/snapshot: принимается явный `usage_ref`, а при его отсутствии —
+`provider_event_id`. `provider_request_id` не является usage reference, потому что
+может повторяться между несколькими `turn.completed`; он сохраняется только как
+optional provenance metadata. Событие только с request ID не подтверждает usage и
+исключается из расчёта (fail closed в `unknown`, если других валидных событий нет).
+
+Incremental facts складываются по уникальному stable `usage_ref`; replay того же ref
+с теми же counts идемпотентен, а тот же ref с изменившимися counts даёт `unknown`.
+Поэтому два `turn.completed` с одним `provider_request_id`, но разными stable event
+refs, суммируются как два distinct факта. Cumulative snapshots не складываются:
+используется последний валидный snapshot, а regression, mixed semantics или
+изменение counts у одного ref дают `unknown`. `runner_fallback` разрешён только с
+`fallback_policy_version`, `normalization_version` и `degraded_confidence: true`.
+Cost/currency и `rate_card_version` — optional audit metadata.
+
+### Изменения тикета DEL-B09FBE
+
+Adapter передаёт correlated contract без пересчёта в `run.json`, `result.json`, `run_history` и ledger. Ledger валидирует provenance на finalize boundary, сохраняет raw counts и metadata, а повторный finalize terminal run идемпотентен. Старые артефакты читаются через legacy parser, но `source=codex_cli.turn.completed` является только read-compatible форматом и никогда не считается confirmed или переносится в finalized aggregates. Если provider не поставляет correlation/stable event-or-snapshot ref/version/timestamp, результат остаётся `unknown`; upstream должен явно определить точное поле stable ref и гарантировать его стабильность на уровне события или snapshot. `provider_request_id` остаётся только optional metadata и не может заменять эту гарантию.
+
 Перед вызовом Codex control plane атомарно создаёт reservation. При отказе по
 лимиту Codex не запускается, `failed` run не создаётся и зависший reservation
 не остаётся. Ошибка до создания подпроцесса освобождает reservation без actual.
@@ -325,10 +351,18 @@ unknown runs с precedence `over_budget` → `blocked_unknown` → `stop_new_run
     разрешается при доступных прочих лимитах.
 12. AC-8: каждый finalized run увеличивает `finalized.runs` ровно на один;
     повторный finalize не меняет агрегат.
+13. Contract-aware incremental adapter суммирует два события с одним
+    `provider_request_id`, если у них разные `provider_event_id`/`usage_ref`;
+    повтор того же stable ref с теми же counts учитывается один раз.
+14. Повтор stable ref с изменившимися counts даёт `unknown`, а событие только
+    с `provider_request_id` не становится confirmed usage.
 
 ## Зависимости и открытые решения
 
-Нужно подтвердить гарантию корреляции provider usage с каждым `run_id`,
-владельца normalization table и формат `rate_card_version`. Manual override для `over_budget` и
-`blocked_unknown` требует audit actor/reason и отдельного решения о полномочиях.
+Нужно подтвердить гарантию корреляции provider usage с каждым `run_id`, точное
+upstream-поле stable event/snapshot ref и гарантию его уникальности/стабильности;
+`provider_request_id` может повторяться и остаётся только metadata. Также нужно
+подтвердить владельца normalization table и формат `rate_card_version`. Manual
+override для `over_budget` и `blocked_unknown` требует audit actor/reason и
+отдельного решения о полномочиях.
 Срок хранения ledger и UI/CLI ролей также остаются вне этого контракта.
