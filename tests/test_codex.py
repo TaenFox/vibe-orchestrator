@@ -1,7 +1,10 @@
 import asyncio
 import json
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+
+import pytest
 
 from vibe_orchestrator.codex import CodexRunner
 from vibe_orchestrator.config import Stage, load_workflow
@@ -36,7 +39,7 @@ def test_parser_keeps_captured_at_unknown_when_timestamp_is_missing():
         "source": "codex_cli.turn.completed",
         "captured_at": None,
     }
-    assert is_confirmed_token_usage(usage)
+    assert not is_confirmed_token_usage(usage)
 
 
 def test_parser_sums_all_supported_turn_completed_events():
@@ -59,6 +62,122 @@ def test_parser_does_not_estimate_unknown_or_legacy_output():
     ])
 
     assert parse_codex_usage(events) == unknown_token_usage()
+
+
+def test_contract_parser_requires_exact_correlation_and_preserves_provenance():
+    events = '\n'.join([
+        json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "run-1", "model": "m", "reasoning_effort": "medium", "usage_ref": "evt-1", "usage_semantics": "incremental", "usage": {"input_tokens": 10, "output_tokens": 2}}),
+        json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:01+00:00", "run_id": "other", "model": "m", "reasoning_effort": "medium", "usage_ref": "evt-2", "usage_semantics": "incremental", "usage": {"input_tokens": 99, "output_tokens": 99}}),
+    ])
+    usage = parse_codex_usage(events, expected_run_id="run-1", model="m", reasoning_effort="medium")
+    assert usage["run_id"] == "run-1"
+    assert usage["usage_ref"] == "evt-1"
+    assert usage["total_tokens"] == 12
+    assert usage["source"] == "provider"
+    assert is_confirmed_token_usage(usage, run_id="run-1", model="m", reasoning_effort="medium")
+
+
+def test_contract_parser_deduplicates_incremental_and_uses_latest_cumulative_snapshot():
+    def event(ref, semantics, input_tokens):
+        return json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "r", "model": "m", "reasoning_effort": "low", "usage_ref": ref, "usage_semantics": semantics, "usage": {"input_tokens": input_tokens, "output_tokens": 1}})
+    incremental = '\n'.join((event("a", "incremental", 10), event("a", "incremental", 10), event("b", "incremental", 5)))
+    cumulative = '\n'.join((event("a", "cumulative", 10), event("b", "cumulative", 15)))
+    assert parse_codex_usage(incremental, expected_run_id="r", model="m", reasoning_effort="low")["total_tokens"] == 17
+    assert parse_codex_usage(cumulative, expected_run_id="r", model="m", reasoning_effort="low")["total_tokens"] == 16
+
+
+def test_contract_parser_uses_stable_event_ref_when_request_id_repeats():
+    def event(event_id, input_tokens, output_tokens):
+        return json.dumps({
+            "type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00",
+            "run_id": "r", "model": "m", "reasoning_effort": "low",
+            "provider_event_id": event_id, "provider_request_id": "req-1",
+            "usage_semantics": "incremental",
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        })
+
+    usage = parse_codex_usage(
+        "\n".join((event("evt-1", 10, 2), event("evt-2", 5, 1))),
+        expected_run_id="r", model="m", reasoning_effort="low",
+    )
+
+    assert usage["input_tokens"] == 15
+    assert usage["output_tokens"] == 3
+    assert usage["total_tokens"] == 18
+    assert usage["usage_ref"] == "evt-2"
+    assert usage["provider_event_id"] == "evt-2"
+    assert usage["provider_request_id"] == "req-1"
+
+
+def test_contract_parser_rejects_request_only_incremental_event():
+    event = json.dumps({
+        "type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00",
+        "run_id": "r", "model": "m", "reasoning_effort": "low",
+        "provider_request_id": "req-1", "usage_semantics": "incremental",
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+    })
+
+    usage = parse_codex_usage(event, expected_run_id="r", model="m", reasoning_effort="low")
+
+    assert usage["source"] == "unknown"
+
+
+def test_contract_parser_keeps_explicit_usage_ref_without_event_id():
+    event = json.dumps({
+        "type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00",
+        "run_id": "r", "model": "m", "reasoning_effort": "low",
+        "usage_ref": "snapshot-1", "provider_request_id": "req-1",
+        "usage_semantics": "incremental", "usage": {"input_tokens": 10, "output_tokens": 2},
+    })
+
+    usage = parse_codex_usage(event, expected_run_id="r", model="m", reasoning_effort="low")
+
+    assert usage["source"] == "provider"
+    assert usage["usage_ref"] == "snapshot-1"
+    assert usage["provider_event_id"] is None
+    assert usage["provider_request_id"] == "req-1"
+
+
+def test_contract_parser_rejects_cumulative_regression_and_mixed_semantics():
+    def event(ref, semantics, input_tokens):
+        return json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "r", "model": "m", "reasoning_effort": "low", "usage_ref": ref, "usage_semantics": semantics, "usage": {"input_tokens": input_tokens, "output_tokens": 1}})
+    regression = '\n'.join((event("a", "cumulative", 15), event("b", "cumulative", 12)))
+    mixed = '\n'.join((event("a", "incremental", 15), event("b", "cumulative", 12)))
+    assert parse_codex_usage(regression, expected_run_id="r", model="m", reasoning_effort="low")["source"] == "unknown"
+    assert parse_codex_usage(mixed, expected_run_id="r", model="m", reasoning_effort="low")["source"] == "unknown"
+
+
+def test_contract_parser_rejects_cumulative_duplicate_with_changed_counts():
+    def event(input_tokens):
+        return json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "r", "model": "m", "reasoning_effort": "low", "usage_ref": "evt-1", "usage_semantics": "cumulative", "usage": {"input_tokens": input_tokens, "output_tokens": 1}})
+
+    events = "\n".join((event(10), event(20)))
+
+    assert parse_codex_usage(events, expected_run_id="r", model="m", reasoning_effort="low")["source"] == "unknown"
+
+
+def test_contract_parser_rejects_missing_timestamp_without_fallback():
+    event = json.dumps({"type": "turn.completed", "run_id": "r", "model": "m", "reasoning_effort": "low",
+                        "usage_ref": "evt-1", "usage_semantics": "incremental",
+                        "usage": {"input_tokens": 1, "output_tokens": 2}})
+    assert parse_codex_usage(event, expected_run_id="r", model="m", reasoning_effort="low")["source"] == "unknown"
+
+
+@pytest.mark.parametrize("captured_at", [None, "", "   "])
+def test_provider_usage_requires_captured_at(captured_at):
+    usage = {"run_id": "r", "input_tokens": 1, "output_tokens": 2, "total_tokens": 3,
+             "model": "m", "reasoning_effort": "low", "source": "provider", "usage_ref": "evt",
+             "captured_at": captured_at, "normalization_version": "tokens_per_1000.v1"}
+    assert not is_confirmed_token_usage(usage, run_id="r", model="m", reasoning_effort="low")
+
+
+@pytest.mark.parametrize("run_id", [None, "other", "r"])
+def test_legacy_usage_is_never_confirmed(run_id):
+    usage = {"run_id": run_id, "input_tokens": 1, "output_tokens": 2, "total_tokens": 3,
+             "model": "m", "reasoning_effort": "low", "source": "codex_cli.turn.completed",
+             "usage_ref": "evt", "captured_at": "2026-08-17T10:00:00+00:00",
+             "normalization_version": "tokens_per_1000.v1"}
+    assert not is_confirmed_token_usage(usage, run_id="r", model="m", reasoning_effort="low")
 
 
 def test_stage_execution_profile_overrides_runner_defaults(tmp_path: Path):
@@ -214,7 +333,7 @@ def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monk
                 json.dumps({"outcome": "completed", "summary": "ok", "details": "trace"}),
                 encoding="utf-8",
             )
-            return (b'{"type":"turn.completed","timestamp":"2026-08-17T10:11:12+00:00","usage":{"input_tokens":12,"output_tokens":3}}\n', None)
+            return (b'{"type":"turn.completed","timestamp":"2026-08-17T10:11:12+00:00","run_id":"run-123","model":"gpt-5.6-luna","reasoning_effort":"medium","usage_ref":"evt-123","usage_semantics":"incremental","usage":{"input_tokens":12,"output_tokens":3}}\n', None)
 
     captured = {}
 
@@ -265,6 +384,11 @@ def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(
     stage = load_workflow("delivery").by_id["development"]
     runner = CodexRunner(store, codex_binary="codex-bin", model="gpt-5-test", reasoning_effort="medium")
     contract = runner.prepare_execution_contract(stage, "run-contract")
+    contract = replace(contract, reservation_metadata={
+        "contract_version": "budget.v1",
+        "ticket_budget_id": "ticket:DEL-1",
+        "state": "reserved_pending_start",
+    })
 
     class FakeProcess:
         returncode = 0
@@ -293,4 +417,5 @@ def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(
     assert result.outcome == "completed"
     assert manifest["prompt_path"] == contract.prompt_path
     assert manifest["prompt_version"] == contract.prompt_version
+    assert manifest["reservation"] == contract.reservation_metadata
     assert manifest["prompt_contract"] == contract.prompt_contract

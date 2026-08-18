@@ -53,7 +53,6 @@ def select_candidates(
             and source.id == "selected_for_session"
             and target.id == "system_analysis"
             and ticket.id not in session_participants
-            and not ticket.wip_exempt
         ):
             continue
         if source.kind == "queue" and not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id) >= target.wip:

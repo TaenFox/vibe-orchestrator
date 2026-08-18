@@ -25,10 +25,11 @@
   Discovery → Delivery в агрегат входят Delivery-тикеты с `parent` и типом
   `story`, `task` или `bug`; `mandatory` определяет только обязательность для
   gate реализации.
-- **Бюджет** в MVP отсутствует: нет денежных, человеко-часовых, token- или
-  cost-полей, расчета, лимита и решения по бюджету. `priority` — порядок
-  планирования, а `wip` — лимит одновременно выполняемых обычных тикетов, не
-  бюджет.
+- **Бюджетный control plane** зафиксирован контрактом [`budget.v1`](BUDGETING.md),
+  а Delivery runtime создаёт reservations и блокирует запуски по enforced-лимитам. В контракте `planned` — незарезервированные
+  будущие obligations, `reserved` — active holds; они не учитываются дважды.
+  `priority` — порядок планирования, а `wip` — лимит одновременно выполняемых
+  обычных тикетов, не бюджет.
 
 В комплект входят три процесса:
 
@@ -46,7 +47,9 @@
 - Агенты возвращают `outcome`; сами статусы workflow они не меняют.
 - При сбое агента оркестратор автоматически повторяет ту же стадию через 5 и 30 секунд. После третьего последовательного сбоя автоматические попытки прекращаются; новый цикл можно запустить кнопкой `Повторить` в UI.
 - Delivery-тикеты проходят все агентные стадии в собственном Git worktree. `ready_for_release` автоматически интегрирует ветку тикета в ветку родителя или `main`; успешная интеграция закрывает тикет.
-- Контракт будущего бюджетирования описан в [`BUDGETING.md`](BUDGETING.md); бюджетирование в MVP не реализовано.
+- Версионируемый контракт бюджетного control plane описан в [`BUDGETING.md`](BUDGETING.md);
+  для ручных решений доступны `vibe budget increase-limit`, `allow-overrun`,
+  `resolve-unknown` и `decisions`.
 
 Планировщик применяет scheduler gate в таком порядке: тикет не должен иметь
 `active_run` или `blocked_by`; источник должен быть queue со связью `pull_to` на
@@ -306,6 +309,23 @@ Source of truth для аудита разделен на два слоя:
 Это экспериментальный прототип локальной автоматизации. Запускайте его только на репозиториях, которые можно восстановить через Git.
 
 ## Известные ограничения прототипа
+
+## Ограничения UI, telemetry и performance
+
+UI не является telemetry или billing системой: budget read-model читается из
+локального SQLite и не содержит цены. Повторные budget reads в одном API/render
+проходе переиспользуют bounded request-local snapshots по scope; cache не
+переживает запрос. Пагинация и внешний provider API не
+реализованы. Browser-level smoke выполняется вручную, поскольку worker-контекст
+не подключает browser runner.
+
+## Budget control plane
+
+Delivery API `/api/tickets` и `/api/sessions` публикует read-only `budget` и
+`budget_runs` с limits, spent, reserved, available, lifecycle counts/status,
+confidence и fresh/stale/unavailable metadata. Card, drawer и session panel
+показывают тот же контракт; missing legacy records не превращаются в unlimited.
+Полный контракт и manual browser smoke описаны в [BUDGETING.md](BUDGETING.md).
 
 - Переходы, выполняемые человеком, намеренно упрощены: обычно кнопки UI следуют настроенному `next`; для Discovery `investment_decision` цель выбирается по `implementation_required`.
 - Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.

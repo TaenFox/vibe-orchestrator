@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -34,14 +35,18 @@ class ExecutionContract:
     prompt_version: str
     model: str
     reasoning_effort: str
+    reservation_metadata: dict[str, object] | None = None
 
-    def history_metadata(self) -> dict[str, str]:
-        return {
+    def history_metadata(self) -> dict[str, object]:
+        metadata: dict[str, object] = {
             "prompt_path": self.prompt_path,
             "prompt_version": self.prompt_version,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
         }
+        if self.reservation_metadata is not None:
+            metadata["reservation"] = self.reservation_metadata
+        return metadata
 
 
 def ticket_prompt_metadata(ticket: Ticket) -> dict[str, str]:
@@ -96,7 +101,7 @@ class CodexRunner:
             reasoning_effort=profile["reasoning_effort"],
         )
 
-    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None) -> AgentResult:
+    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None, on_process_started: Callable[[str], None] | None = None) -> AgentResult:
         contract = contract or self.prepare_execution_contract(stage, run_id or ticket.active_run)
         run_id = contract.run_id
         run_dir = self.store.run_path(run_id)
@@ -126,6 +131,7 @@ class CodexRunner:
             "version": __version__,
             "model": contract.model,
             "reasoning_effort": contract.reasoning_effort,
+            "reservation": contract.reservation_metadata,
             "ticket_snapshot": ticket_prompt_metadata(ticket),
             "workspace_path": str(workspace),
             "token_usage": unknown_token_usage(),
@@ -134,9 +140,16 @@ class CodexRunner:
         manifest["command"] = cmd
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        if on_process_started:
+            on_process_started(run_id)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
         events_path.write_bytes(stdout or b"")
-        token_usage = parse_codex_usage(stdout or b"")
+        token_usage = parse_codex_usage(
+            stdout or b"",
+            expected_run_id=contract.run_id,
+            model=contract.model,
+            reasoning_effort=contract.reasoning_effort,
+        )
         manifest["token_usage"] = token_usage
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if process.returncode != 0:
