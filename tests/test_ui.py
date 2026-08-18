@@ -13,7 +13,7 @@ from vibe_orchestrator.control import DeliverySessionStore
 from vibe_orchestrator.budget_ledger import BudgetLedger
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.ui import (AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, BudgetReadContext,
-                                  _budget_read_model, render_board, render_board_fragment)
+                                  _budget_read_model, _budget_run, render_board, render_board_fragment)
 from vibe_orchestrator.config import load_all_workflows
 
 
@@ -151,6 +151,8 @@ def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, pr
     assert item["budget"]["snapshot_status"] == "fresh"
     assert item["budget"]["enforcement_state_exact"] is True
     assert item["budget_runs"][0]["source_confidence"] == "confirmed"
+    assert item["budget_runs"][0]["snapshot_status"] == "fresh"
+    assert item["budget_runs"][0]["enforcement_state_exact"] is True
     assert item["budget_runs"][0]["actual"]["tokens"] == 12
     assert item["budget_runs"][0]["cost"] == 12.5
     assert item["budget_runs"][0]["currency"] == "USD"
@@ -169,6 +171,43 @@ def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, pr
     assert "cost 12.5" in page
     assert "snapshot_status fresh" in page
     assert "enforcement_state_exact True" in page
+
+
+def test_budget_run_read_model_marks_unknown_fallback_and_inconsistent_usage_stale(project):
+    ledger = BudgetLedger(project)
+    ledger.create_budget("ticket", "DEL-stale", limits={"tokens": 100, "points": 10, "runs": 4})
+
+    ledger.reserve("run-fallback", "DEL-stale", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-fallback")
+    fallback = {
+        "run_id": "run-fallback", "model": "m", "reasoning_effort": "medium", "usage_ref": "u-fallback",
+        "input_tokens": 4, "output_tokens": 1, "total_tokens": 5, "source": "runner_fallback",
+        "captured_at": "2026-08-18T10:00:00+00:00", "normalization_version": "n.v1",
+        "fallback_policy_version": "fallback.v1", "degraded_confidence": True,
+    }
+    ledger.finalize("run-fallback", "completed", fallback)
+
+    ledger.reserve("run-unknown", "DEL-stale", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-unknown")
+    ledger.finalize("run-unknown", "unknown", {"input_tokens": None, "output_tokens": None})
+
+    _, runs = _budget_read_model(ledger, "ticket:DEL-stale")
+    by_id = {run["run_id"]: run for run in runs}
+    assert by_id["run-fallback"]["snapshot_status"] == "stale"
+    assert by_id["run-fallback"]["enforcement_state_exact"] is False
+    assert by_id["run-fallback"]["actual"]["tokens"] == 5
+    assert by_id["run-unknown"]["snapshot_status"] == "stale"
+    assert by_id["run-unknown"]["enforcement_state_exact"] is False
+    assert by_id["run-unknown"]["actual"]["tokens"] is None
+    assert by_id["run-unknown"]["cost"] is None
+
+    inconsistent = _budget_run({
+        "run_id": "run-inconsistent", "state": "finalized", "attempt_kind": "normal",
+        "ticket_id": "DEL-stale", "actual": {"source": "provider", "total_tokens": 5},
+    })
+    assert inconsistent["source_confidence"] == "confirmed"
+    assert inconsistent["snapshot_status"] == "stale"
+    assert inconsistent["enforcement_state_exact"] is False
 
 
 def test_budget_read_model_preserves_zero_cost(project):
