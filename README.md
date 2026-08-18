@@ -276,7 +276,7 @@ run_history:
     ticket_description: ...
 ```
 
-Прототип намеренно **не** реализует базу данных, интеграцию с Jira, пользователей, права доступа и полный журнал событий.
+Прототип намеренно **не** реализует базу данных, интеграцию с Jira, пользователей и полную permission-систему.
 
 ## Traceability и аудит
 
@@ -296,6 +296,24 @@ Source of truth для аудита разделен на два слоя:
 - `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
 - `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.
 - `ticket_title`, `ticket_priority`, `ticket_parent`, `ticket_description` в `run_history`/`run.json` — durable snapshot mutable ticket-полей, которые реально были встроены в prompt этого запуска.
+- `audit_events[]` — append-only журнал успешных `create_ticket`/`update_ticket`; legacy YAML без этого поля читается как пустой список.
+
+### Write tools
+
+Агенты изменяют тикеты только через `create_ticket`/`update_ticket` из
+`agent_tools` либо через `POST /api/agent/tickets` и `PATCH
+/api/agent/tickets/<id>`. Разрешены только metadata-поля; неизвестные и
+lifecycle-поля отвергаются целиком. Все новые тикеты получают
+`workflow.initial_status` (для Delivery — `todo`). `priority` — целое число от
+нуля, title обрезается по краям, parent/blocked_by проверяются на существование,
+совместимость, self-reference и циклы.
+
+Успешные операции сохраняют actor, origin, before/after, changed_fields и
+timestamp в audit event. `expected_updated_at` защищает от stale update,
+а `idempotency_key` делает повтор create безопасным: тот же payload возвращает
+исходный тикет без нового события, другой payload дает conflict. Delivery
+tech-debt в текущей модели представляется как обычный `task`; агент не может
+сразу выбрать queue или agent status.
 
 Практическое правило для расследований: сначала смотрите `run_history` в тикете как индекс запусков, затем открывайте `.vibe/runs/<run_id>/run.json` и `result.json`, и только после этого при необходимости углубляйтесь в `events.jsonl`.
 
@@ -330,11 +348,20 @@ bounds, не вызывают init/save/migration и не меняют ticket YA
 
 ## Безопасность
 
-Песочница Codex по умолчанию — `workspace-write`, а не `danger-full-access`. Оркестратор не коммитит файлы аутентификации Codex. Храните `.codex/auth.json` и другие учетные данные вне проектных репозиториев.
+Песочница Codex по умолчанию — `workspace-write`, а не `danger-full-access`.
+Агентский contract не предоставляет `TicketStore.save` и прямую запись
+`.vibe/tickets/**`; lifecycle остается у UI и оркестратора. `origin` фиксирует
+источник операции, но не заменяет авторизацию. Оркестратор не коммитит файлы
+аутентификации Codex. Храните `.codex/auth.json` и другие учетные данные вне
+проектных репозиториев.
 
 Это экспериментальный прототип локальной автоматизации. Запускайте его только на репозиториях, которые можно восстановить через Git.
 
 ## Известные ограничения прототипа
+
+HTTP/API contract покрыт unit/API тестами; browser-level проверка DOM, focus,
+keyboard и viewport в worker-контексте недоступна и требует ручного или внешнего
+прогона.
 
 ## Ограничения UI, telemetry и performance
 

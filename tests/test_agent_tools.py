@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from vibe_orchestrator.agent_tools import ReadOnlyAgentTools
+from vibe_orchestrator.agent_tools import AgentTicketTools, ReadOnlyAgentTools
 from vibe_orchestrator.control import DeliverySessionStore
-from vibe_orchestrator.tickets import TicketStore
+from vibe_orchestrator.tickets import TicketStore, TicketWriteConflict, TicketWriteError
 
 
 def test_agent_ticket_queries_are_filtered_bounded_and_read_only(tmp_path: Path):
@@ -26,6 +26,52 @@ def test_agent_ticket_queries_are_filtered_bounded_and_read_only(tmp_path: Path)
 
     with pytest.raises(ValueError):
         tools.list_tickets(limit=0)
+
+
+def test_agent_write_contract_validates_lifecycle_and_audits(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    tools = AgentTicketTools(tmp_path, actor="agent-1")
+
+    created = tools.create_ticket(process="delivery", type="task", title="  Safe task  ", origin="agent:run-1", idempotency_key="k1")
+    assert created["title"] == "Safe task"
+    assert created["status"] == "todo"
+    assert created["audit_events"][-1]["origin"] == "agent:run-1"
+    assert created["audit_events"][-1]["event"] == "ticket_created"
+
+    replay = tools.create_ticket(process="delivery", type="task", title="Safe task", origin="agent:run-1", idempotency_key="k1")
+    assert replay["id"] == created["id"]
+    assert len(TicketStore(tmp_path).get(created["id"]).audit_events) == 1
+    with pytest.raises(TicketWriteConflict):
+        tools.create_ticket(process="delivery", type="task", title="Different", origin="agent:run-1", idempotency_key="k1")
+    with pytest.raises(TicketWriteError):
+        tools.create_ticket(process="delivery", type="task", title="Unsafe", origin="agent:run-1", status="review")
+    with pytest.raises(TicketWriteError):
+        tools.update_ticket(created["id"], status="review", origin="agent:run-1")
+
+    updated = tools.update_ticket(created["id"], title="Renamed", context={"category": "tech-debt"}, origin="agent:run-1")
+    assert updated["title"] == "Renamed"
+    assert updated["status"] == "todo"
+    assert updated["audit_events"][-1]["changed_fields"] == ["context", "title"]
+    assert len(TicketStore(tmp_path).get(created["id"]).audit_events) == 2
+
+
+def test_agent_write_rejects_invalid_metadata_without_changes(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    tools = AgentTicketTools(tmp_path, actor="agent-1")
+    ticket = tools.create_ticket(process="delivery", type="task", title="Task", origin="agent")
+    before = TicketStore(tmp_path).get(ticket["id"])
+    with pytest.raises(TicketWriteError):
+        tools.update_ticket(ticket["id"], priority=True, origin="agent")
+    with pytest.raises(TicketWriteError):
+        tools.update_ticket(ticket["id"], blocked_by=[ticket["id"]], origin="agent")
+    after = TicketStore(tmp_path).get(ticket["id"])
+    assert after.title == before.title
+    assert len(after.audit_events) == 1
+    with pytest.raises(TicketWriteConflict):
+        tools.update_ticket(ticket["id"], title="stale", expected_updated_at="old", origin="agent")
+    assert len(TicketStore(tmp_path).get(ticket["id"]).audit_events) == 1
 
 
 def test_agent_session_exposes_audit_and_effective_membership(tmp_path: Path):

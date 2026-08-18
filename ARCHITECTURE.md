@@ -100,6 +100,27 @@ queue обычный тикет не допускается, если WIP цел
 - `result.json` является source of truth для структурированного ответа агента.
 - `events.jsonl` нужен как низкоуровневый сырой след исполнения и не заменяет `run_history`.
 
+### Agent write boundary
+
+Агентский write API проходит через `TicketWriteService`. Он принимает allowlist
+metadata-полей и отклоняет неизвестные поля, а также `status`, `process`, `type`,
+`active_run`, `run_history` и остальные lifecycle-поля при update. Внутренние
+создания corrective/rework и переходы scheduler остаются privileged-вызовами
+оркестратора. Создание агента всегда использует initial status workflow
+(Delivery: `todo`), а parent и blocked_by валидируются до изменения.
+
+`Ticket.audit_events[]` хранится в том же YAML и добавляется только после
+успешной проверки. Событие содержит operation, actor, origin, ticket ID,
+timestamp, sorted `changed_fields`, before/after и при необходимости
+idempotency key. Write service сериализует операции lock-ом, а `TicketStore.save`
+завершает запись атомарной заменой временного файла; legacy ticket без
+`audit_events` загружается с пустым списком.
+
+Повторный create с тем же idempotency key и payload возвращает исходный тикет без
+нового события; другой payload или stale `expected_updated_at` дает conflict.
+Tech-debt пока не отдельный domain type: агент создает Delivery `task` и не
+получает права менять lifecycle.
+
 Рекомендованный порядок расследования:
 
 1. Найти нужный `run_id` в `ticket.run_history`.
@@ -170,6 +191,7 @@ release), Discovery Correction — только в `done`. После разре
 
 - `.vibe/runs/` намеренно остается локальным и игнорируется Git, поэтому для долгого хранения аудит опирается на `run_history` в YAML тикета.
 - Протокол traceability не защищает от ручного редактирования файлов `.vibe/tickets/**`; доверие к аудиту опирается на дисциплину репозитория и Git history.
+- `origin` и actor обеспечивают traceability, но не являются полноценной системой авторизации; browser-level DOM/focus/viewport проверки выполняются только вручную или внешним runner.
 - Enforcement budget.v1, cost model, capacity planning и агрегированные
   финансовые/трудовые показатели не реализованы; `priority`, `wip`, `mandatory`
   и статусы не следует интерпретировать как бюджетные значения. Модель и
