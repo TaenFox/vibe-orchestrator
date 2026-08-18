@@ -192,6 +192,33 @@ def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     assert all(entry["run_id"] == "run-review" for entry in run_events(parent))
 
 
+def test_review_rework_inherits_parent_active_session(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("delivery", "task", "Session parent", status="review")
+    session = orchestrator.session_store.create([parent.id])
+    orchestrator.session_store.activate(session)
+    parent.active_run = "run-review"
+    orchestrator.store.save(parent)
+
+    workflow = load_workflow("delivery")
+    orchestrator._apply_result(
+        workflow,
+        parent.id,
+        workflow.by_id["review"],
+        AgentResult(outcome="needs_rework", summary="Нужна правка", details="Добавить тест."),
+    )
+
+    child = orchestrator.store.children_of(parent.id, process="delivery")[0]
+    loaded_session = orchestrator.session_store.get(session.id)
+    assert child.id in loaded_session.ticket_ids
+    assert any(
+        event["event"] == "ticket_inherited"
+        and event["ticket_id"] == child.id
+        and event["source_ticket"] == parent.id
+        for event in loaded_session.audit_events
+    )
+
+
 def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
     async def scenario() -> None:
         orchestrator = Orchestrator(tmp_path, max_agents=1)
@@ -825,6 +852,37 @@ delivery_tickets:
     orchestrator._reconcile_tickets()
 
     assert orchestrator.store.get(idea.id).status == "ready_for_validation"
+
+
+def test_technical_analysis_resets_unselected_existing_child_to_todo(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Restore delivery queue", status="technical_analysis")
+    child = orchestrator.store.create(
+        "delivery", "story", "Existing delivery", parent=idea.id, status="selected_for_session"
+    )
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    workflow = load_workflow("discovery")
+    orchestrator._apply_result(
+        workflow,
+        idea.id,
+        workflow.by_id["technical_analysis"],
+        AgentResult(
+            outcome="completed",
+            summary="Повторная синхронизация",
+            details="""```yaml
+implementation_required: true
+delivery_tickets:
+  - type: story
+    title: "Existing delivery"
+    description: "Актуальное описание"
+    mandatory: true
+```""",
+        ),
+    )
+
+    assert orchestrator.store.get(child.id).status == "todo"
 
 
 def test_technical_analysis_without_implementation_skips_implementation(tmp_path: Path):
