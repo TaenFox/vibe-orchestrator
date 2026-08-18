@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from typing import Any, Iterable
 
 
 TOKEN_USAGE_SOURCE = "provider"
 NORMALIZATION_VERSION = "tokens_per_1000.v1"
+CODEX_FALLBACK_POLICY_VERSION = "codex_cli_0.147.0_turn_completed.v1"
 
 
 def unknown_token_usage(*, run_id: str | None = None, model: str | None = None,
@@ -71,6 +73,83 @@ def _legacy_parse(events: str, captured_at: str | None) -> dict[str, Any]:
     }
 
 
+def _runner_fallback_parse(
+    events: str,
+    *,
+    runner_run_id: str,
+    model: str,
+    reasoning_effort: str,
+    captured_at: str | None,
+) -> dict[str, Any]:
+    """Adapt the minimal Codex CLI 0.147.0 event to the runner contract.
+
+    The CLI event has provider-origin counters but no trustworthy correlation
+    metadata.  The runner supplies that metadata.  This deliberately accepts
+    one distinct normalized event only: without provider semantics, combining
+    multiple events could turn cumulative snapshots into an overcount.
+    """
+    if not all(isinstance(value, str) and value.strip() for value in (
+        runner_run_id, model, reasoning_effort,
+    )):
+        return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+    if not isinstance(captured_at, str) or not captured_at.strip():
+        return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+
+    events_by_payload: dict[str, dict[str, Any]] = {}
+    for line in events.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+        input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
+        if not (_non_negative_int(input_tokens) and _non_negative_int(output_tokens)):
+            return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+        total = usage.get("total_tokens", input_tokens + output_tokens)
+        if not _non_negative_int(total) or total != input_tokens + output_tokens:
+            return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+        normalized = {
+            "type": "turn.completed",
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total},
+            "provider_event_id": _event_value(event, usage, "provider_event_id"),
+            "provider_request_id": _event_value(event, usage, "provider_request_id"),
+        }
+        payload_hash = sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        events_by_payload[payload_hash] = {
+            "event": event, "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "total_tokens": total, "payload_hash": payload_hash,
+        }
+
+    if len(events_by_payload) != 1:
+        return unknown_token_usage(run_id=runner_run_id, model=model, reasoning_effort=reasoning_effort)
+    item = next(iter(events_by_payload.values()))
+    event = item["event"]
+    event_timestamp = _captured_at(event.get("timestamp"), captured_at)
+    usage_ref = f"{CODEX_FALLBACK_POLICY_VERSION}:1:{item['payload_hash']}"
+    return {
+        "run_id": runner_run_id,
+        "input_tokens": item["input_tokens"],
+        "output_tokens": item["output_tokens"],
+        "total_tokens": item["total_tokens"],
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "source": "runner_fallback",
+        "usage_ref": usage_ref,
+        "captured_at": event_timestamp,
+        "normalization_version": NORMALIZATION_VERSION,
+        "fallback_policy_version": CODEX_FALLBACK_POLICY_VERSION,
+        "degraded_confidence": True,
+        "provider_event_id": _event_value(event, event.get("usage", {}), "provider_event_id"),
+        "provider_request_id": _event_value(event, event.get("usage", {}), "provider_request_id"),
+    }
+
+
 def parse_codex_usage(
     events: str | bytes,
     *,
@@ -78,6 +157,8 @@ def parse_codex_usage(
     model: str | None = None,
     reasoning_effort: str | None = None,
     captured_at: str | None = None,
+    runner_run_id: str | None = None,
+    profile: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Parse provider-confirmed usage, failing closed on weak evidence.
 
@@ -88,6 +169,15 @@ def parse_codex_usage(
     """
     if isinstance(events, bytes):
         events = events.decode("utf-8", errors="replace")
+    if runner_run_id is not None or profile is not None:
+        runner_profile = profile or {}
+        return _runner_fallback_parse(
+            events,
+            runner_run_id=runner_run_id or expected_run_id or "",
+            model=runner_profile.get("model", model or ""),
+            reasoning_effort=runner_profile.get("reasoning_effort", reasoning_effort or ""),
+            captured_at=captured_at,
+        )
     if expected_run_id is None and model is None and reasoning_effort is None:
         return _legacy_parse(events, captured_at)
 
