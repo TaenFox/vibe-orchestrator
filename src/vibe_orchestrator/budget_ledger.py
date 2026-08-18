@@ -309,10 +309,9 @@ class BudgetLedger:
             result = self._insert_decision(db, decision_id=decision_id, operation=operation, actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, policy=policy, payload=payload, expires_at=expires_at, one_shot=one_shot, timestamp=timestamp)
             self._refresh_effective_limits(db, now=timestamp)
             if operation == "resolve-unknown":
-                self._recompute_status(db, [value for value in (run["ticket_budget_id"], run["session_budget_id"]) if value])
                 if one_shot:
                     db.execute("UPDATE budget_decisions SET consumed_at=? WHERE decision_id=?", (timestamp, decision_id))
-                    self._recompute_status(db, [value for value in (run["ticket_budget_id"], run["session_budget_id"]) if value])
+                self._recompute_status(db, [value for value in (run["ticket_budget_id"], run["session_budget_id"]) if value], now=timestamp)
             return result
 
     def increase_limit(self, *, actor: str, target_scope: str, target_id: str, dimension: str, delta: int,
@@ -365,10 +364,11 @@ class BudgetLedger:
     def get_budget(self, budget_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            self._refresh_effective_limits(db, [budget_id])
+            now = self.clock()
+            self._refresh_effective_limits(db, [budget_id], now=now)
             row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
             if row:
-                self._recompute_status(db, [budget_id])
+                self._recompute_status(db, [budget_id], now=now)
                 row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
         if not row:
             return None
@@ -396,9 +396,9 @@ class BudgetLedger:
                 if row and row["mode"] == "enforced": rows.append(row)
         return rows
 
-    def _recompute_status(self, db: sqlite3.Connection, budget_ids: list[str] | tuple[str, ...]) -> None:
+    def _recompute_status(self, db: sqlite3.Connection, budget_ids: list[str] | tuple[str, ...], *, now: str | None = None) -> None:
         """Derive status from accounting while preserving explicit policy gates."""
-        now = self.clock()
+        now = now or self.clock()
         self._refresh_effective_limits(db, budget_ids, now=now)
         for budget_id in dict.fromkeys(budget_ids):
             row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
@@ -408,9 +408,9 @@ class BudgetLedger:
                 """SELECT 1 FROM runs r WHERE r.state='unknown' AND (r.ticket_budget_id=? OR r.session_budget_id=?)
                    AND NOT EXISTS (SELECT 1 FROM budget_decisions d WHERE d.operation='resolve-unknown'
                      AND d.target_scope='run' AND d.target_id=r.run_id
-                     AND d.consumed_at IS NULL
+                     AND (d.consumed_at IS NULL OR d.one_shot=1)
                      AND (d.expires_at IS NULL OR d.expires_at>?)) LIMIT 1""",
-                (budget_id, budget_id, self.clock()),
+                (budget_id, budget_id, now),
             ).fetchone() is not None
             over_budget = any(
                 row[f"effective_limit_{dimension}"] is not None and row[f"finalized_{dimension}"] > row[f"effective_limit_{dimension}"]
@@ -454,7 +454,8 @@ class BudgetLedger:
             if not rows:
                 return Reservation(run_id, "legacy", legacy=True)
             budget_ids = [row["budget_id"] for row in rows]
-            self._recompute_status(db, budget_ids)
+            now = self.clock()
+            self._recompute_status(db, budget_ids, now=now)
             rows = [db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone() for budget_id in budget_ids]
             for row in rows:
                 if row["status"] in {"blocked_unknown", "completed", "stop_new_runs"}:
@@ -463,13 +464,11 @@ class BudgetLedger:
                         reason_code=f"budget_{row['status']}",
                     )
                 if row["status"] in {"exhausted", "over_budget"}:
-                    now = self.clock()
                     has_increase = bool(self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=now))
                     has_overrun = bool(self._active_decisions(db, "allow-overrun", row["scope"], row["owner_id"], now=now) or self._active_decisions(db, "allow-overrun", "run", run_id, now=now))
                     if not (has_increase or has_overrun):
                         raise BudgetDenied(f"{row['scope']} budget is {row['status']}", reason_code=f"budget_{row['status']}")
                 for d in DIMENSIONS:
-                    now = self.clock()
                     allowed = row[f"effective_limit_{d}"]
                     if allowed is not None and sum(row[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) + (planned_values[d] or 0) > allowed:
                         bypass = []
@@ -483,20 +482,20 @@ class BudgetLedger:
                             f"{row['scope']} budget exceeded: {d}",
                             reason_code=f"budget_exceeded_{d}",
                         )
-            now = _now()
             links = {"ticket": next((r["budget_id"] for r in rows if r["scope"] == "ticket"), None), "session": next((r["budget_id"] for r in rows if r["scope"] == "session"), None)}
             db.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, ticket_id, session_id, links["ticket"], links["session"], attempt_kind, parent_run_id, parent_ticket_id, json.dumps(planned_values), json.dumps(planned_values), None, "reserved_pending_start", now, None, None, None))
             for row in rows:
                 db.execute("UPDATE budgets SET reserved_tokens=reserved_tokens+?,reserved_points=reserved_points+?,reserved_runs=reserved_runs+?,updated_at=? WHERE budget_id=?", tuple(planned_values[d] or 0 for d in DIMENSIONS) + (now, row["budget_id"]))
-            self._recompute_status(db, [row["budget_id"] for row in rows])
             consumed = []
             for row in rows:
-                consumed.extend(self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=self.clock()))
-                consumed.extend(self._active_decisions(db, "allow-overrun", row["scope"], row["owner_id"], now=self.clock()))
-            consumed.extend(self._active_decisions(db, "allow-overrun", "run", run_id, now=self.clock()))
+                consumed.extend(self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=now))
+                consumed.extend(self._active_decisions(db, "allow-overrun", row["scope"], row["owner_id"], now=now))
+            consumed.extend(self._active_decisions(db, "allow-overrun", "run", run_id, now=now))
             for decision in consumed:
                 if decision["one_shot"]:
-                    db.execute("UPDATE budget_decisions SET consumed_at=? WHERE decision_id=? AND consumed_at IS NULL", (self.clock(), decision["decision_id"]))
+                    db.execute("UPDATE budget_decisions SET consumed_at=? WHERE decision_id=? AND consumed_at IS NULL", (now, decision["decision_id"]))
+            # Consumption changes effective limits/status; commit the refreshed state atomically.
+            self._recompute_status(db, [row["budget_id"] for row in rows], now=now)
             return Reservation(run_id, "reserved_pending_start", legacy=not rows)
 
     def _transition(self, run_id: str, state: str, actual: Mapping[str, Any] | None = None) -> dict[str, Any]:

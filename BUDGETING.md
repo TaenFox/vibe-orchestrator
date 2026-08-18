@@ -439,6 +439,10 @@ raw provider usage остаётся unknown и immutable.
 one-shot consumption пересчитывают effective limit/status транзакционно, уже
 созданные reservations не изменяются.
 
+Для `resolve-unknown` одноразовое consumption фиксирует факт использованного
+разрешения, но не возвращает run в `blocked_unknown` при следующем refresh:
+пока решение не истекло, оно продолжает разрешать именно этот unknown run.
+
 `allow-overrun` не меняет лимит и лишь bypass-ит перечисленные dimensions для
 конкретного target; `resolve-unknown` проверяет в write-транзакции, что run
 существует и находится именно в `unknown`. Run и actual остаются immutable.
@@ -447,7 +451,7 @@ request fingerprint и возвращает текущий `consumed_at` без 
 авторизации, target validation или побочного эффекта. Любое расхождение
 отклоняется без новой audit row.
 
-Ошибки missing/non-unknown run, expired/consumed decision и conflicting
+Ошибки missing/non-unknown run, expired decision и conflicting
 `decision_id` не изменяют ledger. Ошибка authorization или операции находится
 до commit; append-only audit и status/effective-limit refresh откатываются
 вместе с транзакцией. CLI/API authorization boundary и retention policy

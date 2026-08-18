@@ -32,7 +32,7 @@ def test_effective_limit_is_materialized_in_reads_and_expires(tmp_path):
     assert ledger.get_budget("ticket:T")["limits"]["tokens"] == 5
 
 
-def test_consumed_one_shot_resolve_does_not_unblock_unknown_again(tmp_path):
+def test_consumed_one_shot_resolve_keeps_unknown_unblocked(tmp_path):
     ledger = BudgetLedger(tmp_path, authorizer=authorizer)
     ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
     ledger.reserve("run-a", "T", None, {"runs": 1})
@@ -41,7 +41,34 @@ def test_consumed_one_shot_resolve_does_not_unblock_unknown_again(tmp_path):
     ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
                           estimate={"points": 1}, confidence=0.8, one_shot=True, decision_id="resolve-1")
     assert ledger.list_decisions(operation="resolve-unknown")[0]["consumed_at"] is not None
+    assert ledger.get_budget("ticket:T")["status"] != "blocked_unknown"
+
+
+def test_expired_resolve_unknown_blocks_again(tmp_path):
+    current = ["2026-08-18T00:00:00+00:00"]
+    ledger = BudgetLedger(tmp_path, clock=lambda: current[0], authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 2})
+    ledger.reserve("run-a", "T", None, {"runs": 1})
+    ledger.start("run-a")
+    ledger.finalize("run-a", "unknown", {"points": None})
+    ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
+                          evidence={"operator": "confirmed"}, expires_at="2026-08-18T01:00:00+00:00")
+    assert ledger.get_budget("ticket:T")["status"] != "blocked_unknown"
+    current[0] = "2026-08-18T02:00:00+00:00"
     assert ledger.get_budget("ticket:T")["status"] == "blocked_unknown"
+
+
+def test_one_shot_increase_refreshes_effective_limit_after_consumption(tmp_path):
+    ledger = BudgetLedger(tmp_path, authorizer=authorizer)
+    ledger.create_budget("ticket", "T", limits={"tokens": 5, "runs": 3})
+    ledger.increase_limit(actor="a", target_scope="ticket", target_id="T", dimension="tokens", delta=5,
+                          reason="temporary", reference="ref", one_shot=True, decision_id="limit-1")
+    assert ledger.get_budget("ticket:T")["limits"]["tokens"] == 10
+    ledger.reserve("run-a", "T", None, {"tokens": 5, "runs": 1})
+    budget = ledger.get_budget("ticket:T")
+    assert budget["limits"]["tokens"] == 5
+    assert budget["available"]["tokens"] == 0
+    assert budget["status"] == "exhausted"
 
 
 def test_resolve_unknown_rejects_non_unknown_without_audit_row(tmp_path):
