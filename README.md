@@ -313,6 +313,9 @@ control-plane состояния. `list_tickets` поддерживает фил
 В `run_history` поля `artifacts` и `source_artifacts` имеют форму `{path, links}`.
 Ссылки строятся только для существующих файлов внутри `.vibe/runs/<run_id>` и
 ведут на `/artifacts/<run_id>/<file>` с безопасным кодированием сегментов пути.
+Для source artifacts `run_id` принимается только как имя одного каталога
+непосредственно под canonical `.vibe/runs`; traversal, абсолютные значения,
+разделители и symlink-каталоги наружу отклоняются.
 Невалидные, отсутствующие или внешние source paths дают пустой `links` без ошибки.
 При наличии непустого `source_artifacts` он имеет приоритет над
 `source_artifact_path`. Запросы используют положительные integer limits с верхними

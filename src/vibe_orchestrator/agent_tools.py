@@ -60,21 +60,36 @@ def _files_below(candidate: Path, root: Path, *, recursive: bool) -> list[Path]:
     return sorted(files)
 
 
+def _safe_run_root(runs_root: Path, run_id: Any) -> Path | None:
+    """Return a canonical run directory only for a direct child run_id."""
+    if not isinstance(run_id, str) or not run_id or "/" in run_id or "\\" in run_id:
+        return None
+    run_parts = Path(run_id).parts
+    if len(run_parts) != 1 or run_parts[0] in {".", ".."}:
+        return None
+
+    run_root = (runs_root / run_id).resolve()
+    if runs_root not in run_root.parents:
+        return None
+    return run_root
+
+
 def _artifact_links(project: Path, entry: dict[str, Any], *, source: bool = False) -> dict[str, Any] | None:
     run_id = entry.get("run_id")
     field = "source_artifacts" if source else "artifacts_path"
     artifact_path = entry.get(field)
-    if not isinstance(run_id, str) or not run_id:
-        return None
+    runs_root = (project / ".vibe" / "runs").resolve()
+    run_root = _safe_run_root(runs_root, run_id)
+    if run_root is None:
+        return {"path": artifact_path, "links": []} if source else None
     if not isinstance(artifact_path, str):
         return {"path": artifact_path, "links": []} if source else None
     path_parts = Path(artifact_path).parts
     if Path(artifact_path).is_absolute() or ".." in path_parts:
         return {"path": artifact_path, "links": []}
 
-    runs_root = (project / ".vibe" / "runs").resolve()
     candidate = (project / artifact_path).resolve()
-    allowed_root = (runs_root / run_id).resolve() if source else runs_root
+    allowed_root = run_root if source else runs_root
     if allowed_root not in candidate.parents and candidate != allowed_root:
         return {"path": artifact_path, "links": []}
     files = _files_below(candidate, allowed_root, recursive=source)

@@ -123,3 +123,41 @@ def test_agent_ticket_source_artifact_links_are_returned_by_list_tickets(tmp_pat
     result = ReadOnlyAgentTools(tmp_path).list_tickets(process="delivery")
 
     assert result["items"][0]["run_history"][-1]["source_artifacts"]["links"] == ["/artifacts/run-2/source.txt"]
+
+
+@pytest.mark.parametrize("run_id", ["../outside", "/tmp/outside", "nested/run", "nested\\run", ".", ".."])
+def test_agent_ticket_source_artifacts_reject_malicious_run_ids(tmp_path: Path, run_id: str):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Malicious run id")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    ticket.run_history.append({
+        "run_id": run_id,
+        "source_artifact_path": str(outside),
+    })
+    store.save(ticket)
+
+    entry = ReadOnlyAgentTools(tmp_path).get_ticket(ticket.id)["run_history"][-1]
+
+    assert entry["source_artifacts"] == {"path": str(outside), "links": []}
+
+
+def test_agent_ticket_source_artifacts_reject_symlinked_run_directory(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Symlinked run directory")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("private", encoding="utf-8")
+    runs_root = tmp_path / ".vibe" / "runs"
+    runs_root.mkdir(parents=True, exist_ok=True)
+    (runs_root / "run-link").symlink_to(outside, target_is_directory=True)
+    source_path = ".vibe/runs/run-link/secret.txt"
+    ticket.run_history.append({"run_id": "run-link", "source_artifact_path": source_path})
+    store.save(ticket)
+
+    entry = ReadOnlyAgentTools(tmp_path).get_ticket(ticket.id)["run_history"][-1]
+
+    assert entry["source_artifacts"] == {"path": source_path, "links": []}
