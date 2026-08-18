@@ -56,6 +56,15 @@ class SuccessfulRunner:
         return AgentResult(outcome="completed", summary=f"{stage.id} done", details="")
 
 
+class CapturingRunner(SuccessfulRunner):
+    def __init__(self):
+        self.contracts = []
+
+    async def run(self, ticket, stage, run_id=None, *, contract=None):
+        self.contracts.append(contract)
+        return await super().run(ticket, stage, run_id, contract=contract)
+
+
 class FailingRunner:
     def __init__(self):
         self.profile = {"model": "gpt-5.6-luna", "reasoning_effort": "high"}
@@ -214,6 +223,52 @@ def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
 
         runner.release.set()
         await orchestrator.running[child.id]
+
+    asyncio.run(scenario())
+
+
+def test_budget_admission_denial_is_blocked_without_failed_run(tmp_path: Path):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = CapturingRunner()
+        orchestrator.runner = runner
+        ticket = orchestrator.store.create("delivery", "task", "Budget gate", status="ready_for_review")
+        ticket.context = {"budget": {"planned": {"tokens": 11, "points": 2, "runs": 1}}}
+        orchestrator.store.save(ticket)
+        orchestrator.ledger.create_budget("ticket", ticket.id, limits={"tokens": 10, "points": 10, "runs": 1})
+
+        await orchestrator._schedule_once()
+
+        blocked = orchestrator.store.get(ticket.id)
+        assert blocked.active_run is None
+        assert blocked.blocked_reason == "budget_exceeded_tokens"
+        assert blocked.last_outcome == "blocked_budget"
+        assert [event["event"] for event in run_events(blocked)] == ["blocked"]
+        assert not runner.contracts
+        assert orchestrator.ledger.get_run("missing") is None
+
+    asyncio.run(scenario())
+
+
+def test_reservation_metadata_is_carried_to_contract_and_history(tmp_path: Path):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = CapturingRunner()
+        orchestrator.runner = runner
+        ticket = orchestrator.store.create("delivery", "task", "Budget trace", status="ready_for_review")
+        ticket.context = {"budget": {"planned": {"tokens": 5, "points": 1, "runs": 1}}}
+        orchestrator.store.save(ticket)
+        orchestrator.ledger.create_budget("ticket", ticket.id, limits={"tokens": 10, "points": 10, "runs": 2})
+
+        await _schedule_and_wait(orchestrator, ticket.id)
+        metadata = runner.contracts[0].reservation_metadata
+        completed = orchestrator.store.get(ticket.id)
+
+        assert metadata["contract_version"] == "budget.v1"
+        assert metadata["ticket_budget_id"] == f"ticket:{ticket.id}"
+        assert metadata["reserved"] == {"tokens": 5, "points": 1, "runs": 1}
+        assert run_events(completed)[0]["reservation"] == metadata
+        assert run_events(completed)[1]["reservation"] == metadata
 
     asyncio.run(scenario())
 

@@ -47,6 +47,7 @@ class Ticket:
     active_run: str | None = None
     last_outcome: str | None = None
     last_summary: str | None = None
+    blocked_reason: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
     context_revision: int = 0
     consecutive_failures: int = 0
@@ -82,6 +83,8 @@ class Ticket:
             payload.pop("consecutive_failures")
         if payload["retry_after"] is None:
             payload.pop("retry_after")
+        if payload["blocked_reason"] is None:
+            payload.pop("blocked_reason")
         if not payload["context"]:
             payload.pop("context")
         if payload["context_revision"] == 0:
