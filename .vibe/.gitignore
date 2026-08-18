@@ -4,3 +4,4 @@ locks/
 tickets/
 sessions/
 sessions.lock
+budgets/
