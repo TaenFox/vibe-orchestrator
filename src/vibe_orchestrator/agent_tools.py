@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .sessions import DeliverySession, SessionStore
-from .tickets import Ticket, TicketStore
+from .tickets import Ticket, TicketStore, TicketWriteService
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
@@ -125,6 +125,8 @@ def _ticket_payload(store: TicketStore, ticket: Ticket, *, history_limit: int) -
             entry["source_artifacts"] = _artifact_links(store.project, source_entry, source=True)
     payload["run_history"] = history
     payload["run_history_truncated"] = len(ticket.run_history) > len(history)
+    payload["audit_events"] = [dict(event) for event in ticket.audit_events[-MAX_HISTORY_LIMIT:]]
+    payload["audit_events_truncated"] = len(ticket.audit_events) > MAX_HISTORY_LIMIT
     return payload
 
 
@@ -154,8 +156,8 @@ class ReadOnlyAgentTools:
 
     def __init__(self, project: Path):
         self.project = project.resolve()
-        self.tickets = TicketStore(self.project)
-        self.sessions = SessionStore(self.project, self.tickets)
+        self._store = TicketStore(self.project)
+        self.sessions = SessionStore(self.project, self._store)
 
     def _sessions(self) -> list[DeliverySession]:
         root = self.sessions.sessions_root
@@ -175,27 +177,53 @@ class ReadOnlyAgentTools:
             if selected is None:
                 raise KeyError(session)
             session_ids = SessionStore.effective_ticket_ids(selected)
-        tickets = self.tickets.list(process)
+        tickets = self._store.list(process)
         filtered = [ticket for ticket in tickets if
                     (status is None or ticket.status == status) and
                     (parent is None or ticket.parent == parent) and
                     (session_ids is None or ticket.id in session_ids)]
-        return _page([_ticket_payload(self.tickets, ticket, history_limit=history_limit) for ticket in filtered], offset=offset, limit=limit)
+        return _page([_ticket_payload(self._store, ticket, history_limit=history_limit) for ticket in filtered], offset=offset, limit=limit)
 
     def get_ticket(self, ticket_id: str, *, history_limit: int | None = None) -> dict[str, Any]:
         history_limit = _bounded(history_limit, default=DEFAULT_HISTORY_LIMIT, maximum=MAX_HISTORY_LIMIT)
-        return _ticket_payload(self.tickets, self.tickets.get(ticket_id), history_limit=history_limit)
+        return _ticket_payload(self._store, self._store.get(ticket_id), history_limit=history_limit)
 
     def list_sessions(self, *, status: str | None = None, offset: int = 0,
                       limit: int | None = None) -> dict[str, Any]:
         limit = _bounded(limit, default=DEFAULT_LIMIT, maximum=MAX_LIMIT)
-        sessions = [_session_payload(self.tickets, item) for item in self._sessions()]
+        sessions = [_session_payload(self._store, item) for item in self._sessions()]
         if status is not None:
             sessions = [item for item in sessions if item["status"] == status]
         return _page(sessions, offset=offset, limit=limit)
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        return _session_payload(self.tickets, self.sessions.get(session_id))
+        return _session_payload(self._store, self.sessions.get(session_id))
+
+
+class AgentTicketTools(ReadOnlyAgentTools):
+    """Validated ticket writes; the underlying TicketStore is not exposed."""
+
+    def __init__(self, project: Path, *, actor: str):
+        super().__init__(project)
+        self.actor = actor
+        self.service = TicketWriteService(self.project)
+
+    def create_ticket(self, **data: Any) -> dict[str, Any]:
+        return _ticket_payload(self.service.store, self.service.create_ticket(data, actor=self.actor), history_limit=DEFAULT_HISTORY_LIMIT)
+
+    def update_ticket(self, ticket_id: str, **data: Any) -> dict[str, Any]:
+            return _ticket_payload(self.service.store, self.service.update_ticket(ticket_id, data, actor=self.actor), history_limit=DEFAULT_HISTORY_LIMIT)
+
+
+WriteAgentTools = AgentTicketTools
+
+
+def create_ticket(project: Path, *, actor: str, **data: Any) -> dict[str, Any]:
+    return AgentTicketTools(project, actor=actor).create_ticket(**data)
+
+
+def update_ticket(project: Path, ticket_id: str, *, actor: str, **data: Any) -> dict[str, Any]:
+    return AgentTicketTools(project, actor=actor).update_ticket(ticket_id, **data)
 
 
 def list_tickets(project: Path, **filters: Any) -> dict[str, Any]:
