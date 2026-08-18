@@ -152,6 +152,14 @@ def preflight_technical_debt(candidates: list[dict[str, Any]], *, project: Path,
         if not matching_history and not isinstance(manifest_data, dict):
             raise _error(f"{base}.source_run", "Запуск не найден.", code="TECH_DEBT_SOURCE_NOT_FOUND")
         metadata = manifest_data or (matching_history[-1] if matching_history else {})
+        if metadata.get("run_id") != candidate["source_run"]:
+            raise _error(
+                f"{base}.source_run",
+                "Метаданные запуска не согласованы с source_run кандидата.",
+                code="TECH_DEBT_SOURCE_MISMATCH",
+                expected=candidate["source_run"],
+                actual=metadata.get("run_id"),
+            )
         if metadata.get("ticket_id") not in (None, source.id) or metadata.get("stage") not in (None, candidate["source_stage"]):
             raise _error(f"{base}.source_run", "Метаданные запуска не согласованы с источником.", code="TECH_DEBT_SOURCE_MISMATCH")
         evidence_path = (root / candidate["evidence"]["path"]).resolve()

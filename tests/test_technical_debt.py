@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -47,3 +48,22 @@ def test_preflight_checks_source_and_evidence_read_only(tmp_path: Path):
     with pytest.raises(TechnicalDebtError) as caught:
         preflight_technical_debt(parse_technical_debt(_details(source_ticket="DISC-MISSING")), project=tmp_path, ticket_store=store)
     assert caught.value.code == "TECH_DEBT_SOURCE_NOT_FOUND"
+
+
+@pytest.mark.parametrize("manifest_metadata", [{"run_id": "run-2"}, {}])
+def test_preflight_rejects_mismatched_or_missing_run_id(tmp_path: Path, manifest_metadata):
+    store = TicketStore(tmp_path)
+    store.init()
+    (tmp_path / "README.md").write_text("Traceability MVP\n", encoding="utf-8")
+    source = store.create("discovery", "idea", "Источник", status="technical_analysis")
+    run_dir = tmp_path / ".vibe" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    manifest_metadata.update({"ticket_id": source.id, "stage": "technical_analysis"})
+    (run_dir / "run.json").write_text(json.dumps(manifest_metadata), encoding="utf-8")
+
+    with pytest.raises(TechnicalDebtError) as caught:
+        preflight_technical_debt(parse_technical_debt(_details(source_ticket=source.id)), project=tmp_path, ticket_store=store)
+
+    assert caught.value.code == "TECH_DEBT_SOURCE_MISMATCH"
+    assert caught.value.path == "tech_debt_candidates.candidates[0].source_run"
+    assert caught.value.envelope["contract_version"] == "orchestrator.errors.v1"
