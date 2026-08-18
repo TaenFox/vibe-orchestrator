@@ -265,6 +265,16 @@ class Orchestrator:
                 self.ledger.start(contract.run_id)
             self._apply_result(workflow, ticket_id, stage, result, contract=contract)
             log.info("завершено %s (%s): %s -> %s", ticket_id, self.store.get(ticket_id).type, result.outcome, self.store.get(ticket_id).status)
+        except TechnicalDebtError as exc:
+            # Contract rejection is deliberately not an agent failure: recording it
+            # would mutate the source ticket and route it through correction flow.
+            # Keep the envelope intact for the caller/operator and only release
+            # bookkeeping that has not crossed the subprocess boundary.
+            if not isinstance(contract, str):
+                ledger_run = self.ledger.get_run(contract.run_id)
+                if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":
+                    self.ledger.release(contract.run_id)
+            log.error("отклонен tech_debt_candidates контракт для %s: %s", ticket_id, yaml.safe_dump(exc.envelope, allow_unicode=True, sort_keys=False))
         except Exception as exc:
             ticket = self.store.get(ticket_id)
             if isinstance(contract, str):
@@ -338,11 +348,13 @@ class Orchestrator:
                         ticket_store=self.store,
                         session_store=self.session_store,
                     )
+            except TechnicalDebtError:
+                raise
             except ValueError as exc:
                 result = AgentResult(
                     outcome="needs_correction",
                     summary="Технический анализ вернул некорректный план реализации",
-                    details=str(exc) if not isinstance(exc, TechnicalDebtError) else yaml.safe_dump(exc.envelope, allow_unicode=True, sort_keys=False),
+                    details=str(exc),
                     token_usage=result.token_usage,
                 )
         ticket = self.store.get(ticket_id)
@@ -455,12 +467,14 @@ class Orchestrator:
         )
         for existing in self.store.children_of(parent.id, process=parent.process):
             if existing.type == child_type and existing.description == description:
+                if child_type == "rework":
+                    self._inherit_rework_session(parent, existing)
                 return existing
         correction_status = next(
             (candidate.id for candidate in self.workflows[parent.process].stages if candidate.kind == "queue" and candidate.pull_to == stage.id),
             stage.id,
         )
-        return self.store.create(
+        child = self.store.create(
             parent.process,
             child_type,
             title,
@@ -472,6 +486,23 @@ class Orchestrator:
             correction_stage=stage.id if child_type == "correction" else None,
             rework_stage=stage.id if child_type == "rework" else None,
         )
+        if child_type == "rework":
+            self._inherit_rework_session(parent, child)
+        return child
+
+    def _inherit_rework_session(self, parent: Ticket, rework: Ticket) -> None:
+        if parent.process != "delivery" or rework.type != "rework":
+            return
+        for session in self.session_store.list():
+            if session.status != "active":
+                continue
+            if parent.id not in self.session_store.effective_ticket_ids(session):
+                continue
+            try:
+                self.session_store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+            except (KeyError, TypeError, ValueError) as exc:
+                log.error("не удалось унаследовать сессию для %s от %s: %s", rework.id, parent.id, exc)
+            return
 
     def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
         spec = _extract_structured_payload(details).get("delivery_tickets", [])
