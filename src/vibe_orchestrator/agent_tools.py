@@ -95,7 +95,11 @@ def _artifact_links(project: Path, entry: dict[str, Any], *, source: bool = Fals
     files = _files_below(candidate, allowed_root, recursive=source)
     links = []
     for path in files:
-        relative = path.resolve().relative_to(allowed_root if source else candidate)
+        if source or candidate.is_dir():
+            relative_root = allowed_root if source else candidate
+        else:
+            relative_root = run_root
+        relative = path.resolve().relative_to(relative_root)
         links.append(_url_path(run_id, *relative.parts))
     return {"path": artifact_path, "links": links}
 
