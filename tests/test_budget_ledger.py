@@ -48,6 +48,47 @@ def test_unknown_blocks_point_limited_scope_and_reserve(tmp_path: Path):
         ledger.reserve("run-2", "DEL-1", None, {"tokens": 1, "points": 1, "runs": 1})
 
 
+def test_unknown_does_not_block_point_unlimited_scope_or_next_reserve(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 100, "points": None, "runs": 3})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "unknown", {"points": None, "points_status": "unavailable"})
+
+    assert ledger.get_budget("ticket:DEL-1")["status"] != "blocked_unknown"
+    ledger.reserve("run-2", "DEL-1", None, {"tokens": 1, "points": 1, "runs": 1})
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["reserved"] == {
+        "tokens": 1, "points": 1, "runs": 1,
+    }
+
+
+def test_unknown_blocks_zero_point_limit(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 100, "points": 0, "runs": 3})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 10, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "unknown", {"points": None, "points_status": "unavailable"})
+
+    assert ledger.get_budget("ticket:DEL-1")["status"] == "blocked_unknown"
+
+
+@pytest.mark.parametrize(
+    ("ticket_points", "session_points", "blocked_budget"),
+    [(10, None, "ticket:DEL-1"), (None, 10, "session:SESSION-1")],
+)
+def test_unknown_blocks_only_point_limited_scope(tmp_path: Path, ticket_points, session_points, blocked_budget):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 100, "points": ticket_points, "runs": 3})
+    ledger.create_budget("session", "SESSION-1", limits={"tokens": 100, "points": session_points, "runs": 3})
+    ledger.reserve("run-1", "DEL-1", "SESSION-1", {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "unknown", {"points": None, "points_status": "unavailable"})
+
+    budgets = (ledger.get_budget("ticket:DEL-1"), ledger.get_budget("session:SESSION-1"))
+    assert next(budget for budget in budgets if budget["budget_id"] == blocked_budget)["status"] == "blocked_unknown"
+    assert next(budget for budget in budgets if budget["budget_id"] != blocked_budget)["status"] != "blocked_unknown"
+
+
 def test_reconcile_absent_and_ambiguous_pending_runs(tmp_path: Path):
     ledger = BudgetLedger(tmp_path, pending_timeout=0)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 20, "points": 20, "runs": 2})

@@ -181,7 +181,7 @@ class BudgetLedger:
             row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
             if not row or row["mode"] != "enforced":
                 continue
-            unknown = db.execute(
+            unknown = row["limit_points"] is not None and db.execute(
                 "SELECT 1 FROM runs WHERE state='unknown' AND (ticket_budget_id=? OR session_budget_id=?) LIMIT 1",
                 (budget_id, budget_id),
             ).fetchone() is not None
