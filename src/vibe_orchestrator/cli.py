@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import json
 from pathlib import Path
 
 import yaml
 
 from .config import load_all_workflows
+from .budget_ledger import BudgetLedger
 from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
 from .orchestrator import Orchestrator
@@ -50,12 +52,33 @@ def build_parser() -> argparse.ArgumentParser:
     activate_session = session_sub.add_parser("activate", help="Активировать сессию"); activate_session.add_argument("project", type=project_path); activate_session.add_argument("session")
     for action, help_text in (("complete", "Завершить сессию"), ("cancel", "Отменить сессию")):
         command = session_sub.add_parser(action, help=help_text); command.add_argument("project", type=project_path); command.add_argument("session"); command.add_argument("--override", "--override-reason", "--reason", dest="override_reason")
+    budget = sub.add_parser("budget", help="Ручные budget decisions и audit trail")
+    budget_sub = budget.add_subparsers(dest="budget_command", required=True)
+    def common(command):
+        command.add_argument("project", type=project_path); command.add_argument("--actor", required=True); command.add_argument("--reason", required=True); command.add_argument("--reference", required=True); command.add_argument("--expires-at"); command.add_argument("--one-shot", action="store_true"); command.add_argument("--decision-id")
+    increase = budget_sub.add_parser("increase-limit", help="Увеличить лимит для будущего admission"); common(increase); increase.add_argument("--scope", dest="target_scope", choices=["ticket", "session"], required=True); increase.add_argument("--target", dest="target_id", required=True); increase.add_argument("--dimension", choices=["tokens", "points", "runs"], required=True); increase.add_argument("--delta", type=non_negative_int, required=True)
+    overrun = budget_sub.add_parser("allow-overrun", help="Разрешить overrun только указанному target"); common(overrun); overrun.add_argument("--scope", dest="target_scope", choices=["ticket", "session", "run"], required=True); overrun.add_argument("--target", dest="target_id", required=True); overrun.add_argument("--dimension", choices=["tokens", "points", "runs"], action="append", required=True)
+    unknown = budget_sub.add_parser("resolve-unknown", help="Разрешить unknown run с evidence или estimate"); common(unknown); unknown.add_argument("run_id"); unknown.add_argument("--evidence", help="JSON evidence payload"); unknown.add_argument("--estimate", help="JSON accepted estimate payload"); unknown.add_argument("--confidence", type=float)
+    decisions = budget_sub.add_parser("decisions", help="Прочитать append-only audit trail"); decisions.add_argument("project", type=project_path); decisions.add_argument("--operation"); decisions.add_argument("--scope", dest="target_scope"); decisions.add_argument("--target", dest="target_id")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if args.command == "budget":
+        # CLI has no external identity provider yet; the explicit actor and this
+        # policy marker make that limitation visible in the audit record.
+        ledger = BudgetLedger(args.project, authorizer=lambda **_: (True, "cli.explicit-actor.v1"))
+        try:
+            if args.budget_command == "increase-limit": result = ledger.increase_limit(actor=args.actor, target_scope=args.target_scope, target_id=args.target_id, dimension=args.dimension, delta=args.delta, reason=args.reason, reference=args.reference, expires_at=args.expires_at, one_shot=args.one_shot, decision_id=args.decision_id)
+            elif args.budget_command == "allow-overrun": result = ledger.allow_overrun(actor=args.actor, target_scope=args.target_scope, target_id=args.target_id, dimensions=args.dimension, reason=args.reason, reference=args.reference, expires_at=args.expires_at, one_shot=args.one_shot, decision_id=args.decision_id)
+            elif args.budget_command == "resolve-unknown":
+                result = ledger.resolve_unknown(actor=args.actor, run_id=args.run_id, reason=args.reason, reference=args.reference, evidence=json.loads(args.evidence) if args.evidence else None, estimate=json.loads(args.estimate) if args.estimate else None, confidence=args.confidence, expires_at=args.expires_at, one_shot=args.one_shot, decision_id=args.decision_id)
+            else: result = ledger.list_decisions(operation=args.operation, target_scope=args.target_scope, target_id=args.target_id)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True)); return
+        except (KeyError, PermissionError, ValueError, OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(str(exc)) from exc
     if args.command == "init":
         store = TicketStore(args.project); store.init(); print(f"Инициализировано: {store.root}"); return
     if args.command in {"session", "sessions"}:

@@ -406,3 +406,32 @@ upstream-поле stable event/snapshot ref и гарантию его уник�
 override для `over_budget` и `blocked_unknown` требует audit actor/reason и
 отдельного решения о полномочиях.
 Срок хранения ledger и UI/CLI ролей также остаются вне этого контракта.
+
+## Manual overrides and audit trail
+
+Baseline MVP сохраняет immutable `runs` и их `actual`, а reservations и
+finalization выполняются транзакционно. Ручные решения хранятся отдельно в
+append-only таблице `budget_decisions`; они не редактируют `run`, `run_history`
+или уже накопленные aggregates.
+
+Доступны три операции с независимыми permissions: `budget.increase_limit`,
+`budget.allow_overrun` и `budget.resolve_unknown`. Каждое решение содержит
+`decision_id`, actor, системный UTC timestamp, reason, target scope/id,
+reference, versioned policy, permission, payload и ровно одну семантику
+`expires_at` или `one_shot`. Повтор того же ID с тем же payload идемпотентен;
+конфликтующий payload отклоняется.
+
+`increase-limit` увеличивает effective limit только для будущего admission и
+не освобождает reservation. `allow-overrun` принимает только явно названные
+dimensions и ticket/session/run target; wildcard scope запрещён, лимит не
+увеличивается. `resolve-unknown` адресует только конкретный run и принимает
+подтверждаемое evidence/reference либо отдельную accepted estimate с confidence;
+raw provider usage остаётся unknown и immutable.
+
+CLI: `vibe budget increase-limit|allow-overrun|resolve-unknown` принимает
+`--actor`, `--reason`, `--reference` и `--expires-at` либо `--one-shot`; чтение
+audit trail выполняется через `vibe budget decisions`. Programmatic API —
+одноимённые методы `BudgetLedger` и `list_decisions`. Внешняя authentication
+система ещё не подключена: CLI явно фиксирует actor, а API требует injectable
+authorizer и применяет default-deny. Browser-level проверка override UI не
+выполнялась, поскольку UI/API actions для неё не предоставлены в этом контексте.

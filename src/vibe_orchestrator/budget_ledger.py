@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +82,11 @@ def _add(left: int, right: int | None) -> int:
 
 
 STATUS_PRECEDENCE = ("over_budget", "blocked_unknown", "stop_new_runs", "completed", "exhausted", "active")
+PERMISSIONS = {
+    "increase-limit": "budget.increase_limit",
+    "allow-overrun": "budget.allow_overrun",
+    "resolve-unknown": "budget.resolve_unknown",
+}
 
 
 @dataclass(frozen=True)
@@ -94,12 +100,15 @@ class Reservation:
 class BudgetLedger:
     """SQLite-backed transactional ledger for ticket and session budgets."""
 
-    def __init__(self, project: str | Path, *, timeout: float = 10.0, pending_timeout: float = 60.0):
+    def __init__(self, project: str | Path, *, timeout: float = 10.0, pending_timeout: float = 60.0,
+                 clock: Callable[[], str] | None = None, authorizer: Callable[..., Any] | None = None):
         root = Path(project)
         self.path = root if root.suffix == ".sqlite3" else root / ".vibe" / "budgets" / "ledger.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
         self.pending_timeout = pending_timeout
+        self.clock = clock or _now
+        self.authorizer = authorizer
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
@@ -135,8 +144,136 @@ class BudgetLedger:
               id INTEGER PRIMARY KEY AUTOINCREMENT, adjusts_run_id TEXT NOT NULL REFERENCES runs(run_id),
               delta_json TEXT NOT NULL, reason TEXT NOT NULL, author TEXT NOT NULL, created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS budget_decisions (
+              decision_id TEXT PRIMARY KEY,
+              operation TEXT NOT NULL CHECK(operation IN ('increase-limit','allow-overrun','resolve-unknown')),
+              actor TEXT NOT NULL, timestamp TEXT NOT NULL, reason TEXT NOT NULL,
+              target_scope TEXT NOT NULL CHECK(target_scope IN ('ticket','session','run')),
+              target_id TEXT NOT NULL, reference TEXT NOT NULL, policy TEXT NOT NULL,
+              permission TEXT NOT NULL, payload_json TEXT NOT NULL,
+              expires_at TEXT, one_shot INTEGER NOT NULL DEFAULT 0 CHECK(one_shot IN (0,1)),
+              consumed_at TEXT, created_at TEXT NOT NULL
+            );
             INSERT OR IGNORE INTO metadata(key,value) VALUES ('schema_version','budget.v1');
+            INSERT OR IGNORE INTO metadata(key,value) VALUES ('decision_schema_version','budget_decisions.v1');
             """)
+
+    def _authorize(self, operation: str, *, actor: str, target_scope: str, target_id: str,
+                   payload: Mapping[str, Any], reason: str, reference: str,
+                   expires_at: str | None, one_shot: bool) -> str:
+        permission = PERMISSIONS[operation]
+        if not self.authorizer:
+            raise PermissionError(f"no authorizer configured for {permission}")
+        result = self.authorizer(actor=actor, operation=operation, permission=permission,
+                                 target_scope=target_scope, target_id=target_id,
+                                 dimensions=payload, reason=reason, reference=reference,
+                                 expires_at=expires_at, one_shot=one_shot)
+        if isinstance(result, tuple): allowed, policy = result
+        elif isinstance(result, Mapping): allowed, policy = result.get("allow", False), result.get("policy")
+        else: allowed, policy = bool(result), None
+        if not allowed or not policy:
+            raise PermissionError(f"policy denied {permission}")
+        return str(policy)
+
+    @staticmethod
+    def _decision_fields(*, actor: str, reason: str, target_scope: str, target_id: str,
+                         reference: str, expires_at: str | None, one_shot: bool) -> None:
+        if not all(isinstance(value, str) and value.strip() for value in (actor, reason, target_scope, target_id, reference)):
+            raise ValueError("actor, reason, target scope/id and reference are required")
+        if target_scope not in {"ticket", "session", "run"}:
+            raise ValueError("invalid target scope")
+        if (expires_at is None) == (not one_shot):
+            raise ValueError("provide exactly one of expires_at or one_shot=true")
+
+    def _insert_decision(self, db: sqlite3.Connection, *, decision_id: str, operation: str, actor: str,
+                         reason: str, target_scope: str, target_id: str, reference: str,
+                         policy: str, payload: Mapping[str, Any], expires_at: str | None,
+                         one_shot: bool, timestamp: str) -> dict[str, Any]:
+        record = {"decision_id": decision_id, "operation": operation, "actor": actor, "timestamp": timestamp,
+                  "reason": reason, "target_scope": target_scope, "target_id": target_id,
+                  "reference": reference, "policy": policy, "permission": PERMISSIONS[operation],
+                  "payload": dict(payload), "expires_at": expires_at, "one_shot": one_shot,
+                  "consumed_at": None}
+        existing = db.execute("SELECT * FROM budget_decisions WHERE decision_id=?", (decision_id,)).fetchone()
+        if existing:
+            old = dict(existing); old["payload"] = json.loads(old.pop("payload_json"))
+            old.pop("created_at", None); old["one_shot"] = bool(old["one_shot"])
+            if any(old.get(key) != record.get(key) for key in ("decision_id","operation","actor","timestamp","reason","target_scope","target_id","reference","policy","permission","payload","expires_at","one_shot")):
+                raise ValueError("decision_id already exists with different payload")
+            return old
+        db.execute("""INSERT INTO budget_decisions
+          (decision_id,operation,actor,timestamp,reason,target_scope,target_id,reference,policy,permission,payload_json,expires_at,one_shot,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (decision_id, operation, actor, timestamp, reason, target_scope,
+          target_id, reference, policy, PERMISSIONS[operation], json.dumps(payload, sort_keys=True), expires_at,
+          int(one_shot), timestamp))
+        return record
+
+    def list_decisions(self, *, operation: str | None = None, target_scope: str | None = None,
+                       target_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM budget_decisions WHERE 1=1"; params: list[Any] = []
+        for column, value in (("operation", operation), ("target_scope", target_scope), ("target_id", target_id)):
+            if value is not None: query += f" AND {column}=?"; params.append(value)
+        with self._connect() as db: rows = db.execute(query + " ORDER BY timestamp, decision_id", params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row); item["payload"] = json.loads(item.pop("payload_json")); item["one_shot"] = bool(item["one_shot"]); result.append(item)
+        return result
+
+    def _active_decisions(self, db: sqlite3.Connection, operation: str, scope: str, target_id: str, *, now: str) -> list[sqlite3.Row]:
+        rows = db.execute("SELECT * FROM budget_decisions WHERE operation=? AND target_scope=? AND target_id=? AND (expires_at IS NULL OR expires_at>?) AND consumed_at IS NULL", (operation, scope, target_id, now)).fetchall()
+        return rows
+
+    def _record_decision(self, operation: str, *, decision_id: str | None, actor: str, reason: str,
+                         target_scope: str, target_id: str, reference: str, payload: Mapping[str, Any],
+                         expires_at: str | None, one_shot: bool) -> dict[str, Any]:
+        self._decision_fields(actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, expires_at=expires_at, one_shot=one_shot)
+        if operation == "increase-limit" and target_scope == "run": raise ValueError("increase-limit requires ticket or session scope")
+        if operation == "resolve-unknown" and target_scope != "run": raise ValueError("resolve-unknown requires run scope")
+        policy = self._authorize(operation, actor=actor, target_scope=target_scope, target_id=target_id, payload=payload, reason=reason, reference=reference, expires_at=expires_at, one_shot=one_shot)
+        decision_id = decision_id or str(uuid.uuid4()); timestamp = self.clock()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if operation in {"increase-limit", "allow-overrun"} and target_scope in {"ticket", "session"}:
+                if not db.execute("SELECT 1 FROM budgets WHERE scope=? AND owner_id=?", (target_scope, target_id)).fetchone():
+                    raise KeyError(f"{target_scope}:{target_id}")
+            if operation == "allow-overrun" and target_scope == "run":
+                if not db.execute("SELECT 1 FROM runs WHERE run_id=?", (target_id,)).fetchone():
+                    raise KeyError(target_id)
+            existing = db.execute("SELECT timestamp,policy FROM budget_decisions WHERE decision_id=?", (decision_id,)).fetchone()
+            if existing:
+                timestamp, policy = existing["timestamp"], existing["policy"]
+            result = self._insert_decision(db, decision_id=decision_id, operation=operation, actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, policy=policy, payload=payload, expires_at=expires_at, one_shot=one_shot, timestamp=timestamp)
+            if operation == "resolve-unknown":
+                run = db.execute("SELECT ticket_budget_id,session_budget_id FROM runs WHERE run_id=?", (target_id,)).fetchone()
+                if not run: raise KeyError(target_id)
+                self._recompute_status(db, [value for value in (run["ticket_budget_id"], run["session_budget_id"]) if value])
+                if one_shot:
+                    db.execute("UPDATE budget_decisions SET consumed_at=? WHERE decision_id=?", (timestamp, decision_id))
+            return result
+
+    def increase_limit(self, *, actor: str, target_scope: str, target_id: str, dimension: str, delta: int,
+                       reason: str, reference: str, expires_at: str | None = None, one_shot: bool = False,
+                       decision_id: str | None = None) -> dict[str, Any]:
+        if dimension not in DIMENSIONS or not isinstance(delta, int) or isinstance(delta, bool) or delta < 0 or delta == 0:
+            raise ValueError("dimension must be valid and delta must be a positive integer")
+        return self._record_decision("increase-limit", actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, payload={"dimension": dimension, "delta": delta}, expires_at=expires_at, one_shot=one_shot, decision_id=decision_id)
+
+    def allow_overrun(self, *, actor: str, target_scope: str, target_id: str, dimensions: list[str] | tuple[str, ...],
+                      reason: str, reference: str, expires_at: str | None = None, one_shot: bool = False,
+                      decision_id: str | None = None) -> dict[str, Any]:
+        if target_scope not in {"ticket", "session", "run"} or not dimensions or any(d not in DIMENSIONS for d in dimensions):
+            raise ValueError("allow-overrun requires explicit valid dimensions and target")
+        return self._record_decision("allow-overrun", actor=actor, reason=reason, target_scope=target_scope, target_id=target_id, reference=reference, payload={"dimensions": list(dict.fromkeys(dimensions))}, expires_at=expires_at, one_shot=one_shot, decision_id=decision_id)
+
+    def resolve_unknown(self, *, actor: str, run_id: str, reason: str, reference: str,
+                        estimate: Mapping[str, Any] | None = None, evidence: Mapping[str, Any] | None = None,
+                        confidence: float | None = None, expires_at: str | None = None, one_shot: bool = False,
+                        decision_id: str | None = None) -> dict[str, Any]:
+        if not evidence and not (estimate and confidence is not None): raise ValueError("evidence or accepted estimate with confidence is required")
+        if estimate and confidence is None: raise ValueError("estimate confidence is required")
+        if confidence is not None and (isinstance(confidence, bool) or not 0 <= confidence <= 1): raise ValueError("confidence must be between 0 and 1")
+        payload = {"mode": "evidence" if evidence else "estimate", "evidence": evidence, "estimate": estimate, "confidence": confidence}
+        return self._record_decision("resolve-unknown", actor=actor, reason=reason, target_scope="run", target_id=run_id, reference=reference, payload=payload, expires_at=expires_at, one_shot=one_shot, decision_id=decision_id)
 
     def create_budget(self, scope: str, owner_id: str, *, limits: Mapping[str, Any] | None = None,
                       budget_id: str | None = None, mode: str = "enforced") -> str:
@@ -195,8 +332,11 @@ class BudgetLedger:
             if not row or row["mode"] != "enforced":
                 continue
             unknown = row["limit_points"] is not None and db.execute(
-                "SELECT 1 FROM runs WHERE state='unknown' AND (ticket_budget_id=? OR session_budget_id=?) LIMIT 1",
-                (budget_id, budget_id),
+                """SELECT 1 FROM runs r WHERE r.state='unknown' AND (r.ticket_budget_id=? OR r.session_budget_id=?)
+                   AND NOT EXISTS (SELECT 1 FROM budget_decisions d WHERE d.operation='resolve-unknown'
+                     AND d.target_scope='run' AND d.target_id=r.run_id
+                     AND (d.expires_at IS NULL OR d.expires_at>?)) LIMIT 1""",
+                (budget_id, budget_id, self.clock()),
             ).fetchone() is not None
             over_budget = any(
                 row[f"limit_{dimension}"] is not None and row[f"finalized_{dimension}"] > row[f"limit_{dimension}"]
@@ -245,8 +385,24 @@ class BudgetLedger:
                         f"{row['scope']} budget is {row['status']}",
                         reason_code=f"budget_{row['status']}",
                     )
+                if row["status"] in {"exhausted", "over_budget"}:
+                    now = self.clock()
+                    has_increase = bool(self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=now))
+                    has_overrun = bool(self._active_decisions(db, "allow-overrun", row["scope"], row["owner_id"], now=now) or self._active_decisions(db, "allow-overrun", "run", run_id, now=now))
+                    if not (has_increase or has_overrun):
+                        raise BudgetDenied(f"{row['scope']} budget is {row['status']}", reason_code=f"budget_{row['status']}")
                 for d in DIMENSIONS:
-                    if row[f"limit_{d}"] is not None and sum(row[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) + (planned_values[d] or 0) > row[f"limit_{d}"]:
+                    now = self.clock()
+                    extra = sum(json.loads(item["payload_json"])["delta"] for item in self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=now) if json.loads(item["payload_json"])["dimension"] == d)
+                    allowed = row[f"limit_{d}"]
+                    if allowed is not None and sum(row[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) + (planned_values[d] or 0) > allowed + extra:
+                        bypass = []
+                        for item in self._active_decisions(db, "allow-overrun", row["scope"], row["owner_id"], now=now):
+                            bypass.extend(json.loads(item["payload_json"])["dimensions"])
+                        run_bypass = self._active_decisions(db, "allow-overrun", "run", run_id, now=now)
+                        bypass.extend(dimension for item in run_bypass for dimension in json.loads(item["payload_json"])["dimensions"])
+                        if d in bypass:
+                            continue
                         raise BudgetDenied(
                             f"{row['scope']} budget exceeded: {d}",
                             reason_code=f"budget_exceeded_{d}",
@@ -257,6 +413,14 @@ class BudgetLedger:
             for row in rows:
                 db.execute("UPDATE budgets SET reserved_tokens=reserved_tokens+?,reserved_points=reserved_points+?,reserved_runs=reserved_runs+?,updated_at=? WHERE budget_id=?", tuple(planned_values[d] or 0 for d in DIMENSIONS) + (now, row["budget_id"]))
             self._recompute_status(db, [row["budget_id"] for row in rows])
+            consumed = []
+            for row in rows:
+                consumed.extend(self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=self.clock()))
+                consumed.extend(self._active_decisions(db, "allow-overrun", row["scope"], row["owner_id"], now=self.clock()))
+            consumed.extend(self._active_decisions(db, "allow-overrun", "run", run_id, now=self.clock()))
+            for decision in consumed:
+                if decision["one_shot"]:
+                    db.execute("UPDATE budget_decisions SET consumed_at=? WHERE decision_id=? AND consumed_at IS NULL", (self.clock(), decision["decision_id"]))
             return Reservation(run_id, "reserved_pending_start", legacy=not rows)
 
     def _transition(self, run_id: str, state: str, actual: Mapping[str, Any] | None = None) -> dict[str, Any]:
