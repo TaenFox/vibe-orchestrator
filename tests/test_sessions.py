@@ -48,6 +48,21 @@ def test_membership_invariants_and_one_open_session(tmp_path: Path):
         store.save(session)
 
 
+def test_rework_inherits_active_session_and_is_idempotent(tmp_path: Path):
+    tickets, store = stores(tmp_path)
+    parent = tickets.create("delivery", "task", "Parent", status="review")
+    rework = tickets.create("delivery", "rework", "Rework", parent=parent.id, status="selected_for_session")
+    session = store.create([parent.id])
+    store.activate(session)
+
+    store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+    store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+
+    loaded = store.get(session.id)
+    assert loaded.ticket_ids == [parent.id, rework.id]
+    assert [event["event"] for event in loaded.audit_events].count("ticket_inherited") == 1
+
+
 def test_save_cannot_bypass_persisted_lifecycle(tmp_path: Path):
     tickets, store = stores(tmp_path)
     ticket = tickets.create("delivery", "story", "Immutable membership")

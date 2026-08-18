@@ -192,6 +192,33 @@ def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     assert all(entry["run_id"] == "run-review" for entry in run_events(parent))
 
 
+def test_review_rework_inherits_parent_active_session(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("delivery", "task", "Session parent", status="review")
+    session = orchestrator.session_store.create([parent.id])
+    orchestrator.session_store.activate(session)
+    parent.active_run = "run-review"
+    orchestrator.store.save(parent)
+
+    workflow = load_workflow("delivery")
+    orchestrator._apply_result(
+        workflow,
+        parent.id,
+        workflow.by_id["review"],
+        AgentResult(outcome="needs_rework", summary="Нужна правка", details="Добавить тест."),
+    )
+
+    child = orchestrator.store.children_of(parent.id, process="delivery")[0]
+    loaded_session = orchestrator.session_store.get(session.id)
+    assert child.id in loaded_session.ticket_ids
+    assert any(
+        event["event"] == "ticket_inherited"
+        and event["ticket_id"] == child.id
+        and event["source_ticket"] == parent.id
+        for event in loaded_session.audit_events
+    )
+
+
 def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
     async def scenario() -> None:
         orchestrator = Orchestrator(tmp_path, max_agents=1)
