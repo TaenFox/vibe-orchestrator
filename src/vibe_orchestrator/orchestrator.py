@@ -60,13 +60,13 @@ class Orchestrator:
             return
         global_candidates = []
         running_ids = set(self.running)
+        active_delivery_sessions = [session for session in self.session_store.list() if session.status == "active"]
         delivery_session_participants = {
             ticket_id
-            for session in self.session_store.list()
-            if session.status == "active"
-            for ticket_id in session.ticket_ids
+            for session in active_delivery_sessions
+            for ticket_id in self.session_store.effective_ticket_ids(session)
         }
-        if not delivery_session_participants and not any(session.status == "active" for session in self.session_store.list()):
+        if not active_delivery_sessions:
             delivery_session_participants = None
         for process, workflow in self.workflows.items():
             tickets = self.store.list(process)
@@ -91,6 +91,14 @@ class Orchestrator:
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
             stage = self._stage_for_ticket(workflow, workflow.by_id[candidate.target_status], ticket)
+            active_sessions = [s for s in active_delivery_sessions if ticket.id in self.session_store.effective_ticket_ids(s)]
+            session = active_sessions[0] if active_sessions else None
+            if workflow.id == "delivery" and active_delivery_sessions and session is None:
+                ticket.blocked_reason = "session_membership_required"
+                ticket.last_outcome = "blocked_budget"
+                ticket.last_summary = "Тикет не включен в активную Delivery-сессию"
+                self.store.save(ticket)
+                continue
             run_id = uuid.uuid4().hex
             workspace = None
             try:
@@ -120,7 +128,7 @@ class Orchestrator:
                 self._record_failure(ticket, run_id, candidate.target_status, exc, metadata)
                 log.exception("сбой подготовки запуска для %s (%s)", ticket.id, ticket.type)
                 continue
-            session_id = next((s.id for s in self.session_store.list() if s.status == "active" and ticket.id in s.ticket_ids), None)
+            session_id = session.id if session else None
             attempt_kind = "rework" if ticket.type == "rework" else "initial"
             try:
                 reservation = self.ledger.reserve(
@@ -128,6 +136,7 @@ class Orchestrator:
                     attempt_kind=attempt_kind,
                     parent_ticket_id=ticket.parent,
                     budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
+                    require_session_budget=bool(session and session.budget_policy == "enforced"),
                 )
             except BudgetDenied as exc:
                 reason_code = getattr(exc, "reason_code", "budget_denied")
