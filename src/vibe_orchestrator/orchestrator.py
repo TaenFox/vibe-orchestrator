@@ -514,6 +514,7 @@ class Orchestrator:
 
     def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
         debt_tickets: list[Ticket] = []
+        exact_debt_ticket_ids: set[str] = set()
         debt_service = TicketWriteService(self.store.project)
         for candidate in parse_technical_debt(details):
             key, basis = technical_debt_basis(candidate, self.store.project)
@@ -531,6 +532,8 @@ class Orchestrator:
             }, actor="orchestrator")
             if result.ticket is not None:
                 debt_tickets.append(result.ticket)
+                if result.status == "exact":
+                    exact_debt_ticket_ids.add(result.ticket.id)
         spec = _extract_structured_payload(details).get("delivery_tickets", [])
         existing_children = {
             (child.type, child.title.strip()): child
@@ -555,6 +558,9 @@ class Orchestrator:
             active_keys.add(key)
             existing = existing_children.get(key)
             if existing:
+                if existing.id in exact_debt_ticket_ids:
+                    synced.append(existing)
+                    continue
                 changed = False
                 if existing.description != description or existing.priority != priority or existing.mandatory != mandatory:
                     existing.description = description
@@ -584,7 +590,7 @@ class Orchestrator:
             existing_children[key] = child
             synced.append(child)
         for key, child in existing_children.items():
-            if key in active_keys:
+            if key in active_keys or child.id in exact_debt_ticket_ids:
                 continue
             self._deactivate_delivery_child(child)
         return synced
