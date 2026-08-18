@@ -503,7 +503,12 @@ legacy record сериализуется как `null`, без synthetic unlimit
 `budget_runs` связывается с ledger по `run_id` и сохраняет lifecycle state,
 `attempt_kind`, ticket/session ownership, planned/reserved/actual, source,
 `source_confidence`, captured timestamps, normalization/rate-card versions и
-nullable `cost`. Unknown usage имеет `actual` и `cost` равными `null`, а не нулю;
+nullable `cost`. Каждый элемент `budget_runs` также содержит обязательные
+`snapshot_status` и `enforcement_state_exact`: валидный finalized provider usage
+имеет `fresh/true`, а unknown, fallback/degraded и inconsistent provenance —
+`stale/false`. Ошибка чтения отдельной usage-записи, если такая запись включается
+в payload, сериализуется как `unavailable/false`. Unknown usage имеет `actual` и
+`cost` равными `null`, а не нулю;
 стоимость не вычисляется без rate-card policy. Rework сохраняет child
 `run_id`, но его ticket aggregate принадлежит `ticket_budget_id` parent.
 
@@ -512,7 +517,11 @@ drawer дополнительно показывает run counts, status, confi
 версии и cost. Session panel показывает session aggregate отдельно от ticket
 payload. `fresh` означает прямое успешное чтение ledger; `stale` или
 `unavailable` всегда сопровождаются `enforcement_state_exact=false` и
-визуальной пометкой «не подтверждено». GET не добавляет mutation endpoints.
+визуальной пометкой «не подтверждено». Для run read-model `fresh/true`
+дополнительно требует подтверждённую provider provenance; наличие числового
+usage само по себе не делает enforcement state точным. Пример элемента:
+`{"run_id":"run-1","actual":{"tokens":12},"snapshot_status":"fresh",`
+`"enforcement_state_exact":true}`. GET не добавляет mutation endpoints.
 Read path выполняет только SELECT и вычисляет effective limits и derived status
 в памяти с той же precedence, что и transactional lifecycle; stored `updated_at`,
 status и effective limits при GET не изменяются. Provenance `budget_runs` также
@@ -532,7 +541,8 @@ data целиком, но повторное чтение одного budget sc
 
 ## Manual browser smoke
 
-Worker tests проверяют JSON, HTML escaping и inline refresh guards, но не являются
+Worker tests проверяют JSON для confirmed и stale run usage, сохранение nullable
+unknown actual/cost, HTML escaping и inline refresh guards, но не являются
 browser-level проверкой DOM, focus, keyboard, viewport или auto-refresh.
 Внешний ручной прогон: запустить UI, открыть Delivery board, проверить card,
 drawer и session panel для enforced, legacy и unavailable/stale fixtures;

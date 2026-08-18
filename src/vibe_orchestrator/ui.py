@@ -419,11 +419,20 @@ def _source_confidence(actual: dict | None) -> str:
     return "degraded"
 
 
+def _budget_run_snapshot(run: dict, usage: dict | None, confidence: str) -> tuple[str, bool]:
+    """Return exactness metadata for one usage read-model item."""
+    if (run.get("state") == "finalized" and confidence == "confirmed"
+            and is_confirmed_token_usage(usage, run_id=run.get("run_id"))):
+        return "fresh", True
+    return "stale", False
+
+
 def _budget_run(run: dict) -> dict:
     usage = run.get("actual") or {}
     unknown = run.get("state") == "unknown"
     actual = {"tokens": None, "points": None, "runs": None} if unknown else (_dimensions(run.get("actual")) if run.get("actual") is not None else {"tokens": None, "points": None, "runs": None})
     confidence = "unknown" if unknown else _source_confidence(usage)
+    snapshot_status, enforcement_state_exact = _budget_run_snapshot(run, usage, confidence)
     captured_at = usage.get("captured_at") if isinstance(usage, dict) else None
     return {
         "run_id": run["run_id"], "state": run["state"], "attempt_kind": run["attempt_kind"],
@@ -433,6 +442,7 @@ def _budget_run(run: dict) -> dict:
         "source": usage.get("source", "unknown") if isinstance(usage, dict) else "unknown",
         "source_confidence": confidence, "captured_at": captured_at,
         "last_confirmed_snapshot_at": captured_at if confidence == "confirmed" else None,
+        "snapshot_status": snapshot_status, "enforcement_state_exact": enforcement_state_exact,
         "usage_ref": usage.get("usage_ref") if isinstance(usage, dict) else None,
         "model": usage.get("model") if isinstance(usage, dict) else None,
         "reasoning_effort": usage.get("reasoning_effort") if isinstance(usage, dict) else None,
@@ -515,7 +525,7 @@ def _budget_run_details_html(run: dict) -> str:
         f'<div><span class="badge">{html.escape(str(run.get("state", "—")))}</span> <strong>{html.escape(str(run.get("run_id", "—")))}</strong></div>'
         f'<div class="details-row"><span class="meta">Attempt / ownership</span>{html.escape(str(run.get("attempt_kind") or "—"))} · ticket {html.escape(str(run.get("ticket_id") or "—"))} · parent ticket {html.escape(str(run.get("parent_ticket_id") or "—"))} · ticket budget {html.escape(str(run.get("ticket_budget_id") or "—"))} · session budget {html.escape(str(run.get("session_budget_id") or "—"))}</div>'
         f'<div class="details-row"><span class="meta">Dimensions</span>planned ({_budget_dimensions_html(run.get("planned"))}) · reserved ({_budget_dimensions_html(run.get("reserved"))}) · actual ({_budget_dimensions_html(run.get("actual"))})</div>'
-        f'<div class="details-row"><span class="meta">Snapshot</span>source {html.escape(str(run.get("source") or "unknown"))} · confidence {html.escape(str(run.get("source_confidence") or "unknown"))} · captured_at {_budget_value(run.get("captured_at"))} · last_confirmed_snapshot_at {_budget_value(run.get("last_confirmed_snapshot_at"))}</div>'
+        f'<div class="details-row"><span class="meta">Snapshot</span>snapshot_status {_budget_value(run.get("snapshot_status"))} · enforcement_state_exact {_budget_value(run.get("enforcement_state_exact"))} · source {html.escape(str(run.get("source") or "unknown"))} · confidence {html.escape(str(run.get("source_confidence") or "unknown"))} · captured_at {_budget_value(run.get("captured_at"))} · last_confirmed_snapshot_at {_budget_value(run.get("last_confirmed_snapshot_at"))}</div>'
         f'<div class="details-row"><span class="meta">Versions / cost</span>normalization_version {_budget_value(run.get("normalization_version"))} · rate_card_version {_budget_value(run.get("rate_card_version"))} · cost {_budget_value(run.get("cost"))}</div>'
         '</div>'
     )
