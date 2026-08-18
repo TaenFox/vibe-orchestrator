@@ -378,6 +378,11 @@ unknown runs с precedence `over_budget` → `blocked_unknown` → `stop_new_run
 6. Ненулевые planned/actual points требуют normalization version; при null
    points version null и status unavailable, а активный point limit приводит к
    unknown, не к финализации нулём.
+7. Успешный one-shot `resolve_unknown` фиксирует `consumed_at`, но сохраняет
+   разрешение для своего target run после status refresh/recompute и не
+   блокирует последующую reservation; другой unknown run в том же scope
+   продолжает блокировать admission. Expiry-based resolve действует до
+   `expires_at`, затем scope снова получает `blocked_unknown`.
 7. Actual выше planned сохраняется полностью, с версиями нормализации и rate
    card, и даёт `over_budget` без остановки уже запущенного процесса.
 8. Изменение policy/rate card не меняет прошлые planned/actual; исправление —
@@ -453,12 +458,14 @@ normalized usage увеличивает `finalized` агрегаты, но не 
 one-shot consumption пересчитывают effective limit/status транзакционно, уже
 созданные reservations не изменяются.
 
-Для `resolve-unknown` решение считается применимым только одновременно при
-`consumed_at IS NULL` и отсутствии либо будущем `expires_at`. Одноразовое
-решение после consumption остаётся append-only audit record, но больше не
-снимает `blocked_unknown` при следующем refresh/recompute. Поэтому для
-повторного разрешения unknown run требуется новое авторизованное решение;
-сам run и его actual не изменяются.
+Для `resolve-unknown` expiry-based решение считается применимым только при
+`consumed_at IS NULL` и отсутствии либо будущем `expires_at`. One-shot решение
+после успешной policy-check операции получает `consumed_at`, остаётся
+append-only audit record и продолжает представлять применённое разрешение
+строго для своего target unknown run при последующих refresh/recompute.
+Поэтому этот run не возвращается в `blocked_unknown`, но другие unknown runs
+остаются блокирующими до собственного решения. Новое one-shot решение не
+распространяется на другие `run_id`; сам run и его actual не изменяются.
 
 `allow-overrun` не меняет лимит и лишь bypass-ит перечисленные dimensions для
 конкретного target; `resolve-unknown` проверяет в write-транзакции, что run
