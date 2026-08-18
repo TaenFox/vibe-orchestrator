@@ -250,6 +250,13 @@ def test_override_member_rework_uses_session_and_parent_budgets(tmp_path: Path):
         orchestrator.session_store.override_ticket(
             session, child.id, actor="reviewer", reason="Approved rework scope",
         )
+        override_events = [
+            event for event in session.audit_events
+            if event.get("event") == "membership_override"
+        ]
+        assert override_events[-1]["ticket_id"] == child.id
+        assert override_events[-1]["actor"] == "reviewer"
+        assert override_events[-1]["reason"] == "Approved rework scope"
         orchestrator.ledger.create_budget("ticket", parent.id, limits={"tokens": 10, "points": 10, "runs": 1})
         orchestrator.ledger.create_budget("ticket", child.id, limits={"tokens": 100, "points": 100, "runs": 100})
         orchestrator.ledger.create_budget("session", session.id, limits={"tokens": 10, "points": 10, "runs": 1})
@@ -260,6 +267,7 @@ def test_override_member_rework_uses_session_and_parent_budgets(tmp_path: Path):
         scheduled = orchestrator.store.get(child.id)
         run_id = scheduled.run_history[-1]["run_id"]
         run = orchestrator.ledger.get_run(run_id)
+        assert run["session_id"] == session.id
         assert run["parent_ticket_id"] == parent.id
         assert run["ticket_budget_id"] == f"ticket:{parent.id}"
         assert run["session_budget_id"] == f"session:{session.id}"
