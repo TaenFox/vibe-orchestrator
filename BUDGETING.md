@@ -22,6 +22,11 @@ records scheduler атомарно резервирует лимиты до за
 становится authoritative источником reservations и агрегатов. Ранее описанный
 ticket-level `budget_points` runtime не читал.
 
+Связка выполняется в `_schedule_once`: фактический `ticket_id` запуска берётся
+из выбранного Delivery-тикета, а ticket scope передаётся в ledger отдельно.
+Для initial/retry это тот же ticket, для rework — исходный parent. Budget gate
+срабатывает до запуска Codex.
+
 Traceability остаётся за существующими источниками: подтверждённые
 `codex_cli.turn.completed` события суммируются в `token_usage`, а malformed,
 legacy или incomplete output получает `source=unknown`; значение сохраняется в
@@ -55,8 +60,11 @@ run state и append-only corrections. Отсутствующий budget record �
 - `run` владеет одной immutable reservation/finalization записью и никогда не
   создаёт самостоятельный общий лимит.
 
-Для каждого Delivery run обязателен `ticket_budget_id`. Если исходный ticket
-входит в активную сессию, устанавливается `session_budget_id`. Retry получает
+Для каждого Delivery run `ticket_id` — фактический ticket, создавший запуск, а
+`ticket_budget_id` — budget owner scope. Для initial/retry оба указывают на
+один ticket; для rework `ticket_id` остаётся child, а `ticket_budget_id`
+ссылается на budget исходного parent. Если child входит в активную сессию,
+устанавливается `session_budget_id` текущей session. Retry получает
 `parent_run_id`, rework — `parent_ticket_id`. Один run учитывается в каждом
 применимом агрегате ровно один раз.
 
@@ -216,7 +224,10 @@ conversion версия null и status `unavailable`. Rate card фиксируе
 Retry получает новый `run_id`, отдельную reservation и тот же ticket budget;
 предыдущая reservation не переиспользуется. Rework получает child ticket и
 `attempt_kind: rework`, но его cost входит в budget исходного ticket и active
-session ровно один раз. `wip_exempt` не обходит budget gate. Один ticket может
+session ровно один раз. Child ID сохраняется в run traceability, parent ID — в
+`parent_ticket_id` и выборе ticket budget. Child budget не создаётся и не
+выбирается, даже если такая запись существует. Отсутствующий parent блокирует
+rework до запуска. `wip_exempt` не обходит budget gate. Один ticket может
 принадлежать не более чем одной active Delivery session; membership после
 активации сессии не изменяется.
 
@@ -260,8 +271,10 @@ marker `ambiguous_start`.
    value, увеличивает finalized на 17 и пересчитывает available.
 3. `limit_tokens`, `limit_points` и `limit_runs` проверяются независимо;
    превышение любого enforced измерения запрещает новый run.
-4. Retry и rework используют существующие ticket/session budgets и не дают
-   двойного списания; child rework не получает отдельный лимит.
+4. Retry использует собственный ticket budget, а rework резервирует parent
+   ticket budget и budget active session; child budget не изменён. Run хранит
+   child ID и `parent_ticket_id`, а после finalize/release оба агрегата меняются
+   ровно один раз. Отказ parent/session блокирует запуск без reservation.
 5. Unknown usage даёт `blocked_unknown`, а completed scope не принимает новые
    reservations.
 6. Ненулевые planned/actual points требуют normalization version; при null

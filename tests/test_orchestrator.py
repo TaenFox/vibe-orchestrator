@@ -178,6 +178,41 @@ def test_review_needs_rework_creates_blocking_child(tmp_path: Path):
     assert all(entry["run_id"] == "run-review" for entry in run_events(parent))
 
 
+def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = BlockingRunner()
+        orchestrator.runner = runner
+        parent = orchestrator.store.create("delivery", "task", "Parent", status="review")
+        child = orchestrator.store.create(
+            "delivery", "rework", "Child rework", parent=parent.id,
+            status="selected_for_session", rework_stage="review",
+        )
+        child.context = {"budget": {"planned": {"tokens": 5, "points": 1, "runs": 1}}}
+        orchestrator.store.save(child)
+        session = orchestrator.session_store.create([child.id])
+        orchestrator.session_store.activate(session)
+        orchestrator.ledger.create_budget("ticket", parent.id, limits={"tokens": 10, "points": 10, "runs": 1})
+        orchestrator.ledger.create_budget("ticket", child.id, limits={"tokens": 100, "points": 100, "runs": 100})
+        orchestrator.ledger.create_budget("session", session.id, limits={"tokens": 10, "points": 10, "runs": 1})
+
+        await orchestrator._schedule_once()
+        await runner.started.wait()
+        run_id = orchestrator.store.get(child.id).active_run
+        run = orchestrator.ledger.get_run(run_id)
+        assert run["ticket_id"] == child.id
+        assert run["parent_ticket_id"] == parent.id
+        assert run["ticket_budget_id"] == f"ticket:{parent.id}"
+        assert orchestrator.ledger.get_budget(f"ticket:{parent.id}")["aggregates"]["reserved"]["runs"] == 1
+        assert orchestrator.ledger.get_budget(f"ticket:{child.id}")["aggregates"]["reserved"]["runs"] == 0
+        assert orchestrator.ledger.get_budget(f"session:{session.id}")["aggregates"]["reserved"]["runs"] == 1
+
+        runner.release.set()
+        await orchestrator.running[child.id]
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("ticket_type", "prompt"),
     [

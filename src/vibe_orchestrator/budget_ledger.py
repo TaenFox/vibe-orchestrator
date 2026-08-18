@@ -152,16 +152,24 @@ class BudgetLedger:
             result[key.removesuffix("_json")] = json.loads(result[key]) if result[key] else None
         return result
 
-    def _budget_rows(self, db: sqlite3.Connection, ticket_id: str, session_id: str | None):
+    def _budget_rows(self, db: sqlite3.Connection, budget_owner_ticket_id: str, session_id: str | None):
         rows = []
-        for scope, owner in (("ticket", ticket_id), ("session", session_id)):
+        for scope, owner in (("ticket", budget_owner_ticket_id), ("session", session_id)):
             if owner:
                 row = db.execute("SELECT * FROM budgets WHERE scope=? AND owner_id=?", (scope, owner)).fetchone()
                 if row and row["mode"] == "enforced": rows.append(row)
         return rows
 
     def reserve(self, run_id: str, ticket_id: str, session_id: str | None, planned: Mapping[str, Any], *,
-                attempt_kind: str = "initial", parent_run_id: str | None = None, parent_ticket_id: str | None = None) -> Reservation:
+                attempt_kind: str = "initial", parent_run_id: str | None = None, parent_ticket_id: str | None = None,
+                budget_owner_ticket_id: str | None = None) -> Reservation:
+        if attempt_kind == "rework" and not parent_ticket_id:
+            raise BudgetDenied("rework requires parent_ticket_id for budget ownership")
+        if attempt_kind == "rework" and budget_owner_ticket_id and budget_owner_ticket_id != parent_ticket_id:
+            raise ValueError("rework budget owner must match parent_ticket_id")
+        budget_owner_ticket_id = budget_owner_ticket_id or (
+            parent_ticket_id if attempt_kind == "rework" else ticket_id
+        )
         planned_values = _values(planned)
         if planned_values["runs"] is None: planned_values["runs"] = 1
         with self._connect() as db:
@@ -171,7 +179,7 @@ class BudgetLedger:
                 immutable = (existing["ticket_id"], existing["session_id"], existing["attempt_kind"], json.loads(existing["planned_json"]))
                 if immutable != (ticket_id, session_id, attempt_kind, planned_values): raise ImmutableRunError("run_id parameters differ")
                 return Reservation(run_id, existing["state"])
-            rows = self._budget_rows(db, ticket_id, session_id)
+            rows = self._budget_rows(db, budget_owner_ticket_id, session_id)
             if not rows:
                 return Reservation(run_id, "legacy", legacy=True)
             for row in rows:

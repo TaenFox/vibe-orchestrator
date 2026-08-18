@@ -69,3 +69,21 @@ def test_terminal_run_can_only_be_corrected_by_append_only_adjustment(tmp_path: 
     adjustment_id = ledger.adjustment("run-1", {"tokens": 2, "points": 1, "runs": 0}, reason="provider correction", author="operator")
     assert adjustment_id == 1
     assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"]["tokens"] == 7
+
+
+def test_rework_reserves_parent_ticket_scope_but_keeps_child_run_metadata(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "PARENT", limits={"tokens": 10, "points": 10, "runs": 1})
+    ledger.create_budget("ticket", "CHILD", limits={"tokens": 100, "points": 100, "runs": 100})
+
+    ledger.reserve(
+        "run-rework", "CHILD", None, {"tokens": 5, "points": 1, "runs": 1},
+        attempt_kind="rework", parent_ticket_id="PARENT",
+    )
+
+    run = ledger.get_run("run-rework")
+    assert run["ticket_id"] == "CHILD"
+    assert run["parent_ticket_id"] == "PARENT"
+    assert run["ticket_budget_id"] == "ticket:PARENT"
+    assert ledger.get_budget("ticket:PARENT")["aggregates"]["reserved"] == {"tokens": 5, "points": 1, "runs": 1}
+    assert ledger.get_budget("ticket:CHILD")["aggregates"]["reserved"] == {"tokens": 0, "points": 0, "runs": 0}
