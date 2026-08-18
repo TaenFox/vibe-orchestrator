@@ -5,6 +5,7 @@ import asyncio
 import logging
 import json
 from pathlib import Path
+from typing import Any, Callable, Sequence
 
 import yaml
 
@@ -15,6 +16,11 @@ from .git_trees import GitTreeManager
 from .orchestrator import Orchestrator
 from .tickets import TicketStore
 from .ui import serve, start_server
+
+
+def default_cli_authorizer(**_: Any) -> tuple[bool, str | None]:
+    """Deny budget mutations until the CLI is wired to an explicit policy."""
+    return False, None
 
 
 def project_path(value: str) -> Path:
@@ -63,13 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(argv: Sequence[str] | None = None, *, authorizer: Callable[..., Any] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.command == "budget":
-        # CLI has no external identity provider yet; the explicit actor and this
-        # policy marker make that limitation visible in the audit record.
-        ledger = BudgetLedger(args.project, authorizer=lambda **_: (True, "cli.explicit-actor.v1"))
+        # Actor identity is audit data, not an authorization decision. An
+        # embedding application must inject its policy explicitly; standalone
+        # CLI invocations remain default-deny.
+        ledger = BudgetLedger(args.project, authorizer=authorizer or default_cli_authorizer)
         try:
             if args.budget_command == "increase-limit": result = ledger.increase_limit(actor=args.actor, target_scope=args.target_scope, target_id=args.target_id, dimension=args.dimension, delta=args.delta, reason=args.reason, reference=args.reference, expires_at=args.expires_at, one_shot=args.one_shot, decision_id=args.decision_id)
             elif args.budget_command == "allow-overrun": result = ledger.allow_overrun(actor=args.actor, target_scope=args.target_scope, target_id=args.target_id, dimensions=args.dimension, reason=args.reason, reference=args.reference, expires_at=args.expires_at, one_shot=args.one_shot, decision_id=args.decision_id)

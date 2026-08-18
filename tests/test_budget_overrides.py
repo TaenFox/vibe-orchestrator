@@ -1,6 +1,7 @@
 import pytest
 
 from vibe_orchestrator.budget_ledger import BudgetDenied, BudgetLedger
+from vibe_orchestrator import cli
 
 
 def authorizer(**kwargs):
@@ -137,3 +138,43 @@ def test_decision_replay_is_idempotent_but_conflicting_payload_is_rejected(tmp_p
     assert len(ledger.list_decisions()) == 1
     with pytest.raises(ValueError):
         ledger.increase_limit(**{**kwargs, "delta": 2})
+
+
+def test_cli_budget_mutations_default_to_deny(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    BudgetLedger(project).create_budget("ticket", "T", limits={"tokens": 10})
+    monkeypatch.setattr("sys.argv", [
+        "vibe", "budget", "increase-limit", str(project), "--actor", "alice",
+        "--reason", "r", "--reference", "ref", "--expires-at",
+        "2999-01-01T00:00:00+00:00", "--scope", "ticket", "--target", "T",
+        "--dimension", "tokens", "--delta", "1",
+    ])
+    with pytest.raises(SystemExit, match="policy denied"):
+        cli.main()
+    assert BudgetLedger(project).list_decisions() == []
+
+
+def test_cli_uses_injected_policy_and_keeps_permissions_independent(tmp_path, capsys):
+    project = tmp_path / "project"
+    project.mkdir()
+    BudgetLedger(project).create_budget("ticket", "T", limits={"tokens": 10})
+    policy_calls = []
+
+    def deny_increase(**kwargs):
+        policy_calls.append(kwargs["permission"])
+        return kwargs["permission"] != "budget.increase_limit", "test-policy/1"
+
+    with pytest.raises(SystemExit, match="policy denied"):
+        cli.main([
+            "budget", "increase-limit", str(project), "--actor", "alice", "--reason", "r",
+            "--reference", "ref", "--expires-at", "2999-01-01T00:00:00+00:00",
+            "--scope", "ticket", "--target", "T", "--dimension", "tokens", "--delta", "1",
+        ], authorizer=deny_increase)
+    cli.main([
+        "budget", "allow-overrun", str(project), "--actor", "alice", "--reason", "r",
+        "--reference", "ref", "--expires-at", "2999-01-01T00:00:00+00:00",
+        "--scope", "ticket", "--target", "T", "--dimension", "tokens",
+    ], authorizer=deny_increase)
+    assert policy_calls == ["budget.increase_limit", "budget.allow_overrun"]
+    assert '"permission": "budget.allow_overrun"' in capsys.readouterr().out
