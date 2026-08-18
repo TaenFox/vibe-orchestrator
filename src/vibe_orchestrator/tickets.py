@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import logging
+import re
 import tempfile
 import threading
+import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,11 +25,15 @@ TICKET_TYPES_BY_PROCESS = {
     "delivery": ("story", "task", "bug", "rework"),
     "process_management": ("audit", "planning", "estimation"),
 }
-AGENT_CREATE_FIELDS = frozenset({"process", "type", "title", "description", "priority", "parent", "mandatory", "idempotency_key", "origin", "status"})
+AGENT_CREATE_FIELDS = frozenset({"process", "type", "title", "description", "priority", "parent", "mandatory", "idempotency_key", "origin", "status", "technical_debt"})
 AGENT_UPDATE_FIELDS = frozenset({"title", "description", "priority", "parent", "blocked_by", "mandatory", "context", "origin", "expected_updated_at"})
 AGENT_FORBIDDEN_UPDATE_FIELDS = frozenset({"id", "process", "type", "status", "active_run", "last_outcome", "last_summary", "consecutive_failures", "retry_after", "run_history", "created_at", "updated_at", "wip_exempt", "correction_stage", "rework_stage"})
 _WRITE_LOCK = threading.RLock()
 log = logging.getLogger("vibe")
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 
 def now_iso() -> str:
@@ -59,6 +68,8 @@ class Ticket:
     retry_after: str | None = None
     run_history: list[dict[str, Any]] = field(default_factory=list)
     audit_events: list[dict[str, Any]] = field(default_factory=list)
+    dedup_key: str | None = None
+    dedup_basis: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Ticket":
@@ -99,6 +110,10 @@ class Ticket:
             payload.pop("context")
         if payload["context_revision"] == 0:
             payload.pop("context_revision")
+        if payload["dedup_key"] is None:
+            payload.pop("dedup_key")
+        if payload["dedup_basis"] is None:
+            payload.pop("dedup_basis")
         return payload
 
 
@@ -221,6 +236,34 @@ class TicketWriteConflict(TicketWriteError):
     pass
 
 
+@dataclass(frozen=True)
+class TicketWriteResult:
+    status: str
+    ticket: Ticket | None = None
+    candidates: tuple[dict[str, Any], ...] = ()
+
+
+class TicketWriteAmbiguous(TicketWriteError):
+    def __init__(self, candidates: list[dict[str, Any]]):
+        super().__init__("technical-debt deduplication is ambiguous")
+        self.candidates = candidates
+
+
+@contextmanager
+def _process_write_lock(project: Path):
+    lock_path = project.resolve() / ".vibe" / "ticket-writes.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+")
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 def _parent_is_compatible(parent: Ticket, process: str, ticket_type: str) -> bool:
     if process == "discovery":
         return ticket_type == "correction" and parent.process == "discovery" and parent.type == "idea"
@@ -264,6 +307,35 @@ class TicketWriteService:
 
     def __init__(self, project: Path):
         self.store = TicketStore(project)
+
+    @staticmethod
+    def _dedup_candidates(store: TicketStore, key: str) -> list[Ticket]:
+        candidates = [ticket for ticket in store.list("delivery")
+                      if ticket.type in {"story", "task", "bug"}
+                      and ticket.dedup_key == key and not store.is_done(ticket)]
+        return sorted(candidates, key=lambda ticket: (ticket.created_at, ticket.id))
+
+    @staticmethod
+    def _candidate_payload(ticket: Ticket) -> dict[str, Any]:
+        return {"ticket_id": ticket.id, "type": ticket.type, "title": ticket.title,
+                "status": ticket.status, "dedup_key": ticket.dedup_key}
+
+    @staticmethod
+    def _validate_dedup_metadata(value: Any) -> tuple[str, dict[str, Any]]:
+        if not isinstance(value, dict) or not isinstance(value.get("dedup_key"), str) or not isinstance(value.get("basis"), dict):
+            raise TicketWriteError("technical_debt must contain validated dedup_key and basis")
+        basis = value["basis"]
+        encoded = json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        expected = f"tech_debt.v1:{hashlib.sha256(encoded).hexdigest()}"
+        if value["dedup_key"] != expected or set(basis) != {"problem", "area", "evidence"} or not isinstance(basis.get("evidence"), dict) or set(basis["evidence"]) != {"path", "identifier", "observation"}:
+            raise TicketWriteError("technical_debt basis/key mismatch")
+        strings = [basis["problem"], basis["area"], *basis["evidence"].values()]
+        if any(not isinstance(item, str) for item in strings):
+            raise TicketWriteError("technical_debt basis values must be strings")
+        canonical = lambda item: re.sub(r"\s+", " ", unicodedata.normalize("NFC", item.strip()).casefold())
+        if any(item != canonical(item) for item in strings):
+            raise TicketWriteError("technical_debt basis is not canonical")
+        return value["dedup_key"], dict(basis)
 
     def _validate_common(self, data: dict[str, Any], *, update: bool = False) -> None:
         allowed = AGENT_UPDATE_FIELDS if update else AGENT_CREATE_FIELDS
@@ -328,7 +400,7 @@ class TicketWriteService:
                         continue
         return values
 
-    def create_ticket(self, data: dict[str, Any], *, actor: str) -> Ticket:
+    def create_ticket_result(self, data: dict[str, Any], *, actor: str) -> TicketWriteResult:
         if not isinstance(data, dict):
             raise TicketWriteError("request must be an object")
         self._validate_common(data)
@@ -355,7 +427,11 @@ class TicketWriteService:
         workflow = load_workflow(process)
         if status is not None and status != workflow.initial_status:
             raise TicketWriteError("agent-created tickets must start at workflow initial status")
-        with _WRITE_LOCK:
+        technical_debt = data.get("technical_debt")
+        dedup_key = dedup_basis = None
+        if technical_debt is not None:
+            dedup_key, dedup_basis = self._validate_dedup_metadata(technical_debt)
+        with _WRITE_LOCK, _process_write_lock(self.store.project):
             key = data.get("idempotency_key")
             if key is not None and (not isinstance(key, str) or not key.strip()):
                 raise TicketWriteError("idempotency_key must be a non-empty string")
@@ -366,13 +442,28 @@ class TicketWriteService:
                             expected = event.get("after")
                             requested = {"process": process, "type": ticket_type, "title": title, "description": description, "priority": priority, "parent": parent_id, "mandatory": mandatory}
                             if expected == requested:
-                                return existing
+                                return TicketWriteResult("exact", existing)
                             raise TicketWriteConflict("idempotency_key was already used with another payload")
+            if dedup_key:
+                matches = self._dedup_candidates(self.store, dedup_key)
+                if len(matches) == 1:
+                    return TicketWriteResult("exact", matches[0])
+                if len(matches) > 1:
+                    return TicketWriteResult("ambiguous", candidates=tuple(self._candidate_payload(item) for item in matches))
             self._validate_parent(parent_id, process, ticket_type)
             ticket = self.store._new_ticket(process, ticket_type, title, description=description, priority=priority, parent=parent_id, mandatory=mandatory)
+            ticket.dedup_key = dedup_key
+            ticket.dedup_basis = dedup_basis
             ticket.audit_events.append({"event": "ticket_created", "timestamp": now_iso(), "actor": actor, "origin": origin, "operation": "create_ticket", "ticket_id": ticket.id, "changed_fields": sorted({"process", "type", "title", "description", "priority", "parent", "mandatory"}), "before": None, "after": {"process": process, "type": ticket_type, "title": title, "description": description, "priority": priority, "parent": parent_id, "mandatory": mandatory}, **({"idempotency_key": key} if key else {})})
             self.store.save(ticket)
-            return ticket
+            return TicketWriteResult("created", ticket)
+
+    def create_ticket(self, data: dict[str, Any], *, actor: str) -> Ticket:
+        result = self.create_ticket_result(data, actor=actor)
+        if result.status == "ambiguous":
+            raise TicketWriteAmbiguous(list(result.candidates))
+        assert result.ticket is not None
+        return result.ticket
 
     def update_ticket(self, ticket_id: str, data: dict[str, Any], *, actor: str) -> Ticket:
         if not isinstance(data, dict):

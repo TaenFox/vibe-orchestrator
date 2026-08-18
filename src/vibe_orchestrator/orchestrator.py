@@ -17,9 +17,9 @@ from .config import Stage, Workflow, load_all_workflows
 from .control import WorkerControl
 from .git_trees import GitTreeError, GitTreeManager
 from .scheduler import select_candidates
-from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore
+from .tickets import RETRY_BACKOFF_SECONDS, Ticket, TicketStore, TicketWriteService
 from .sessions import SessionStore
-from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_technical_debt, preflight_technical_debt
+from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_technical_debt, preflight_technical_debt, technical_debt_basis
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 
@@ -513,6 +513,27 @@ class Orchestrator:
             return
 
     def _create_delivery_children(self, parent: Ticket, details: str) -> list[Ticket]:
+        debt_tickets: list[Ticket] = []
+        exact_debt_ticket_ids: set[str] = set()
+        debt_service = TicketWriteService(self.store.project)
+        for candidate in parse_technical_debt(details):
+            key, basis = technical_debt_basis(candidate, self.store.project)
+            result = debt_service.create_ticket_result({
+                "process": "delivery", "type": candidate["type"],
+                "title": candidate["problem"].strip(),
+                "description": (
+                    f"Технический долг из {candidate['source_ticket']} / {candidate['source_run']}.\n"
+                    f"Evidence: {candidate['evidence']['path']}::{candidate['evidence']['identifier']}\n"
+                    f"{candidate['evidence']['observation']}"
+                ),
+                "priority": candidate["priority"], "parent": parent.id,
+                "mandatory": True, "origin": f"technical_analysis:{candidate['source_run']}",
+                "technical_debt": {"dedup_key": key, "basis": basis},
+            }, actor="orchestrator")
+            if result.ticket is not None:
+                debt_tickets.append(result.ticket)
+                if result.status == "exact":
+                    exact_debt_ticket_ids.add(result.ticket.id)
         spec = _extract_structured_payload(details).get("delivery_tickets", [])
         existing_children = {
             (child.type, child.title.strip()): child
@@ -520,7 +541,7 @@ class Orchestrator:
             if child.type in {"story", "task", "bug"}
         }
         active_keys: set[tuple[str, str]] = set()
-        synced: list[Ticket] = []
+        synced: list[Ticket] = debt_tickets
         for item in spec:
             if not isinstance(item, dict):
                 continue
@@ -537,6 +558,9 @@ class Orchestrator:
             active_keys.add(key)
             existing = existing_children.get(key)
             if existing:
+                if existing.id in exact_debt_ticket_ids:
+                    synced.append(existing)
+                    continue
                 changed = False
                 if existing.description != description or existing.priority != priority or existing.mandatory != mandatory:
                     existing.description = description
@@ -566,7 +590,7 @@ class Orchestrator:
             existing_children[key] = child
             synced.append(child)
         for key, child in existing_children.items():
-            if key in active_keys:
+            if key in active_keys or child.id in exact_debt_ticket_ids:
                 continue
             self._deactivate_delivery_child(child)
         return synced

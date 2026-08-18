@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +25,39 @@ ERROR_CODES = {
 }
 _FIELDS = {"problem", "evidence", "impact", "suggested_scope", "source_ticket", "source_stage", "source_run", "type", "urgency", "priority"}
 ObservationVerifier = Callable[[str, str, str], bool]
+
+
+def normalize_technical_debt_text(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("technical-debt basis values must be strings")
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", value).strip()).casefold()
+
+
+def technical_debt_basis(candidate: dict[str, Any], project: Path) -> tuple[str, dict[str, Any]]:
+    """Build immutable canonical basis and key after candidate preflight."""
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("technical-debt evidence must be an object")
+    root = project.resolve()
+    evidence_path = (root / str(evidence.get("path", ""))).resolve()
+    try:
+        evidence_path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("technical-debt evidence path escapes project root") from exc
+    relative = evidence_path.relative_to(root).as_posix()
+    if relative.startswith((".vibe/tickets/", ".vibe/sessions/")) or evidence_path.is_dir():
+        raise ValueError("technical-debt evidence path is not allowed")
+    basis = {
+        "problem": normalize_technical_debt_text(candidate["problem"]),
+        "area": normalize_technical_debt_text(candidate["suggested_scope"]),
+        "evidence": {
+            "path": normalize_technical_debt_text(relative),
+            "identifier": normalize_technical_debt_text(evidence["identifier"]),
+            "observation": normalize_technical_debt_text(evidence["observation"]),
+        },
+    }
+    encoded = json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"tech_debt.v1:{hashlib.sha256(encoded).hexdigest()}", basis
 
 
 @dataclass(frozen=True)

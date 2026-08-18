@@ -9,8 +9,8 @@ from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.scheduler import Candidate, select_candidates
-from vibe_orchestrator.technical_debt import TechnicalDebtError
-from vibe_orchestrator.tickets import next_status_for_ticket, reset_failed_retry
+from vibe_orchestrator.technical_debt import TechnicalDebtError, technical_debt_basis
+from vibe_orchestrator.tickets import TicketWriteService, next_status_for_ticket, reset_failed_retry
 
 
 CONFIRMED_USAGE = {
@@ -1027,6 +1027,74 @@ delivery_tickets:
     orchestrator._reconcile_tickets()
 
     assert orchestrator.store.get(idea.id).status == "ready_for_validation"
+
+
+def test_technical_debt_exact_replay_preserves_existing_child_during_reconciliation(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Existing technical debt", status="technical_analysis")
+    candidate = {
+        "problem": "Stale adapter boundary",
+        "suggested_scope": "Extract the adapter",
+        "evidence": {"path": "README.md", "identifier": "Traceability MVP", "observation": "Observed"},
+        "source_ticket": idea.id,
+        "source_run": "run-ta-1",
+    }
+    key, basis = technical_debt_basis(candidate, tmp_path)
+    existing = TicketWriteService(tmp_path).create_ticket(
+        {
+            "process": "delivery",
+            "type": "task",
+            "title": candidate["problem"],
+            "description": "Original description",
+            "priority": 7,
+            "parent": idea.id,
+            "mandatory": False,
+            "technical_debt": {"dedup_key": key, "basis": basis},
+        },
+        actor="test",
+    )
+    existing.status = "selected_for_session"
+    orchestrator.store.save(existing)
+    before = orchestrator.store.get(existing.id).to_dict()
+    before_audit = list(existing.audit_events)
+
+    details = """```yaml
+implementation_required: true
+delivery_tickets:
+  - type: task
+    title: Stale adapter boundary
+    description: Rewritten by ordinary synchronization
+    priority: 99
+    mandatory: true
+tech_debt_candidates:
+  version: tech_debt_candidates.v1
+  candidates:
+    - problem: Stale adapter boundary
+      suggested_scope: Extract the adapter
+      evidence:
+        path: README.md
+        identifier: Traceability MVP
+        observation: Observed
+      impact: Risk
+      source_ticket: %s
+      source_stage: technical_analysis
+      source_run: run-ta-1
+      type: task
+      urgency: medium
+      priority: 7
+```""" % idea.id
+
+    orchestrator._create_delivery_children(idea, details)
+    orchestrator._create_delivery_children(idea, details)
+
+    active_matches = [
+        child for child in orchestrator.store.list("delivery")
+        if child.dedup_key == key and not orchestrator.store.is_done(child)
+    ]
+    replayed = orchestrator.store.get(existing.id)
+    assert [child.id for child in active_matches] == [existing.id]
+    assert replayed.to_dict() == before
+    assert replayed.audit_events == before_audit
 
 
 def test_technical_analysis_resets_unselected_existing_child_to_todo(tmp_path: Path):

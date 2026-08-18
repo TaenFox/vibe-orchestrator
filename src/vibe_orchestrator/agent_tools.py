@@ -211,7 +211,15 @@ class AgentTicketTools(ReadOnlyAgentTools):
         self.service = TicketWriteService(self.project)
 
     def create_ticket(self, **data: Any) -> dict[str, Any]:
-        return _ticket_payload(self.service.store, self.service.create_ticket(data, actor=self.actor), history_limit=DEFAULT_HISTORY_LIMIT)
+        result = self.service.create_ticket_result(data, actor=self.actor)
+        if result.status == "ambiguous":
+            return {"contract_version": "agent.write.v1", "deduplication": {
+                "status": "ambiguous", "candidates": [dict(item) for item in result.candidates]}}
+        assert result.ticket is not None
+        payload = _ticket_payload(self.service.store, result.ticket, history_limit=DEFAULT_HISTORY_LIMIT)
+        payload["deduplication"] = {"status": "created" if result.status == "created" else "exact",
+                                    "existing": result.status == "exact"}
+        return payload
 
     def update_ticket(self, ticket_id: str, **data: Any) -> dict[str, Any]:
             return _ticket_payload(self.service.store, self.service.update_ticket(ticket_id, data, actor=self.actor), history_limit=DEFAULT_HISTORY_LIMIT)
