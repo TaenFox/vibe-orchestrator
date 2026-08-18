@@ -489,10 +489,16 @@ class Orchestrator:
             active_keys.add(key)
             existing = existing_children.get(key)
             if existing:
+                changed = False
+                if existing.status == "selected_for_session" and not self._is_delivery_session_member(existing.id):
+                    existing.status = "todo"
+                    changed = True
                 if existing.description != description or existing.priority != priority or existing.mandatory != mandatory:
                     existing.description = description
                     existing.priority = priority
                     existing.mandatory = mandatory
+                    changed = True
+                if changed:
                     self.store.save(existing)
                 synced.append(existing)
                 continue
@@ -514,6 +520,13 @@ class Orchestrator:
                 continue
             self._deactivate_delivery_child(child)
         return synced
+
+    def _is_delivery_session_member(self, ticket_id: str) -> bool:
+        return any(
+            session.status in {"draft", "active"}
+            and ticket_id in self.session_store.effective_ticket_ids(session)
+            for session in self.session_store.list()
+        )
 
     def _deactivate_delivery_child(self, child: Ticket) -> None:
         child.parent = None

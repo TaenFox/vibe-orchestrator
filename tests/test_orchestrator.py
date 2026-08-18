@@ -827,6 +827,37 @@ delivery_tickets:
     assert orchestrator.store.get(idea.id).status == "ready_for_validation"
 
 
+def test_technical_analysis_resets_unselected_existing_child_to_todo(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    idea = orchestrator.store.create("discovery", "idea", "Restore delivery queue", status="technical_analysis")
+    child = orchestrator.store.create(
+        "delivery", "story", "Existing delivery", parent=idea.id, status="selected_for_session"
+    )
+    idea.active_run = "run-ta"
+    orchestrator.store.save(idea)
+
+    workflow = load_workflow("discovery")
+    orchestrator._apply_result(
+        workflow,
+        idea.id,
+        workflow.by_id["technical_analysis"],
+        AgentResult(
+            outcome="completed",
+            summary="Повторная синхронизация",
+            details="""```yaml
+implementation_required: true
+delivery_tickets:
+  - type: story
+    title: "Existing delivery"
+    description: "Актуальное описание"
+    mandatory: true
+```""",
+        ),
+    )
+
+    assert orchestrator.store.get(child.id).status == "todo"
+
+
 def test_technical_analysis_without_implementation_skips_implementation(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     idea = orchestrator.store.create("discovery", "idea", "Configuration-only decision", status="technical_analysis")
