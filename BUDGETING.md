@@ -439,9 +439,12 @@ raw provider usage остаётся unknown и immutable.
 one-shot consumption пересчитывают effective limit/status транзакционно, уже
 созданные reservations не изменяются.
 
-Для `resolve-unknown` одноразовое consumption фиксирует факт использованного
-разрешения, но не возвращает run в `blocked_unknown` при следующем refresh:
-пока решение не истекло, оно продолжает разрешать именно этот unknown run.
+Для `resolve-unknown` решение считается применимым только одновременно при
+`consumed_at IS NULL` и отсутствии либо будущем `expires_at`. Одноразовое
+решение после consumption остаётся append-only audit record, но больше не
+снимает `blocked_unknown` при следующем refresh/recompute. Поэтому для
+повторного разрешения unknown run требуется новое авторизованное решение;
+сам run и его actual не изменяются.
 
 `allow-overrun` не меняет лимит и лишь bypass-ит перечисленные dimensions для
 конкретного target; `resolve-unknown` проверяет в write-транзакции, что run

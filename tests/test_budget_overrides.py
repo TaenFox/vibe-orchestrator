@@ -32,7 +32,7 @@ def test_effective_limit_is_materialized_in_reads_and_expires(tmp_path):
     assert ledger.get_budget("ticket:T")["limits"]["tokens"] == 5
 
 
-def test_consumed_one_shot_resolve_keeps_unknown_unblocked(tmp_path):
+def test_consumed_one_shot_resolve_blocks_unknown_again(tmp_path):
     ledger = BudgetLedger(tmp_path, authorizer=authorizer)
     ledger.create_budget("ticket", "T", limits={"points": 1, "runs": 3})
     ledger.reserve("run-a", "T", None, {"runs": 1})
@@ -41,7 +41,7 @@ def test_consumed_one_shot_resolve_keeps_unknown_unblocked(tmp_path):
     ledger.resolve_unknown(actor="a", run_id="run-a", reason="r", reference="ref",
                           estimate={"points": 1}, confidence=0.8, one_shot=True, decision_id="resolve-1")
     assert ledger.list_decisions(operation="resolve-unknown")[0]["consumed_at"] is not None
-    assert ledger.get_budget("ticket:T")["status"] != "blocked_unknown"
+    assert ledger.get_budget("ticket:T")["status"] == "blocked_unknown"
 
 
 def test_expired_resolve_unknown_blocks_again(tmp_path):
