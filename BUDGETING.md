@@ -513,6 +513,12 @@ drawer дополнительно показывает run counts, status, confi
 payload. `fresh` означает прямое успешное чтение ledger; `stale` или
 `unavailable` всегда сопровождаются `enforcement_state_exact=false` и
 визуальной пометкой «не подтверждено». GET не добавляет mutation endpoints.
+Read path выполняет только SELECT и вычисляет effective limits и derived status
+в памяти с той же precedence, что и transactional lifecycle; stored `updated_at`,
+status и effective limits при GET не изменяются. Provenance `budget_runs` также
+сохраняет `usage_ref`, model/reasoning metadata, optional currency и fallback
+metadata, если они присутствуют в `actual`; `cost` остаётся nullable и не
+участвует в accounting.
 
 ## Ошибки и ограничения read model
 
@@ -520,8 +526,9 @@ payload. `fresh` означает прямое успешное чтение led
 Ledger error возвращает unavailable snapshot с `exact=false`; run_history не
 используется как подмена enforcement state. Snapshot не является billing
 integration: `cost` остаётся nullable. API локальный, без authentication,
-пагинации и внешнего provider API; large boards могут выполнять bounded
-per-scope reads.
+пагинации и внешнего provider API; large boards всё ещё перечитывают ticket
+data целиком, но повторное чтение одного budget scope в пределах запроса/render
+ограничено request-local cache.
 
 ## Manual browser smoke
 

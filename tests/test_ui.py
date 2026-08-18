@@ -12,7 +12,8 @@ import pytest
 from vibe_orchestrator.control import DeliverySessionStore
 from vibe_orchestrator.budget_ledger import BudgetLedger
 from vibe_orchestrator.tickets import TicketStore
-from vibe_orchestrator.ui import AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, render_board, render_board_fragment
+from vibe_orchestrator.ui import (AUTO_REFRESH_SECONDS, AUTO_REFRESH_SCRIPT, CSS, BudgetReadContext,
+                                  _budget_read_model, render_board, render_board_fragment)
 from vibe_orchestrator.config import load_all_workflows
 
 
@@ -139,7 +140,7 @@ def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, pr
     ledger.finalize("run-budget", "completed", {
         "run_id": "run-budget", "model": "m", "reasoning_effort": "medium", "usage_ref": "u-1",
         "input_tokens": 7, "output_tokens": 5, "total_tokens": 12, "source": "provider",
-        "captured_at": "2026-08-18T10:00:00+00:00", "normalization_version": "n.v1",
+        "captured_at": "2026-08-18T10:00:00+00:00", "normalization_version": "n.v1", "cost": 12.5, "currency": "USD",
     })
 
     with urllib.request.urlopen(f"{http_server}/api/tickets") as response:
@@ -151,7 +152,9 @@ def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, pr
     assert item["budget"]["enforcement_state_exact"] is True
     assert item["budget_runs"][0]["source_confidence"] == "confirmed"
     assert item["budget_runs"][0]["actual"]["tokens"] == 12
-    assert item["budget_runs"][0]["cost"] is None
+    assert item["budget_runs"][0]["cost"] == 12.5
+    assert item["budget_runs"][0]["currency"] == "USD"
+    assert item["budget_runs"][0]["usage_ref"] == "u-1"
 
     page = render_board(store, load_all_workflows(), "delivery")
     assert "budget active" in page
@@ -163,9 +166,44 @@ def test_budget_api_exposes_authoritative_snapshot_and_run_usage(http_server, pr
     assert "captured_at 2026-08-18T10:00:00+00:00" in page
     assert "normalization_version n.v1" in page
     assert "rate_card_version —" in page
-    assert "cost —" in page
+    assert "cost 12.5" in page
     assert "snapshot_status fresh" in page
     assert "enforcement_state_exact True" in page
+
+
+def test_budget_read_model_preserves_zero_cost(project):
+    ledger = BudgetLedger(project)
+    ledger.create_budget("ticket", "DEL-0", limits={"tokens": 10, "points": 10, "runs": 1})
+    ledger.reserve("run-zero", "DEL-0", None, {"tokens": 1, "points": 1, "runs": 1})
+    ledger.start("run-zero")
+    ledger.finalize("run-zero", "completed", {
+        "run_id": "run-zero", "input_tokens": 1, "output_tokens": 0, "total_tokens": 1,
+        "source": "provider", "usage_ref": "zero", "model": "m", "reasoning_effort": "medium",
+        "captured_at": "2026-08-18T10:00:00+00:00", "normalization_version": "n.v1", "cost": 0,
+    })
+    _, runs = _budget_read_model(ledger, "ticket:DEL-0")
+    assert runs[0]["cost"] == 0
+
+
+def test_budget_read_model_uses_one_snapshot_per_context(project):
+    ledger = BudgetLedger(project)
+    ledger.create_budget("ticket", "DEL-cache", limits={"tokens": 10, "points": 10, "runs": 1})
+    calls = {"budget": 0, "runs": 0}
+    original_budget, original_runs = ledger.read_budget, ledger.list_runs
+
+    def read_budget(budget_id):
+        calls["budget"] += 1
+        return original_budget(budget_id)
+
+    def list_runs(budget_id):
+        calls["runs"] += 1
+        return original_runs(budget_id)
+
+    ledger.read_budget, ledger.list_runs = read_budget, list_runs
+    context = BudgetReadContext()
+    _budget_read_model(ledger, "ticket:DEL-cache", context)
+    _budget_read_model(ledger, "ticket:DEL-cache", context)
+    assert calls == {"budget": 1, "runs": 1}
 
 
 def test_empty_delivery_session_ticket_selector_disables_add_action(http_server, project):
