@@ -489,3 +489,64 @@ audit trail выполняется через `vibe budget decisions`. Programma
 использует injectable authorizer и применяет default-deny при отсутствии policy;
 API сохраняет то же требование. Browser-level проверка override UI не
 выполнялась, поскольку UI/API actions для неё не предоставлены в этом контексте.
+## Read API и UI contract
+
+Delivery read endpoints используют SQLite ledger как authoritative source и не
+создают записи при GET: `/api/tickets` возвращает `budget` и `budget_runs`, а
+`/api/sessions` и `/api/sessions/{id}` — budget session scope и его aggregate.
+Budget read-model содержит `contract_version`, `scope`, `owner_id`,
+`base_limits`, `limits`, `spent` (только finalized), `reserved`, `planned`,
+`available`, `started_runs`, `reserved_runs`, `status`, `blocked_reason`,
+`observed_at`, `snapshot_status` и `enforcement_state_exact`. Отсутствующий
+legacy record сериализуется как `null`, без synthetic unlimited budget.
+
+`budget_runs` связывается с ledger по `run_id` и сохраняет lifecycle state,
+`attempt_kind`, ticket/session ownership, planned/reserved/actual, source,
+`source_confidence`, captured timestamps, normalization/rate-card versions и
+nullable `cost`. Каждый элемент `budget_runs` также содержит обязательные
+`snapshot_status` и `enforcement_state_exact`: валидный finalized provider usage
+имеет `fresh/true`, а unknown, fallback/degraded и inconsistent provenance —
+`stale/false`. Ошибка чтения отдельной usage-записи, если такая запись включается
+в payload, сериализуется как `unavailable/false`. Unknown usage имеет `actual` и
+`cost` равными `null`, а не нулю;
+стоимость не вычисляется без rate-card policy. Rework сохраняет child
+`run_id`, но его ticket aggregate принадлежит `ticket_budget_id` parent.
+
+На Delivery card показывается компактный limit/spent/reserved/available summary;
+drawer дополнительно показывает run counts, status, confidence, timestamps,
+версии и cost. Session panel показывает session aggregate отдельно от ticket
+payload. `fresh` означает прямое успешное чтение ledger; `stale` или
+`unavailable` всегда сопровождаются `enforcement_state_exact=false` и
+визуальной пометкой «не подтверждено». Для run read-model `fresh/true`
+дополнительно требует подтверждённую provider provenance; наличие числового
+usage само по себе не делает enforcement state точным. Пример элемента:
+`{"run_id":"run-1","actual":{"tokens":12},"snapshot_status":"fresh",`
+`"enforcement_state_exact":true}`. GET не добавляет mutation endpoints.
+Read path выполняет только SELECT и вычисляет effective limits и derived status
+в памяти с той же precedence, что и transactional lifecycle; stored `updated_at`,
+status и effective limits при GET не изменяются. Provenance `budget_runs` также
+сохраняет `usage_ref`, model/reasoning metadata, optional currency и fallback
+metadata, если они присутствуют в `actual`; `cost` остаётся nullable и не
+участвует в accounting.
+
+## Ошибки и ограничения read model
+
+Отсутствие budget record — это legacy/read-compatible состояние, а не unlimited.
+Ledger error возвращает unavailable snapshot с `exact=false`; run_history не
+используется как подмена enforcement state. Snapshot не является billing
+integration: `cost` остаётся nullable. API локальный, без authentication,
+пагинации и внешнего provider API; large boards всё ещё перечитывают ticket
+data целиком, но повторное чтение одного budget scope в пределах запроса/render
+ограничено request-local cache.
+
+## Manual browser smoke
+
+Worker tests проверяют JSON для confirmed и stale run usage, сохранение nullable
+unknown actual/cost, HTML escaping и inline refresh guards, но не являются
+browser-level проверкой DOM, focus, keyboard, viewport или auto-refresh.
+Внешний ручной прогон: запустить UI, открыть Delivery board, проверить card,
+drawer и session panel для enforced, legacy и unavailable/stale fixtures;
+убедиться в видимых `unknown`/`не подтверждено`, проверить Escape и focus trap
+drawer, ввод в фильтр и отсутствие перезаписи открытых details при refresh.
+Подождать более 5 секунд и подтвердить, что auto-refresh не теряет ввод и
+selection.

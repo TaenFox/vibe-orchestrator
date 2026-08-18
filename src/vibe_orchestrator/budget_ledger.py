@@ -246,23 +246,54 @@ class BudgetLedger:
             query += " WHERE budget_id IN (" + ",".join("?" for _ in budget_ids) + ")"
             params.extend(budget_ids)
         for row in db.execute(query, params).fetchall():
-            effective = {}
-            for dimension in DIMENSIONS:
-                base = row[f"base_limit_{dimension}"]
-                if base is None:
-                    effective[dimension] = None
-                    continue
-                extra = 0
-                for decision in self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=now):
-                    payload = json.loads(decision["payload_json"])
-                    if payload["dimension"] == dimension:
-                        extra += payload["delta"]
-                effective[dimension] = base + extra
+            effective = self._effective_limits(db, row, now=now)
             db.execute(
                 "UPDATE budgets SET effective_limit_tokens=?, effective_limit_points=?, "
                 "effective_limit_runs=?, updated_at=? WHERE budget_id=?",
                 tuple(effective[d] for d in DIMENSIONS) + (now, row["budget_id"]),
             )
+
+    def _effective_limits(self, db: sqlite3.Connection, row: sqlite3.Row, *, now: str) -> dict[str, int | None]:
+        """Compute effective limits without persisting them."""
+        decisions = self._active_decisions(db, "increase-limit", row["scope"], row["owner_id"], now=now)
+        result = {}
+        for dimension in DIMENSIONS:
+            base = row[f"base_limit_{dimension}"]
+            if base is None:
+                result[dimension] = None
+                continue
+            result[dimension] = base + sum(
+                json.loads(decision["payload_json"]).get("delta", 0)
+                for decision in decisions
+                if json.loads(decision["payload_json"]).get("dimension") == dimension
+            )
+        return result
+
+    def _derived_status(self, db: sqlite3.Connection, row: sqlite3.Row,
+                        effective: Mapping[str, int | None], *, now: str) -> str:
+        """Apply the authoritative status precedence without writing the row."""
+        if row["mode"] != "enforced":
+            return row["status"]
+        unknown = effective["points"] is not None and db.execute(
+            """SELECT 1 FROM runs r WHERE r.state='unknown' AND (r.ticket_budget_id=? OR r.session_budget_id=?)
+               AND NOT EXISTS (SELECT 1 FROM budget_decisions d WHERE d.operation='resolve-unknown'
+                 AND d.target_scope='run' AND d.target_id=r.run_id
+                 AND (d.one_shot=1 OR (d.consumed_at IS NULL
+                   AND (d.expires_at IS NULL OR d.expires_at>?)))) LIMIT 1""",
+            (row["budget_id"], row["budget_id"], now),
+        ).fetchone() is not None
+        over_budget = any(
+            effective[dimension] is not None and row[f"finalized_{dimension}"] > effective[dimension]
+            for dimension in DIMENSIONS
+        )
+        exhausted = any(
+            effective[dimension] is not None
+            and sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) > 0
+            and effective[dimension] - sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) == 0
+            for dimension in DIMENSIONS
+        )
+        explicit = row["status"] if row["status"] in {"stop_new_runs", "completed"} else None
+        return "over_budget" if over_budget else "blocked_unknown" if unknown else explicit or "exhausted" if exhausted else "active"
 
     def list_decisions(self, *, operation: str | None = None, target_scope: str | None = None,
                        target_id: str | None = None) -> list[dict[str, Any]]:
@@ -433,6 +464,24 @@ class BudgetLedger:
         result["available"] = {d: None if result[f"effective_limit_{d}"] is None else result[f"effective_limit_{d}"] - sum(result[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) for d in DIMENSIONS}
         return result
 
+    def read_budget(self, budget_id: str) -> dict[str, Any] | None:
+        """Return an authoritative budget snapshot using SELECT-only operations."""
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
+            if not row:
+                return None
+            now = self.clock()
+            effective = self._effective_limits(db, row, now=now)
+            status = self._derived_status(db, row, effective, now=now)
+        result = dict(row)
+        result["limits"] = effective
+        result["aggregates"] = {kind: {d: result[f"{kind}_{d}"] for d in DIMENSIONS} for kind in ("planned", "reserved", "finalized")}
+        result["available"] = {d: None if effective[d] is None else effective[d] - sum(result[f"{k}_{d}"] for k in ("planned", "reserved", "finalized")) for d in DIMENSIONS}
+        result["status"] = status
+        result["snapshot_status"] = "fresh"
+        result["enforcement_state_exact"] = True
+        return result
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -441,6 +490,23 @@ class BudgetLedger:
         result = dict(row)
         for key in ("planned_json", "reserved_json", "actual_json"):
             result[key.removesuffix("_json")] = json.loads(result[key]) if result[key] else None
+        return result
+
+    def list_runs(self, budget_id: str) -> list[dict[str, Any]]:
+        """Return runs linked to a budget, without changing accounting state."""
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT * FROM runs
+                   WHERE ticket_budget_id=? OR session_budget_id=?
+                   ORDER BY reserved_at, run_id""",
+                (budget_id, budget_id),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key in ("planned_json", "reserved_json", "actual_json"):
+                item[key.removesuffix("_json")] = json.loads(item[key]) if item[key] else None
+            result.append(item)
         return result
 
     def _budget_rows(self, db: sqlite3.Connection, budget_owner_ticket_id: str, session_id: str | None):
@@ -459,26 +525,8 @@ class BudgetLedger:
             row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
             if not row or row["mode"] != "enforced":
                 continue
-            unknown = row["effective_limit_points"] is not None and db.execute(
-                """SELECT 1 FROM runs r WHERE r.state='unknown' AND (r.ticket_budget_id=? OR r.session_budget_id=?)
-                   AND NOT EXISTS (SELECT 1 FROM budget_decisions d WHERE d.operation='resolve-unknown'
-                     AND d.target_scope='run' AND d.target_id=r.run_id
-                     AND (d.one_shot=1 OR (d.consumed_at IS NULL
-                       AND (d.expires_at IS NULL OR d.expires_at>?)))) LIMIT 1""",
-                (budget_id, budget_id, now),
-            ).fetchone() is not None
-            over_budget = any(
-                row[f"effective_limit_{dimension}"] is not None and row[f"finalized_{dimension}"] > row[f"effective_limit_{dimension}"]
-                for dimension in DIMENSIONS
-            )
-            exhausted = any(
-                row[f"effective_limit_{dimension}"] is not None and
-                sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) > 0 and
-                row[f"effective_limit_{dimension}"] - sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) == 0
-                for dimension in DIMENSIONS
-            )
-            explicit = row["status"] if row["status"] in {"stop_new_runs", "completed"} else None
-            status = "over_budget" if over_budget else "blocked_unknown" if unknown else explicit or "exhausted" if exhausted else "active"
+            effective = {dimension: row[f"effective_limit_{dimension}"] for dimension in DIMENSIONS}
+            status = self._derived_status(db, row, effective, now=now)
             db.execute("UPDATE budgets SET status=?,updated_at=? WHERE budget_id=?", (status, now, budget_id))
 
     def reserve(self, run_id: str, ticket_id: str, session_id: str | None, planned: Mapping[str, Any], *,

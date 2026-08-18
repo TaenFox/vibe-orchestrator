@@ -125,6 +125,28 @@ def test_unknown_blocks_zero_point_limit(tmp_path: Path):
     assert ledger.get_budget("ticket:DEL-1")["status"] == "blocked_unknown"
 
 
+def test_read_budget_derives_state_without_persisting(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path, authorizer=lambda **kwargs: (True, "test-policy"))
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 10, "points": 10, "runs": 2})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 10, "points": 1, "runs": 1})
+    ledger.start("run-1")
+    ledger.finalize("run-1", "unknown", {"points": None, "source": "unknown"})
+    ledger.increase_limit(actor="operator", target_scope="ticket", target_id="DEL-1", dimension="tokens",
+                          delta=5, reason="review", reference="ref", expires_at="2999-01-01T00:00:00+00:00")
+    with ledger._connect() as db:
+        before = tuple(db.execute(
+            "SELECT status, effective_limit_tokens, updated_at FROM budgets WHERE budget_id=?", ("ticket:DEL-1",)
+        ).fetchone())
+    snapshot = ledger.read_budget("ticket:DEL-1")
+    with ledger._connect() as db:
+        after = tuple(db.execute(
+            "SELECT status, effective_limit_tokens, updated_at FROM budgets WHERE budget_id=?", ("ticket:DEL-1",)
+        ).fetchone())
+    assert snapshot["limits"]["tokens"] == 15
+    assert snapshot["status"] == "blocked_unknown"
+    assert after == before
+
+
 @pytest.mark.parametrize(
     ("ticket_points", "session_points", "blocked_budget"),
     [(10, None, "ticket:DEL-1"), (None, 10, "session:SESSION-1")],

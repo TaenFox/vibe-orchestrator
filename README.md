@@ -310,6 +310,23 @@ Source of truth для аудита разделен на два слоя:
 
 ## Известные ограничения прототипа
 
+## Ограничения UI, telemetry и performance
+
+UI не является telemetry или billing системой: budget read-model читается из
+локального SQLite и не содержит цены. Повторные budget reads в одном API/render
+проходе переиспользуют bounded request-local snapshots по scope; cache не
+переживает запрос. Пагинация и внешний provider API не
+реализованы. Browser-level smoke выполняется вручную, поскольку worker-контекст
+не подключает browser runner.
+
+## Budget control plane
+
+Delivery API `/api/tickets` и `/api/sessions` публикует read-only `budget` и
+`budget_runs` с limits, spent, reserved, available, lifecycle counts/status,
+confidence и fresh/stale/unavailable metadata. Card, drawer и session panel
+показывают тот же контракт; missing legacy records не превращаются в unlimited.
+Полный контракт и manual browser smoke описаны в [BUDGETING.md](BUDGETING.md).
+
 - Переходы, выполняемые человеком, намеренно упрощены: обычно кнопки UI следуют настроенному `next`; для Discovery `investment_decision` цель выбирается по `implementation_required`.
 - Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.
 - `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Дедупликация похожих тикетов пока не реализована.
