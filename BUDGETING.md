@@ -464,6 +464,7 @@ CLI: `vibe budget increase-limit|allow-overrun|resolve-unknown` принимае
 `--actor`, `--reason`, `--reference` и `--expires-at` либо `--one-shot`; чтение
 audit trail выполняется через `vibe budget decisions`. Programmatic API —
 одноимённые методы `BudgetLedger` и `list_decisions`. Внешняя authentication
-система ещё не подключена: CLI явно фиксирует actor, а API требует injectable
-authorizer и применяет default-deny. Browser-level проверка override UI не
+система ещё не подключена: CLI явно фиксирует actor только как audit identity,
+использует injectable authorizer и применяет default-deny при отсутствии policy;
+API сохраняет то же требование. Browser-level проверка override UI не
 выполнялась, поскольку UI/API actions для неё не предоставлены в этом контексте.
