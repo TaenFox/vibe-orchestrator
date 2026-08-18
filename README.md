@@ -289,14 +289,42 @@ Source of truth для аудита разделен на два слоя:
 
 - `active_run` — только указатель на текущий незавершенный запуск. После завершения или ошибки поле очищается.
 - `run_history[].run_id` — единый идентификатор запуска, одинаковый для тикета, prompt и каталога `.vibe/runs/<run_id>`.
+- Для `tech_debt_candidates.v1` source metadata считается согласованной только при совпадении `ticket_id`, `stage` и `run_id == candidate.source_run`; это предотвращает принятие evidence из другого запуска.
+- Если `.vibe/runs/<source_run>/run.json` существует, его metadata используется напрямую: даже пустой или неполный manifest не заменяется matching history и отклоняется при отсутствии либо несовпадении `run_id`.
 - `run_history[].event` — durable timeline (`created`, `started`, `completed`, `failed`) для тикета; именно она нужна для ретроспективы после очистки `active_run`.
 - `run_history[].ticket_type` — тип тикета, к которому относится событие.
 - `run_history[].artifacts_path` — относительный путь к локальным артефактам этого запуска.
+- `run_history[].source_artifact_path` или `source_artifacts` — исходный файл или каталог запуска; в read-only payload это нормализуется в объект `{path, links}`.
 - `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
 - `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.
 - `ticket_title`, `ticket_priority`, `ticket_parent`, `ticket_description` в `run_history`/`run.json` — durable snapshot mutable ticket-полей, которые реально были встроены в prompt этого запуска.
 
 Практическое правило для расследований: сначала смотрите `run_history` в тикете как индекс запусков, затем открывайте `.vibe/runs/<run_id>/run.json` и `result.json`, и только после этого при необходимости углубляйтесь в `events.jsonl`.
+
+## Read-only agent queries
+
+Read-only tools позволяют агентам получать тикеты и delivery-сессии без изменения
+control-plane состояния. `list_tickets` поддерживает фильтры `process`, `status`,
+`parent`, `session`, пагинацию `offset`/`limit` и `history_limit`; `get_ticket`
+возвращает полную модель тикета с ограниченной историей запусков и признаком
+`run_history_truncated`. `list_sessions` и `get_session` возвращают `status`,
+`participants`, `audit_events` и `effective_membership`. Те же данные доступны
+через `/api/agent/tickets`, `/api/agent/tickets/<id>`, `/api/agent/sessions` и
+`/api/agent/sessions/<id>`.
+
+В `run_history` поля `artifacts` и `source_artifacts` имеют форму `{path, links}`.
+Ссылки строятся только для существующих файлов внутри `.vibe/runs/<run_id>` и
+ведут на `/artifacts/<run_id>/<file>` с безопасным кодированием сегментов пути.
+Если `artifacts_path` указывает на файл, ссылка сохраняет его относительный путь
+от `.vibe/runs/<run_id>`, включая имя файла; если он указывает на каталог, ссылки
+по-прежнему перечисляют файлы относительно этого каталога.
+Для source artifacts `run_id` принимается только как имя одного каталога
+непосредственно под canonical `.vibe/runs`; traversal, абсолютные значения,
+разделители и symlink-каталоги наружу отклоняются.
+Невалидные, отсутствующие или внешние source paths дают пустой `links` без ошибки.
+При наличии непустого `source_artifacts` он имеет приоритет над
+`source_artifact_path`. Запросы используют положительные integer limits с верхними
+bounds, не вызывают init/save/migration и не меняют ticket YAML.
 
 ## Конфигурация процессов
 
@@ -331,6 +359,8 @@ confidence и fresh/stale/unavailable metadata. Card, drawer и session panel
 - Investment Decision сейчас моделирует только путь approve; ручные сценарии reject/correction вне агентных outcomes остаются следующей итерацией.
 - `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Дедупликация похожих тикетов пока не реализована.
 - В том же верхнеуровневом YAML `details` можно передать `tech_debt_candidates` версии `tech_debt_candidates.v1`. Каждый кандидат обязан содержать непустые `problem`, `impact`, `suggested_scope`, `source_ticket`, `source_stage`, `source_run`, `type: task`, `urgency: low|medium|high`, неотрицательный целочисленный `priority` и `evidence` с `path`, `identifier`, `observation`. Отсутствующий ключ означает пустой список; неизвестная версия, поле или malformed payload — ошибка.
+- Preflight отклоняет кандидата с отсутствующим или отличающимся `run.json.run_id` ошибкой `TECH_DEBT_SOURCE_MISMATCH` по пути `tech_debt_candidates.candidates[N].source_run`; при этом source ticket, session и Delivery children не изменяются.
+- При отсутствии manifest допускается legacy fallback на последнюю matching-запись `run_history`, но выбранный `run_id` всё равно обязан совпадать с `source_run` кандидата.
 - Перед любым созданием Delivery-тикета выполняется read-only preflight: проверяются source ticket, stage, run artifact, согласованность run metadata, активные Delivery-сессии и безопасный путь evidence. Единый error envelope имеет `contract_version: orchestrator.errors.v1`, `code`, `path`, `message`; ошибки `TECH_DEBT_INVALID`, `TECH_DEBT_SOURCE_NOT_FOUND`, `TECH_DEBT_SOURCE_MISMATCH` и `TECH_DEBT_PREFLIGHT_UNAVAILABLE` блокируют mutation. Такие contract errors не являются `needs_correction`: source ticket и session остаются без изменений, `_record_failure` и follow-up не вызываются, corrective или Delivery children не создаются. Кандидат автоматически в сессию не добавляется.
 - Для legacy Discovery-тикета без поля `implementation_required` на ручном переходе из `investment_decision` решение выводится из membership: наличие хотя бы одного Delivery-ребенка ведет в `implementation`, отсутствие — в `ready_for_validation`. Это режим совместимости, а не миграция данных; существующие YAML не переписываются автоматически.
 - После входа в `implementation` scheduler gate ждет завершения только детей с `mandatory: true`; `done` означает завершенный Delivery-агрегат после release-интеграции. Необязательные дети и legacy-дети, если они помечены `mandatory: false`, не удерживают Discovery.
