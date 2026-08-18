@@ -70,6 +70,7 @@ class Ticket:
     audit_events: list[dict[str, Any]] = field(default_factory=list)
     dedup_key: str | None = None
     dedup_basis: dict[str, Any] | None = None
+    technical_debt_deferred: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Ticket":
@@ -114,6 +115,8 @@ class Ticket:
             payload.pop("dedup_key")
         if payload["dedup_basis"] is None:
             payload.pop("dedup_basis")
+        if not payload["technical_debt_deferred"]:
+            payload.pop("technical_debt_deferred")
         return payload
 
 
@@ -532,6 +535,7 @@ class TicketWriteService:
             ticket.context_revision = 1
             ticket.dedup_key = dedup_key
             ticket.dedup_basis = dedup_basis
+            ticket.technical_debt_deferred = True
             ticket.audit_events.append({
                 "event": "ticket_created",
                 "timestamp": now_iso(),

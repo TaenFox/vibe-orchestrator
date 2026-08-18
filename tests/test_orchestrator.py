@@ -1062,6 +1062,7 @@ def test_technical_debt_exact_replay_preserves_existing_child_during_reconciliat
     assert existing.mandatory is False
     assert existing.parent is None
     assert existing.blocked_by == []
+    assert existing.technical_debt_deferred is True
     assert existing.context["problem"] == candidate["problem"]
     assert existing.context["evidence"] == candidate["evidence"]
     assert existing.context["impact"] == candidate["impact"]
@@ -1072,6 +1073,7 @@ def test_technical_debt_exact_replay_preserves_existing_child_during_reconciliat
         "source_run": "run-ta-1",
         "dedup_key": key,
     }
+    assert "technical_debt_deferred: true" in orchestrator.store.ticket_path(existing).read_text(encoding="utf-8")
     assert existing.run_history[-1]["event"] == "created"
     existing.status = "selected_for_session"
     orchestrator.store.save(existing)
@@ -1638,3 +1640,39 @@ delivery_tickets:
 
     assert orchestrator.store.get(correction.id).status == "done"
     assert orchestrator.store.children_of(correction.id, process="delivery") == []
+
+
+def test_deferred_technical_debt_is_not_scheduled_without_active_session(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.runner = CapturingRunner()
+    source = orchestrator.store.create("discovery", "idea", "Source", status="technical_analysis")
+    candidate = {
+        "problem": "Deferred scheduling gap",
+        "impact": "Unexpected launch",
+        "suggested_scope": "Add scheduler guard",
+        "evidence": {"path": "README.md", "identifier": "Scheduler", "observation": "Observed"},
+    }
+    key, basis = technical_debt_basis({**candidate, "source_ticket": source.id}, tmp_path)
+    result = TicketWriteService(tmp_path).create_technical_debt_ticket(
+        **candidate,
+        source_ticket=source.id,
+        source_stage="technical_analysis",
+        source_run="run-source",
+        dedup_key=key,
+        dedup_basis=basis,
+        priority=7,
+        origin="technical_analysis:run-source",
+        actor="test",
+    )
+    assert result.ticket is not None
+    debt = result.ticket
+    debt.status = "selected_for_session"
+    orchestrator.store.save(debt)
+
+    asyncio.run(orchestrator._schedule_once())
+
+    scheduled = orchestrator.store.get(debt.id)
+    assert scheduled.status == "selected_for_session"
+    assert scheduled.active_run is None
+    assert [entry["event"] for entry in scheduled.run_history] == ["created"]
+    assert orchestrator.runner.contracts == []
