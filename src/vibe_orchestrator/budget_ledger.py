@@ -74,6 +74,9 @@ def _add(left: int, right: int | None) -> int:
     return left + (right or 0)
 
 
+STATUS_PRECEDENCE = ("over_budget", "blocked_unknown", "stop_new_runs", "completed", "exhausted", "active")
+
+
 @dataclass(frozen=True)
 class Reservation:
     run_id: str
@@ -171,6 +174,30 @@ class BudgetLedger:
                 if row and row["mode"] == "enforced": rows.append(row)
         return rows
 
+    def _recompute_status(self, db: sqlite3.Connection, budget_ids: list[str] | tuple[str, ...]) -> None:
+        """Derive status from accounting while preserving explicit policy gates."""
+        now = _now()
+        for budget_id in dict.fromkeys(budget_ids):
+            row = db.execute("SELECT * FROM budgets WHERE budget_id=?", (budget_id,)).fetchone()
+            if not row or row["mode"] != "enforced":
+                continue
+            unknown = db.execute(
+                "SELECT 1 FROM runs WHERE state='unknown' AND (ticket_budget_id=? OR session_budget_id=?) LIMIT 1",
+                (budget_id, budget_id),
+            ).fetchone() is not None
+            over_budget = any(
+                row[f"limit_{dimension}"] is not None and row[f"finalized_{dimension}"] > row[f"limit_{dimension}"]
+                for dimension in DIMENSIONS
+            )
+            exhausted = any(
+                row[f"limit_{dimension}"] is not None and
+                row[f"limit_{dimension}"] - sum(row[f"{kind}_{dimension}"] for kind in ("planned", "reserved", "finalized")) == 0
+                for dimension in DIMENSIONS
+            )
+            explicit = row["status"] if row["status"] in {"stop_new_runs", "completed"} else None
+            status = "over_budget" if over_budget else "blocked_unknown" if unknown else explicit or "exhausted" if exhausted else "active"
+            db.execute("UPDATE budgets SET status=?,updated_at=? WHERE budget_id=?", (status, now, budget_id))
+
     def reserve(self, run_id: str, ticket_id: str, session_id: str | None, planned: Mapping[str, Any], *,
                 attempt_kind: str = "initial", parent_run_id: str | None = None, parent_ticket_id: str | None = None,
                 budget_owner_ticket_id: str | None = None) -> Reservation:
@@ -204,6 +231,7 @@ class BudgetLedger:
             db.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, ticket_id, session_id, links["ticket"], links["session"], attempt_kind, parent_run_id, parent_ticket_id, json.dumps(planned_values), json.dumps(planned_values), None, "reserved_pending_start", now, None, None, None))
             for row in rows:
                 db.execute("UPDATE budgets SET reserved_tokens=reserved_tokens+?,reserved_points=reserved_points+?,reserved_runs=reserved_runs+?,updated_at=? WHERE budget_id=?", tuple(planned_values[d] or 0 for d in DIMENSIONS) + (now, row["budget_id"]))
+            self._recompute_status(db, [row["budget_id"] for row in rows])
             return Reservation(run_id, "reserved_pending_start", legacy=not rows)
 
     def _transition(self, run_id: str, state: str, actual: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -212,23 +240,36 @@ class BudgetLedger:
             row = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if not row: raise KeyError(run_id)
             if row["state"] in TERMINAL: return self.get_run(run_id)  # idempotent
+            allowed = {"released": {"reserved_pending_start", "started"}, "finalized": {"started"}, "unknown": {"started"}}
+            if row["state"] not in allowed.get(state, set()):
+                raise ValueError(f"invalid transition: {row['state']} -> {state}")
             held = json.loads(row["reserved_json"])
             now = _now()
-            for budget_id in (row["ticket_budget_id"], row["session_budget_id"]):
+            budget_ids = [budget_id for budget_id in (row["ticket_budget_id"], row["session_budget_id"]) if budget_id]
+            if state == "finalized":
+                values = _values(actual)
+                point_limited = any(
+                    db.execute("SELECT 1 FROM budgets WHERE budget_id=? AND mode='enforced' AND limit_points IS NOT NULL", (budget_id,)).fetchone()
+                    for budget_id in budget_ids
+                )
+                if values["points"] is None and point_limited:
+                    state = "unknown"
+            for budget_id in budget_ids:
                 if budget_id:
                     db.execute("UPDATE budgets SET reserved_tokens=reserved_tokens-?,reserved_points=reserved_points-?,reserved_runs=reserved_runs-?,updated_at=? WHERE budget_id=?", tuple(held[d] or 0 for d in DIMENSIONS) + (now, budget_id))
             if state == "finalized":
                 values = _values(actual)
-                for budget_id in (row["ticket_budget_id"], row["session_budget_id"]):
+                for budget_id in budget_ids:
                     if budget_id: db.execute("UPDATE budgets SET finalized_tokens=finalized_tokens+?,finalized_points=finalized_points+?,finalized_runs=finalized_runs+?,updated_at=? WHERE budget_id=?", tuple(values[d] or 0 for d in DIMENSIONS) + (now, budget_id))
             elif state == "unknown":
                 # A point-limited scope cannot safely admit another run after
                 # usage became unknown; the administrative override is out of
                 # scope for this ledger.
-                for budget_id in (row["ticket_budget_id"], row["session_budget_id"]):
+                for budget_id in budget_ids:
                     if budget_id:
-                        db.execute("UPDATE budgets SET status='blocked_unknown',updated_at=? WHERE budget_id=? AND limit_points IS NOT NULL", (now, budget_id))
+                        db.execute("UPDATE budgets SET updated_at=? WHERE budget_id=?", (now, budget_id))
             db.execute("UPDATE runs SET state=?,actual_json=?,terminal_at=? WHERE run_id=?", (state, json.dumps(actual) if actual is not None else None, now, run_id))
+            self._recompute_status(db, budget_ids)
         return self.get_run(run_id)
 
     def start(self, run_id: str) -> dict[str, Any]:
@@ -237,6 +278,8 @@ class BudgetLedger:
             row = db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if not row: raise KeyError(run_id)
             if row["state"] == "reserved_pending_start": db.execute("UPDATE runs SET state='started',started_at=? WHERE run_id=?", (_now(), run_id))
+            elif row["state"] in TERMINAL: return self.get_run(run_id)
+            else: raise ValueError(f"invalid transition: {row['state']} -> started")
         return self.get_run(run_id)
 
     def release(self, run_id: str) -> dict[str, Any]: return self._transition(run_id, "released")
@@ -250,7 +293,9 @@ class BudgetLedger:
             actual["tokens"] = actual.get("total_tokens")
         if actual.get("points") is None and actual.get("total_tokens") is not None: actual.update(normalize_budget_points(actual["total_tokens"], version=actual.get("normalization_version"), rate_card_version=actual.get("rate_card_version")))
         if actual.get("points") is None: actual["points_status"] = "unavailable"
-        if terminal_outcome == "unknown" or actual.get("points_status") == "unavailable": return self._transition(run_id, "unknown", actual)
+        if terminal_outcome == "unknown": return self._transition(run_id, "unknown", actual)
+        # `runs` is a ledger event count, never a provider usage multiplier.
+        actual["runs"] = 1
         return self._transition(run_id, "finalized", actual)
 
     def adjustment(self, run_id: str, delta: Mapping[str, Any], *, reason: str, author: str) -> int:
@@ -269,6 +314,7 @@ class BudgetLedger:
             cursor = db.execute("INSERT INTO adjustments(adjusts_run_id,delta_json,reason,author,created_at) VALUES(?,?,?,?,?)", (run_id, json.dumps(values), reason, author, _now()))
             for budget_id in budgets:
                 if budget_id: db.execute("UPDATE budgets SET finalized_tokens=finalized_tokens+?,finalized_points=finalized_points+?,finalized_runs=finalized_runs+?,updated_at=? WHERE budget_id=?", tuple(values[d] or 0 for d in DIMENSIONS) + (_now(), budget_id))
+            self._recompute_status(db, budgets)
             return int(cursor.lastrowid)
 
     def reconcile(self, *, now: float | None = None, evidence: Callable[[dict[str, Any]], str] | None = None) -> list[str]:
