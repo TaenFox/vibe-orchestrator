@@ -120,11 +120,13 @@ class Orchestrator:
                 log.exception("сбой подготовки запуска для %s (%s)", ticket.id, ticket.type)
                 continue
             session_id = next((s.id for s in self.session_store.list() if s.status == "active" and ticket.id in s.ticket_ids), None)
+            attempt_kind = "rework" if ticket.type == "rework" else "initial"
             try:
                 reservation = self.ledger.reserve(
                     contract.run_id, ticket.id, session_id, self._planned_budget(ticket),
-                    attempt_kind="rework" if ticket.type == "rework" else "initial",
+                    attempt_kind=attempt_kind,
                     parent_ticket_id=ticket.parent,
+                    budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
                 )
             except BudgetDenied:
                 log.info("запуск %s отклонен budget gate", ticket.id)
