@@ -25,7 +25,9 @@ def unknown_token_usage(*, run_id: str | None = None, model: str | None = None,
 
 
 def _captured_at(value: Any, fallback: str | None) -> str | None:
-    return value.strip() if isinstance(value, str) and value.strip() else fallback
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return fallback.strip() if isinstance(fallback, str) and fallback.strip() else None
 
 
 def _non_negative_int(value: Any) -> bool:
@@ -111,6 +113,9 @@ def parse_codex_usage(
                 or semantics not in {"incremental", "cumulative"}
                 or not (_non_negative_int(input_tokens) and _non_negative_int(output_tokens))):
             continue
+        event_captured_at = _captured_at(event.get("timestamp"), captured_at)
+        if event_captured_at is None:
+            continue
         total = usage.get("total_tokens", input_tokens + output_tokens)
         if not _non_negative_int(total) or total != input_tokens + output_tokens:
             continue
@@ -118,7 +123,7 @@ def parse_codex_usage(
             "run_id": expected_run_id, "input_tokens": input_tokens, "output_tokens": output_tokens,
             "total_tokens": total, "model": model, "reasoning_effort": reasoning_effort,
             "usage_ref": usage_ref.strip(), "usage_semantics": semantics,
-            "captured_at": _captured_at(event.get("timestamp"), captured_at),
+            "captured_at": event_captured_at,
             "provider_event_id": event.get("provider_event_id"),
             "provider_request_id": event.get("provider_request_id"),
         })
@@ -160,11 +165,11 @@ def parse_codex_usage(
 
 def is_confirmed_token_usage(usage: Any, *, run_id: str | None = None,
                              model: str | None = None, reasoning_effort: str | None = None) -> bool:
-    if isinstance(usage, dict) and usage.get("source") == "codex_cli.turn.completed":
-        return (_non_negative_int(usage.get("input_tokens"))
-                and _non_negative_int(usage.get("output_tokens"))
-                and usage.get("total_tokens") == usage["input_tokens"] + usage["output_tokens"])
     if not isinstance(usage, dict) or usage.get("source") not in {"provider", "runner_fallback"}:
+        return False
+    if not all(isinstance(usage.get(field), str) and usage[field].strip() for field in (
+        "run_id", "model", "reasoning_effort", "usage_ref", "captured_at", "normalization_version",
+    )):
         return False
     if run_id is not None and usage.get("run_id") != run_id:
         return False
@@ -174,7 +179,7 @@ def is_confirmed_token_usage(usage: Any, *, run_id: str | None = None,
         return False
     if not (_non_negative_int(usage.get("input_tokens")) and _non_negative_int(usage.get("output_tokens"))
             and usage.get("total_tokens") == usage["input_tokens"] + usage["output_tokens"]
-            and isinstance(usage.get("usage_ref"), str) and usage["usage_ref"].strip()):
+            and usage["usage_ref"].strip()):
         return False
     if usage.get("source") == "provider":
         return isinstance(usage.get("normalization_version"), str) and bool(usage["normalization_version"])
