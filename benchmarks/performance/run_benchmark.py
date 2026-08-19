@@ -270,12 +270,11 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     server = None
     base_url = ""
     http_limitation = None
-    if storage == "sqlite":
-        try:
-            server, _thread = start_server(project, port=0, open_browser=False)
-            base_url = f"http://127.0.0.1:{server.server_port}"
-        except OSError as exc:
-            http_limitation = f"HTTP loopback server unavailable: {type(exc).__name__}"
+    try:
+        server, _thread = start_server(project, port=0, open_browser=False, use_database=use_database)
+        base_url = f"http://127.0.0.1:{server.server_port}"
+    except OSError as exc:
+        http_limitation = f"HTTP loopback server unavailable: {type(exc).__name__}"
     def http(path: str) -> bytes:
         with urllib.request.urlopen(base_url + path, timeout=10) as response:
             return response.read()

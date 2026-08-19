@@ -127,6 +127,22 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
     assert {item[3] for item in cases}
 
 
+def test_yaml_case_registry_exercises_http_server_with_yaml_stores(tmp_path):
+    generate_fixture(tmp_path, seed=7, size="small", storage_mode="yaml")
+    cases = _cases(tmp_path, storage="yaml")
+    http_cases = [item for item in cases if item[1] == "HTTP"]
+
+    assert http_cases
+    api_tickets = next(item for item in http_cases if item[0] == "http.api_tickets")
+    limitations = getattr(api_tickets[3], "_limitations", [])
+    if limitations:
+        assert limitations[0].startswith("HTTP loopback server unavailable:")
+        assert getattr(api_tickets[3], "_profile_available") is False
+    else:
+        assert api_tickets[3]()
+        assert getattr(api_tickets[3], "_profile_available") is True
+
+
 def test_lock_wait_is_measured_separately_from_transaction_time(tmp_path):
     generate_fixture(tmp_path, seed=6, size="small", storage_mode="sqlite")
     lock_case = next(item for item in _cases(tmp_path, storage="sqlite")
