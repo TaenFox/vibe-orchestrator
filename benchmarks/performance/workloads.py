@@ -297,6 +297,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             raise ValueError("profile dimensions do not match materialized fixture")
         if counts["sessions"] != expected["sessions"] or counts["ledger_runs"] != expected["ledger_runs"]:
             raise ValueError("manifest counts do not match materialized profile")
+        if counts["tickets"] != SIZES[size]:
+            raise ValueError(
+                "manifest ticket count does not match profile: "
+                f"size={size}, expected={SIZES[size]}, actual={counts['tickets']}"
+            )
     run_counts = dimensions.get("runs_per_ticket_counts", {})
     if set(run_counts) != {str(value) for value in RUNS_PER_TICKET} or sum(run_counts.values()) != counts["tickets"]:
         raise ValueError("runs_per_ticket counts do not match materialized tickets")

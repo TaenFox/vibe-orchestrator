@@ -17,7 +17,9 @@ HTTP success/error endpoints. SQLite является runtime control plane. Р�
 ledger остаётся SQLite, поскольку это его authoritative persistence.
 Варианты профиля материализуют small/medium/large/xlarge ticket sets и связанные
 профильные counts сессий и ledger runs; manifest хранит фактические counts, а не
-только поддерживаемые labels. Reservation/concurrency cases используют отдельные
+только поддерживаемые labels. Для tickets действует точная cardinality-проверка:
+`small=100`, `medium=1000`, `large=5000`, `xlarge=10000`, и `counts.tickets`
+обязан совпадать с `SIZES[size]`. Reservation/concurrency cases используют отдельные
 synthetic budget IDs и удаляются после sample.
 
 ## States and errors
@@ -75,8 +77,10 @@ The `performance-fixture.v2` manifest is strict: it records schema/source kind,
 seed, storage, actual counts, dimensions, redaction policy, logical checksum and
 materialized-tree checksum. The canonical logical checksum is SHA-256 of compact,
 sorted-key JSON. `validate_manifest()` recomputes it and rejects missing fields,
-unsupported values, unmaterialized dimensions, non-synthetic IDs and tampered
-hashes.
+unsupported values, profile counts (including exact ticket cardinality),
+unmaterialized dimensions, non-synthetic IDs and tampered hashes. Consistent derived
+dimensions and checksums do not make a manifest valid when `counts.tickets` differs
+from the declared profile's `SIZES[size]`.
 
 `--dataset` is fail-closed. The supplied manifest is authoritative and is fully
 validated before benchmark cases run. A manifest-only dataset may be materialized

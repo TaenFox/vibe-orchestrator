@@ -6,7 +6,9 @@ timestamps. titles, descriptions, prompts, raw payloads и production identifier
 
 ## Материализованные dimensions
 
-`small=100`, `medium=1000`, `large=5000`, `xlarge=10000` tickets. Manifest содержит
+`small=100`, `medium=1000`, `large=5000`, `xlarge=10000` tickets. Это точный контракт:
+`counts.tickets` обязан равняться `SIZES[size]`; согласованные derived dimensions и
+checksum не делают manifest с другой cardinality допустимым. Manifest содержит
 фактические status counts, session states, budget states, `runs_per_ticket` 0/1/10,
 session dimensions 1/10/100 и ledger dimensions 100/1000/10000. Для выбранного
 профиля `counts` и `*_counts` отражают реально записанные сущности; labels не
@@ -34,7 +36,7 @@ records; поддерживаемые dimensions вынесены отдельн
 portable identity SQLite.
 
 `load_dataset()` принимает JSON manifest-only dataset только после полной проверки
-схемы, counts, states, dimensions, synthetic IDs и checksum. При `--dataset`
+схемы, точных profile counts (включая tickets), states, dimensions, synthetic IDs и checksum. При `--dataset`
 manifest является authoritative source для seed/profile/storage; несовпадение
 явно заданных `--size` или `--storage`, повреждение manifest и unsupported values
 останавливают benchmark до выполнения case и до записи результата. После проверки
