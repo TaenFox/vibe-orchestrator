@@ -25,6 +25,7 @@ from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 
 log = logging.getLogger("vibe")
+MAX_REWORK_REVIEW_ATTEMPTS = 3
 
 
 def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
@@ -418,10 +419,18 @@ class Orchestrator:
             ticket.context_revision += 1
         target_status = (stage.outcomes or {})[result.outcome]
         if ticket.type == "rework" and workflow.id == "delivery" and result.outcome == "needs_rework":
-            # A rework is already the corrective pass. A second rejection must
-            # stop automatic execution instead of restarting the same loop.
-            target_status = "selected_for_session"
-            ticket.blocked_reason = "rework_cycle_stopped"
+            attempts = sum(
+                1
+                for event in ticket.run_history
+                if event.get("stage") == stage.id
+                and event.get("event") == "completed"
+                and event.get("outcome") == "needs_rework"
+            ) + 1
+            if attempts < MAX_REWORK_REVIEW_ATTEMPTS:
+                target_status = "ready_for_development"
+            else:
+                target_status = "selected_for_session"
+                ticket.blocked_reason = "rework_cycle_stopped"
         if ticket.type == "correction" and workflow.id == "discovery" and result.outcome == "completed":
             target_status = "done"
         if ticket.type == "rework" and workflow.id == "delivery" and stage.id == ticket.rework_stage and result.outcome == "completed":
