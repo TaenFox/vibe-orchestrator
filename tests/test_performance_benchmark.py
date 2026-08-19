@@ -93,10 +93,21 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
         "budgetledger.reserve.idempotent", "budgetledger.start", "budgetledger.finalize",
         "budgetledger.release", "budgetledger.reconcile", "budgetledger.concurrency.atomic_reserve",
         "budgetledger.concurrency.denied_overallocation",
+        "budgetledger.concurrency.lock_wait",
         "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
     }
     assert required <= ids
     assert {item[3] for item in cases}
+
+
+def test_lock_wait_is_measured_separately_from_transaction_time(tmp_path):
+    generate_fixture(tmp_path, seed=6, size="small", storage_mode="sqlite")
+    lock_case = next(item for item in _cases(tmp_path, storage="sqlite")
+                     if item[0] == "budgetledger.concurrency.lock_wait")
+    result = lock_case[3]()
+    assert result["lock_wait_ms"] > 0
+    assert result["transaction_ms"] >= 0
+    assert result["lock_wait_ms"] != result["transaction_ms"]
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):

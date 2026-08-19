@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import sys
+import threading
 from pathlib import Path
 
 # ``cProfile`` imports the stdlib module named ``profile``.  When this file is
@@ -66,6 +67,40 @@ class SQLiteMetrics:
         self.lock_wait_ms = 0.0
         self.busy_errors = 0
         self._transaction_started = None
+        self.measure_lock_wait = False
+
+    def transaction_began(self) -> None:
+        """Start transaction timing after SQLite acquired the transaction lock."""
+        self._transaction_started = time.perf_counter_ns()
+
+
+class InstrumentedConnection(sqlite3.Connection):
+    """Benchmark-only connection that separates BEGIN lock acquisition time."""
+
+    def __init__(self, *args: Any, metrics: SQLiteMetrics, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._metrics = metrics
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        normalized = sql.strip().upper()
+        is_begin = normalized.startswith("BEGIN")
+        measure_lock_wait = is_begin and self._metrics.measure_lock_wait
+        started = time.perf_counter_ns() if is_begin else None
+        try:
+            cursor = super().execute(sql, parameters)
+        except Exception:
+            if measure_lock_wait and started is not None:
+                self._metrics.lock_wait_ms += (time.perf_counter_ns() - started) / 1_000_000
+            raise
+        if is_begin and started is not None:
+            # BEGIN's execute duration is the time SQLite spent acquiring the
+            # transaction lock (plus the tiny statement overhead). The
+            # transaction timer starts only after BEGIN has returned, so the
+            # two measurements cannot double-count lock wait.
+            if measure_lock_wait:
+                self._metrics.lock_wait_ms += (time.perf_counter_ns() - started) / 1_000_000
+            self._metrics.transaction_began()
+        return cursor
 
 
 def _trace_sqlite(metrics: SQLiteMetrics, statement: str) -> None:
@@ -73,9 +108,7 @@ def _trace_sqlite(metrics: SQLiteMetrics, statement: str) -> None:
     metrics.queries += 1
     if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
         metrics.transactions += 1
-    if normalized.startswith("BEGIN"):
-        metrics._transaction_started = time.perf_counter_ns()
-    elif normalized in {"COMMIT", "ROLLBACK"} and metrics._transaction_started:
+    if normalized in {"COMMIT", "ROLLBACK"} and metrics._transaction_started:
         metrics.transaction_ms += (time.perf_counter_ns() - metrics._transaction_started) / 1_000_000
         metrics._transaction_started = None
 
@@ -86,7 +119,14 @@ class InstrumentedLedger(BudgetLedger):
         super().__init__(project)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = super()._connect()
+        connection = sqlite3.connect(
+            self.path, timeout=self.timeout, isolation_level=None,
+            factory=lambda *args, **kwargs: InstrumentedConnection(
+                *args, metrics=self.metrics, **kwargs))
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=10000")
+        connection.execute("PRAGMA journal_mode=WAL")
 
         connection.set_trace_callback(lambda statement: _trace_sqlite(self.metrics, statement))
         return connection
@@ -307,6 +347,37 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
             with ledger._connect() as db:
                 db.execute("DELETE FROM runs WHERE ticket_budget_id=?", (f"ticket:{owner}",))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
+
+    def lock_wait_probe() -> dict[str, float]:
+        """Create a short real SQLite lock wait for attribution validation."""
+        holder = sqlite3.connect(ledger.path, isolation_level=None, check_same_thread=False)
+        holder.execute("BEGIN IMMEDIATE")
+        released = threading.Event()
+
+        def release_lock() -> None:
+            time.sleep(0.02)
+            holder.execute("ROLLBACK")
+            holder.close()
+            released.set()
+
+        releaser = threading.Thread(target=release_lock)
+        releaser.start()
+        try:
+            connection = ledger._connect()
+            try:
+                sqlite_metrics.measure_lock_wait = True
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("ROLLBACK")
+            finally:
+                sqlite_metrics.measure_lock_wait = False
+                connection.close()
+        finally:
+            releaser.join(timeout=2)
+            if not released.is_set():
+                holder.execute("ROLLBACK")
+                holder.close()
+        return {"lock_wait_ms": sqlite_metrics.lock_wait_ms,
+                "transaction_ms": sqlite_metrics.transaction_ms}
     # A repeated reserve uses a prepared run id and is therefore idempotent and
     # read-only after setup; it cannot contaminate subsequent samples.
     prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
@@ -343,6 +414,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.reconcile", "BudgetLedger", "reconcile", lambda: ledger.reconcile()),
         ("budgetledger.concurrency.atomic_reserve", "BudgetLedger", "concurrent atomic reservation", concurrent_reservation),
         ("budgetledger.concurrency.denied_overallocation", "BudgetLedger", "concurrent denied overallocation", concurrent_overallocation),
+        ("budgetledger.concurrency.lock_wait", "BudgetLedger", "measured SQLite lock wait", lock_wait_probe),
         ("budgetledger.release", "BudgetLedger", "release (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.release(run_id))),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="compact")),
