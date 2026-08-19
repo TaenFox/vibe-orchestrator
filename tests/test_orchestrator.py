@@ -1074,7 +1074,7 @@ def test_technical_debt_exact_replay_preserves_existing_child_during_reconciliat
         "source_run": "run-ta-1",
         "dedup_key": key,
     }
-    assert "technical_debt_deferred: true" in orchestrator.store.ticket_path(existing).read_text(encoding="utf-8")
+    assert orchestrator.store.get(existing.id).technical_debt_deferred is True
     assert existing.run_history[-1]["event"] == "created"
     existing.status = "selected_for_session"
     orchestrator.store.save(existing)

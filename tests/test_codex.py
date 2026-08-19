@@ -316,7 +316,7 @@ def test_build_exec_args_exposes_model_and_reasoning_without_running_codex(tmp_p
 
 
 def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monkeypatch):
-    store = TicketStore(tmp_path)
+    store = TicketStore(tmp_path, use_database=False)
     store.init()
     ticket = store.create("delivery", "task", "Replayable run", status="development")
     ticket.active_run = "run-123"
@@ -329,6 +329,7 @@ def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monk
 
         async def communicate(self, prompt_bytes: bytes):
             output_path = tmp_path / ".vibe" / "runs" / "run-123" / "result.json"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
                 json.dumps({"outcome": "completed", "summary": "ok", "details": "trace"}),
                 encoding="utf-8",
@@ -378,7 +379,7 @@ def test_run_reuses_active_run_and_persists_replay_metadata(tmp_path: Path, monk
 
 
 def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(tmp_path: Path, monkeypatch):
-    store = TicketStore(tmp_path)
+    store = TicketStore(tmp_path, use_database=False)
     store.init()
     ticket = store.create("delivery", "task", "Immutable contract", status="development")
     stage = load_workflow("delivery").by_id["development"]
@@ -395,6 +396,7 @@ def test_run_uses_prepared_execution_contract_without_reloading_prompt_metadata(
 
         async def communicate(self, prompt_bytes: bytes):
             output_path = tmp_path / ".vibe" / "runs" / "run-contract" / "result.json"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
                 json.dumps({"outcome": "completed", "summary": "ok", "details": ""}),
                 encoding="utf-8",

@@ -45,7 +45,7 @@ def technical_debt_basis(candidate: dict[str, Any], project: Path) -> tuple[str,
     except ValueError as exc:
         raise ValueError("technical-debt evidence path escapes project root") from exc
     relative = evidence_path.relative_to(root).as_posix()
-    if relative.startswith((".vibe/tickets/", ".vibe/sessions/")) or evidence_path.is_dir():
+    if relative.startswith((".vibe/archive/", ".vibe/runs/")) or evidence_path.is_dir():
         raise ValueError("technical-debt evidence path is not allowed")
     basis = {
         "problem": normalize_technical_debt_text(candidate["problem"]),
@@ -167,10 +167,14 @@ def preflight_technical_debt(
     root = project.resolve()
     read = reader or (lambda path: path.read_text(encoding="utf-8"))
     try:
-        # SessionStore.list() performs legacy migration; preflight deliberately
-        # reads existing documents directly so it cannot mutate the control plane.
-        for session_path in sorted(sessions.sessions_root.glob("*.yaml")):
-            sessions.load_path(session_path)
+        if sessions.database_enabled:
+            # Runtime preflight reads the same SQLite source of truth as the
+            # scheduler; it must not recreate or inspect the removed YAML tree.
+            sessions.list()
+        else:
+            # Explicit legacy mode is used only by the one-time migration path.
+            for session_path in sorted(sessions.sessions_root.glob("*.yaml")):
+                sessions.load_path(session_path)
     except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise _error("tech_debt_candidates", "Delivery-сессии недоступны для read-only проверки.", code="TECH_DEBT_PREFLIGHT_UNAVAILABLE") from exc
     for index, candidate in enumerate(candidates):
@@ -221,7 +225,7 @@ def preflight_technical_debt(
         except ValueError as exc:
             raise _error(f"{base}.evidence.path", "Путь evidence выходит за project root.", code="TECH_DEBT_SOURCE_MISMATCH") from exc
         relative = evidence_path.relative_to(root).as_posix()
-        if relative.startswith(".vibe/tickets/") or relative.startswith(".vibe/sessions/") or evidence_path.is_dir():
+        if relative.startswith(".vibe/archive/") or relative.startswith(".vibe/runs/") or evidence_path.is_dir():
             raise _error(f"{base}.evidence.path", "Путь запрещен для evidence.", code="TECH_DEBT_SOURCE_MISMATCH")
         try:
             content = read(evidence_path)

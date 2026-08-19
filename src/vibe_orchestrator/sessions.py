@@ -114,7 +114,9 @@ class SessionStore:
 
     @property
     def database_enabled(self) -> bool:
-        return self.use_database and self.ticket_store.database.exists()
+        # Runtime sessions are SQLite-only. YAML is available only through
+        # the explicit legacy mode used by the migration tool.
+        return self.use_database
 
     def _db(self) -> sqlite3.Connection:
         from .control_db_migration import ensure_control_schema
