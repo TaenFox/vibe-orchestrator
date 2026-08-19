@@ -117,6 +117,21 @@ def test_manifest_identity_gate_rejects_valid_altered_manifest(tmp_path):
         assert_manifest_identity(altered, manifest)
 
 
+def test_manifest_identity_gate_reports_altered_dimensions(tmp_path):
+    manifest = generate_fixture(tmp_path / "fixture", seed=32)
+    altered = json.loads(json.dumps(manifest))
+    altered["dimensions"]["ticket_status"]["todo"] += 1
+    altered["dimensions"]["ticket_status"]["development"] -= 1
+    payload, checksum = manifest_identity(altered)
+    altered["logical"] = payload
+    altered["hashes"]["manifest_sha256"] = checksum
+    altered["logical_checksum"] = checksum
+    altered["fixture_files_sha256"] = checksum
+    validate_manifest(altered)
+    with pytest.raises(ValueError, match="differing canonical fields=.*ticket_status"):
+        assert_manifest_identity(altered, manifest)
+
+
 def _run_args(project, dataset, output):
     return Namespace(project=project, output=output, dataset=dataset, profile="smoke", size=None,
                      storage="sqlite", seed=35527, warmup=0, iterations=1, cold=False)

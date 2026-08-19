@@ -106,6 +106,9 @@ machine/filesystem dependent.
 
 Fixture tests read back ticket IDs, statuses and run-history distributions,
 session lifecycle states, and ledger ownership/run totals for all four profiles.
+The worker run completed small/medium checks; large/xlarge materialization did not
+produce a final pytest result within the available execution window, so that
+execution evidence remains open and requires a rerun with sufficient resources.
 Browser DOM/focus/viewport/keyboard/auto-refresh checks are unavailable in the
 worker environment and require an external or manual browser run; static tests
 do not claim that coverage.

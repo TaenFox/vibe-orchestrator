@@ -90,12 +90,16 @@ def assert_manifest_identity(expected: dict[str, Any], actual: dict[str, Any]) -
     actual_payload, actual_hash = manifest_identity(actual)
     supplied_hash = expected.get("hashes", {}).get("manifest_sha256")
     generated_hash = actual.get("hashes", {}).get("manifest_sha256")
-    if (expected_payload != actual_payload or expected_hash != actual_hash or
-            supplied_hash != expected_hash or generated_hash != actual_hash or
-            expected_hash != actual_hash):
+    if (supplied_hash != expected_hash or generated_hash != actual_hash or
+            expected_hash != actual_hash or expected_payload != actual_payload):
+        differing_fields = sorted(
+            key for key in set(expected_payload) | set(actual_payload)
+            if expected_payload.get(key) != actual_payload.get(key)
+        )
+        suffix = f"; differing canonical fields={differing_fields}" if differing_fields else ""
         raise ValueError(
             "dataset identity mismatch: supplied="
-            f"{supplied_hash or expected_hash}, materialized={generated_hash or actual_hash}"
+            f"{supplied_hash or expected_hash}, materialized={generated_hash or actual_hash}{suffix}"
         )
 
 
