@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import json
 import pytest
 
-from benchmarks.performance.run_benchmark import CaseSpec, _cold_capability, _cases, _run_case, percentile, statistics_for, validate_result
+from benchmarks.performance.run_benchmark import CaseRegistry, CaseSpec, _cold_capability, _cases, _run_case, percentile, run, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
@@ -120,6 +121,64 @@ def test_result_validation_requires_clean_isolation_for_mutation():
               "source_checksum_before": "a", "source_checksum_after": "a"}
     with pytest.raises(ValueError, match="unclean mutation"):
         validate_result(result)
+
+
+@pytest.mark.parametrize("isolation_clean", [False, None])
+def test_result_validation_requires_clean_isolation_for_each_read_only_sample(isolation_clean):
+    sample = {"sample_index": 3, "wall_ms": 1.0, "error": None}
+    if isolation_clean is not None:
+        sample["isolation_clean"] = isolation_clean
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [{"case_id": "read.case", "component": "x", "operation": "y", "kind": "read_only",
+                          "storage_mode": "sqlite", "dataset_dimensions": {}, "expected_outcome": "success",
+                          "errors": [], "statistics": {}, "sample_count": 1, "raw_samples": [sample]}],
+              "source_checksum_before": "a", "source_checksum_after": "a"}
+    with pytest.raises(ValueError, match=r"read\.case.*sample_index 3"):
+        validate_result(result)
+
+
+def test_run_case_read_only_contamination_is_rejected_by_validation(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    synthetic = root / "benchmark-read-only.yaml"
+
+    def run():
+        synthetic.write_text("state: leaked\n", encoding="utf-8")
+
+    spec = CaseSpec("test.read_only_contamination", "test", "read", run)
+    result = _run_case(spec, tmp_path, warmup=0, iterations=1, noisy=False,
+                       storage_mode="sqlite", manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+    assert result["raw_samples"][0]["isolation_clean"] is False
+    with pytest.raises(ValueError, match=r"test\.read_only_contamination.*sample_index 0"):
+        validate_result({"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+                         "cases": [result], "source_checksum_before": "a", "source_checksum_after": "a"})
+
+
+def test_case_registry_cleanup_is_idempotent():
+    calls = []
+    registry = CaseRegistry(iter(()), lambda: calls.append(True))
+    registry.cleanup()
+    registry.cleanup()
+    assert calls == [True]
+
+
+def test_run_cleans_registry_when_sampling_raises(tmp_path, monkeypatch):
+    source = tmp_path / "project"
+    source.mkdir()
+    cleanup_calls = []
+    registry = CaseRegistry(iter([CaseSpec("test.case", "test", "operation", lambda: None)]),
+                             lambda: cleanup_calls.append(True))
+    monkeypatch.setattr("benchmarks.performance.run_benchmark._cases", lambda *_args, **_kwargs: registry)
+
+    def fail_sampling(*_args, **_kwargs):
+        raise RuntimeError("sampling failed")
+
+    monkeypatch.setattr("benchmarks.performance.run_benchmark._run_case", fail_sampling)
+    args = SimpleNamespace(project=source, output=tmp_path / "result.json", profile="smoke", size="small",
+                            storage="yaml", warmup=0, iterations=1, seed=1, dataset=None, cold=False)
+    with pytest.raises(RuntimeError, match="sampling failed"):
+        run(args)
+    assert cleanup_calls == [True]
 
 
 def test_case_spec_teardown_is_a_first_class_callback():

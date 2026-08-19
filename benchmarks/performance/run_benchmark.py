@@ -78,7 +78,15 @@ class CaseRegistry(list[CaseSpec]):
 
     def __init__(self, cases: Iterator[CaseSpec], cleanup: Callable[[], None] | None = None):
         super().__init__(cases)
-        self.cleanup = cleanup or (lambda: None)
+        self._cleanup_callback = cleanup or (lambda: None)
+        self._cleaned = False
+
+    def cleanup(self) -> None:
+        """Release owned resources at most once."""
+        if self._cleaned:
+            return
+        self._cleaned = True
+        self._cleanup_callback()
 
 
 _VOLATILE_FIELDS = {"created_at", "updated_at", "started_at", "completed_at", "cancelled_at",
@@ -210,6 +218,11 @@ def validate_result(result: dict[str, Any]) -> None:
         for sample in case["raw_samples"]:
             if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
                 raise ValueError("invalid sample schema")
+            if kind == "read_only" and sample.get("isolation_clean") is not True:
+                raise ValueError(
+                    f"unclean read-only sample {case.get('case_id')} "
+                    f"at sample_index {sample.get('sample_index')}"
+                )
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
@@ -505,7 +518,13 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
         modes = ("sqlite",) if component in {"HTTP", "UI"} and not case_id.startswith("http.handler") else ("sqlite", "yaml")
         specs.append(CaseSpec(case_id, component, operation, fn, case_kinds[case_id], storage_modes=modes, expected_outcome=expected,
                               limitations=list(getattr(fn, "_limitations", []))))
-    cleanup = (lambda: (server.shutdown(), server.server_close())) if server is not None else None
+    def cleanup() -> None:
+        if server is not None:
+            try:
+                server.shutdown()
+            finally:
+                server.server_close()
+
     return CaseRegistry(iter(specs), cleanup)
 
 
@@ -574,45 +593,56 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
         manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
-        cases = _cases(isolated, storage=args.storage); atexit.register(cases.cleanup); iterations = args.iterations
-        result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
+        cases = _cases(isolated, storage=args.storage)
+        atexit.register(cases.cleanup)
+        try:
+            iterations = args.iterations
+            result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
                                  "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
-                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
-        cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
-        effective_cold = bool(args.cold and cold["available"])
-        for item in cases:
-            if effective_cold:
-                _prepare_cold(cold)
-            case_result = _run_case(item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
-            if args.cold and not effective_cold:
-                case_result["limitations"].append(cold["limitation"])
-            case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
-            result["cases"].append(case_result)
-        selected = next((item for item in cases if item[0] == "scheduler.select_candidates"), None)
-        if selected:
-            profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
-            profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
-            profiler = cProfile.Profile(); profiler.enable(); selected[3](); profiler.disable(); profiler.dump_stats(profile_path)
-            with text_path.open("w", encoding="utf-8") as handle:
-                pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
-            profile_manifest = profile_dir / "profile-manifest.json"
-            profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-                "artifacts": [str(profile_path), str(text_path)]}, indent=2), encoding="utf-8")
-            result["profiling"]["artifacts"] = [str(profile_path), str(text_path), str(profile_manifest)]
-            for case in result["cases"]:
-                if case["case_id"] == selected[0]:
-                    case["profile_artifacts"] = result["profiling"]["artifacts"]
-        result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
-                               "cold_available": cold["available"], "cold_strategy": cold["strategy"],
-                               "cold_limitation": cold["limitation"]}
-        result["source_checksum_after"] = _hash_tree(source)
-        validate_result(result)
-        output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        cases.cleanup()
+                      "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
+            cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
+            effective_cold = bool(args.cold and cold["available"])
+            for item in cases:
+                if effective_cold:
+                    _prepare_cold(cold)
+                case_result = _run_case(item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
+                if args.cold and not effective_cold:
+                    case_result["limitations"].append(cold["limitation"])
+                case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
+                result["cases"].append(case_result)
+            selected = next((item for item in cases if item[0] == "scheduler.select_candidates"), None)
+            if selected:
+                profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
+                profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
+                profiler = cProfile.Profile(); profiler.enable(); selected[3](); profiler.disable(); profiler.dump_stats(profile_path)
+                with text_path.open("w", encoding="utf-8") as handle:
+                    pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
+                profile_manifest = profile_dir / "profile-manifest.json"
+                profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
+                    "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
+                    "artifacts": [str(profile_path), str(text_path)]}, indent=2), encoding="utf-8")
+                result["profiling"]["artifacts"] = [str(profile_path), str(text_path), str(profile_manifest)]
+                for case in result["cases"]:
+                    if case["case_id"] == selected[0]:
+                        case["profile_artifacts"] = result["profiling"]["artifacts"]
+            result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
+                                   "cold_available": cold["available"], "cold_strategy": cold["strategy"],
+                                   "cold_limitation": cold["limitation"]}
+            result["source_checksum_after"] = _hash_tree(source)
+            validate_result(result)
+            output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        finally:
+            atexit.unregister(cases.cleanup)
+            primary_error = sys.exc_info()[1]
+            try:
+                cases.cleanup()
+            except Exception as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"benchmark registry cleanup failed: {cleanup_error!r}")
     return result
 
 

@@ -48,6 +48,11 @@ child rows/events до parent rows в `finally`. Результат содерж
 teardown выполняется в `finally` даже при ошибке callback. `cleanup_errors`
 заполняется только при фактической ошибке teardown: при успешной очистке
 snapshot/hash восстанавливается, утечки отсутствуют и mutation остаётся `clean=true`.
+Для каждого sample `read_only` также обязательно `isolation_clean=true`, включая sample
+с ожидаемой ошибкой; отсутствующее или ложное значение отклоняется `validate_result()` с
+идентификаторами case и sample. `CaseRegistry` владеет ресурсами до конца `run()` и
+освобождает их в `finally`; cleanup идемпотентен, а loopback HTTP server закрывается через
+`shutdown()` и `server_close()` даже при ошибке sampling, profiling, validation или записи.
 
 ## Методика
 
@@ -86,4 +91,6 @@ cache eviction и alternate filesystems capability-dependent; при недос�
 результат содержит причину и не формулирует portable comparison conclusion.
 HTTP loopback может быть запрещён окружением, а YAML registry не запускает
 network-level routes; оба ограничения записываются в `limitations`. Статические
-render/handler тесты не являются browser-level проверкой.
+render/handler тесты не являются browser-level проверкой. Гарантия `finally` относится
+к обычным исключениям Python после создания registry и не распространяется на SIGKILL,
+crash процесса или иное аварийное завершение, при котором Python не выполняет `finally`.
