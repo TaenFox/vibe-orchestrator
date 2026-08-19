@@ -27,7 +27,7 @@ def test_framework_ui_builds_board_and_ticket_detail(tmp_path: Path):
 def test_framework_ui_exposes_expected_routes(tmp_path: Path):
     paths = {route.path for route in create_app(tmp_path).routes}
 
-    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/workers"}
+    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/workers"}
 
 
 def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path):
@@ -61,6 +61,19 @@ def test_manual_rework_resume_does_not_clear_other_block():
     _resume_rework_if_requested(ticket, "selected_for_session")
 
     assert ticket.blocked_reason == "budget_exceeded_tokens"
+
+
+def test_framework_ui_offers_explicit_rework_resume(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "rework", "Stopped rework", status="selected_for_session")
+    ticket.blocked_reason = "rework_cycle_stopped"
+    store.save(ticket)
+
+    detail = _ticket_html(store, load_all_workflows(), ticket.id)
+
+    assert f'/ticket/{ticket.id}/resume-rework' in detail
+    assert "Разрешить ещё один проход реворка" in detail
 
 
 def test_framework_ui_renders_session_list_and_membership(tmp_path: Path):
