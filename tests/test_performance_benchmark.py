@@ -60,7 +60,7 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
 
 
 @pytest.mark.parametrize("size", ["small", "medium", "large", "xlarge"])
-@pytest.mark.parametrize("storage_mode", ["sqlite"])
+@pytest.mark.parametrize("storage_mode", ["sqlite", "yaml"])
 def test_fixture_profile_counts_match_materialized_entities(tmp_path, size, storage_mode):
     project = tmp_path / f"{storage_mode}-{size}"
     manifest = generate_fixture(project, seed=21, size=size, storage_mode=storage_mode)
@@ -79,9 +79,13 @@ def test_fixture_profile_counts_match_materialized_entities(tmp_path, size, stor
     for ticket_id in manifest["logical"]["ticket_ids"]:
         ticket_runs = ledger.list_runs(f"ticket:{ticket_id}")
         assert all(run["ticket_id"] == ticket_id for run in ticket_runs)
+        assert all(run["ticket_budget_id"] == f"ticket:{ticket_id}" for run in ticket_runs)
         runs += len(ticket_runs)
     assert runs == manifest["counts"]["ledger_runs"]
     budget_states = Counter(ledger.read_budget(f"ticket:{ticket_id}")["status"] for ticket_id in manifest["logical"]["ticket_ids"])
+    for state in ("exhausted", "blocked_unknown", "over_budget"):
+        assert budget_states[state] == manifest["dimensions"]["budget_states"][state]
+    assert budget_states["active"] == manifest["counts"]["tickets"] - 3
     assert budget_states["exhausted"] == 1
     assert budget_states["blocked_unknown"] == 1
     assert budget_states["over_budget"] == 1
@@ -150,10 +154,15 @@ def test_identical_dataset_manifest_materializes_and_preserves_identity(tmp_path
     dataset = tmp_path / "dataset.json"
     dataset.write_text(json.dumps(manifest), encoding="utf-8")
     output = tmp_path / "result.json"
-    monkeypatch.setattr(run_benchmark, "_cases", lambda *args, **kwargs: [])
+    monkeypatch.setattr(run_benchmark, "_cases", lambda *args, **kwargs: [
+        ("identity.case", "test", "identity", lambda: None),
+    ])
     result = run_benchmark.run(_run_args(Path("."), dataset, output))
     assert output.exists()
     assert result["dataset_manifest_hash"] == manifest["hashes"]["manifest_sha256"]
+    assert result["cases"]
+    assert all(case["dataset_manifest_hash"] == manifest["hashes"]["manifest_sha256"]
+               for case in result["cases"])
     validate_result(result)
 
 

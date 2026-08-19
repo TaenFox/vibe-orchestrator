@@ -362,6 +362,7 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
                         "error": error})
     walls = [item["wall_ms"] for item in samples]
     return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
+            "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"],
             "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
