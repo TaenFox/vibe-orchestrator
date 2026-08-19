@@ -122,10 +122,11 @@ def _board_html(store: TicketStore, workflows: dict, process: str, search: str =
             attention_reason = str(ticket.get("blocked_reason"))
         attention = f'<span class=attention-badge title="{_escape(attention_reason)}">внимание</span>' if attention_reason else ""
         parent = ticket.get("parent") or "—"
-        rows.append(f'<tr class="ticket-row{" agent-active" if active else ""}{" needs-attention" if attention_reason else ""}" data-ticket="{_escape(ticket_id)}" data-status="{_escape(status)}" draggable="{"true" if view == "wip" else "false"}"><td><a href="/ticket/{_escape(ticket_id)}"><span class=ticket-title>{_escape(ticket.get("title", ""))}{badge}{attention}</span><span class=ticket-id>{_escape(ticket_id)} · {_escape(ticket.get("type", ticket.get("ticket_type", "")))}</span></a></td><td><div class=progress aria-label="Прогресс по статусам">{progress}</div><span class=status-label>{_escape(stage.title if stage else status)}</span></td><td class=meta>{_escape(parent)}</td><td class=meta>{_escape(str(ticket.get("updated_at", "")).replace("T", " ")[:16])}</td></tr>')
+        actions = _ticket_actions_html(store, workflows, store.get(ticket_id)) if view == "wip" else ""
+        rows.append(f'<tr class="ticket-row{" agent-active" if active else ""}{" needs-attention" if attention_reason else ""}" data-ticket="{_escape(ticket_id)}" data-status="{_escape(status)}" draggable="{"true" if view == "wip" else "false"}"><td><a href="/ticket/{_escape(ticket_id)}"><span class=ticket-title>{_escape(ticket.get("title", ""))}{badge}{attention}</span><span class=ticket-id>{_escape(ticket_id)} · {_escape(ticket.get("type", ticket.get("ticket_type", "")))}</span></a></td><td><div class=progress aria-label="Прогресс по статусам">{progress}</div><span class=status-label>{_escape(stage.title if stage else status)}</span></td><td class=meta>{_escape(parent)}</td><td class=meta>{_escape(str(ticket.get("updated_at", "")).replace("T", " ")[:16])}</td><td class=row-actions>{actions or "—"}</td></tr>')
     switch = f'<div class=view-switch><a class="{"active" if view == "wip" else ""}" href="/?process={_escape(process)}&view=wip&search={urllib.parse.quote(search)}">WIP</a><a class="{"active" if view == "done" else ""}" href="/?process={_escape(process)}&view=done&search={urllib.parse.quote(search)}">Done</a></div>'
     worker_form = f'<form method=post action=/workers><input type=hidden name=process value="{_escape(process)}"><button name=delta value=-1 aria-label="Уменьшить количество воркеров">−1</button><span class=meta>Воркеры: <strong>{_escape(worker_limit if worker_limit is not None else "?")}</strong></span><button name=delta value=1 aria-label="Увеличить количество воркеров">+1</button></form>' if worker_limit is not None else ""
-    table = f'<table class=ticket-table><thead><tr><th>Тикет</th><th>Прогресс</th><th>Родитель</th><th>Обновлён</th></tr></thead><tbody>{"".join(rows)}</tbody></table>' if rows else '<div class=empty>В этом представлении тикетов нет</div>'
+    table = f'<table class=ticket-table><thead><tr><th>Тикет</th><th>Прогресс</th><th>Родитель</th><th>Обновлён</th><th>Действия</th></tr></thead><tbody>{"".join(rows)}</tbody></table>' if rows else '<div class=empty>В этом представлении тикетов нет</div>'
     content = f'<main><div class=toolbar><form method=get><input name=search value="{_escape(search)}" placeholder="Поиск по тикетам"><input type=hidden name=process value="{_escape(process)}"><input type=hidden name=view value="{_escape(view)}"><button>Найти</button></form>{switch}<a href="/new?process={_escape(process)}">Создать тикет</a>{worker_form}</div>{table}</main>'
     return _layout(content, process)
 
@@ -135,9 +136,7 @@ def _ticket_html(store: TicketStore, workflows: dict, ticket_id: str, reader: Co
     data = _ticket_data(reader.get_ticket(ticket_id)) if reader else _ticket_data(ticket)
     data = data or _ticket_data(ticket)
     next_status = next_status_for_ticket(store, ticket)
-    action = f'<form method=post action="/ticket/{_escape(ticket.id)}/move"><input type=hidden name=target value="{_escape(next_status)}"><button>Перевести в {_escape(next_status)}</button></form>' if next_status else ""
-    if ticket.type == "rework" and ticket.blocked_reason == "rework_cycle_stopped":
-        action += f'<form method=post action="/ticket/{_escape(ticket.id)}/resume-rework"><button>Разрешить ещё один проход реворка</button></form>'
+    action = _ticket_actions_html(store, workflows, ticket)
     history = "".join(f'<li><b>{_escape(item.get("event", "event"))}</b> · {_escape(item.get("stage", ""))} · {_escape(item.get("timestamp", ""))}<br>{_escape(item.get("summary", ""))}</li>' for item in reversed(data.get("run_history", [])))
     run_cards = []
     if reader:
@@ -153,6 +152,15 @@ def _ticket_html(store: TicketStore, workflows: dict, ticket_id: str, reader: Co
     process = data.get("process", ticket.process)
     content = f'<main><article class=panel><a href="/?process={_escape(process)}">← К доске</a><h2>{_escape(data.get("title", ""))}</h2><div class=meta>{_escape(data.get("id", ticket.id))} · {_escape(data.get("type", ""))} · {_escape(data.get("status", ""))} · приоритет {_escape(data.get("priority", 100))}</div><div class=field><label>Описание</label><div class=summary>{_escape(data.get("description") or "(пусто)")}</div></div><div class=field><label>Последний результат</label><div class=summary>{_escape(data.get("last_summary") or "нет")}</div></div><div class=actions>{action}</div>{run_section}<div class=field><label>История запусков</label><ol>{history or "<li class=empty>История пока пуста</li>"}</ol></div></article></main>'
     return _layout(content, process)
+
+
+def _ticket_actions_html(store: TicketStore, workflows: dict, ticket: Any) -> str:
+    workflow = workflows[ticket.process]
+    next_status = next_status_for_ticket(store, ticket)
+    action = f'<form method=post action="/ticket/{_escape(ticket.id)}/move"><input type=hidden name=target value="{_escape(next_status)}"><button>Перевести в {_escape(workflow.by_id[next_status].title)}</button></form>' if next_status else ""
+    if ticket.type == "rework" and ticket.blocked_reason == "rework_cycle_stopped":
+        action += f'<form method=post action="/ticket/{_escape(ticket.id)}/resume-rework"><button>Разрешить ещё один проход реворка</button></form>'
+    return action
 
 
 def _new_html(process: str) -> str:
