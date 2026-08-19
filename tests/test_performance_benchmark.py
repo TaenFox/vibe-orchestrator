@@ -11,7 +11,7 @@ import pytest
 from benchmarks.performance import run_benchmark
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
 from benchmarks.performance.workloads import (BUDGET_STATES, PROFILE_DIMENSIONS, RUNS_PER_TICKET,
-                                              assert_manifest_identity, generate_fixture, load_dataset,
+                                              SIZES, assert_manifest_identity, generate_fixture, load_dataset,
                                               manifest_identity, validate_manifest)
 from vibe_orchestrator.budget_ledger import BudgetLedger
 from vibe_orchestrator.sessions import SessionStore
@@ -58,6 +58,31 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError):
         load_dataset(path)
+
+
+def test_manifest_rejects_internally_consistent_wrong_profile_ticket_count(tmp_path):
+    manifest = generate_fixture(tmp_path / "fixture", seed=23, size="small")
+    altered = json.loads(json.dumps(manifest))
+    altered["logical"]["ticket_ids"].pop()
+    altered["counts"]["tickets"] = SIZES["small"] - 1
+
+    status = next(key for key, value in altered["dimensions"]["ticket_status"].items() if value > 0)
+    altered["dimensions"]["ticket_status"][status] -= 1
+    run_count = next(key for key, value in altered["dimensions"]["runs_per_ticket_counts"].items() if value > 0)
+    altered["dimensions"]["runs_per_ticket_counts"][run_count] -= 1
+    payload, checksum = manifest_identity(altered)
+    altered["logical"] = payload
+    altered["hashes"]["manifest_sha256"] = checksum
+    altered["logical_checksum"] = checksum
+    altered["fixture_files_sha256"] = checksum
+
+    with pytest.raises(ValueError, match="ticket count does not match profile.*small.*100.*99"):
+        validate_manifest(altered)
+
+    dataset = tmp_path / "invalid-cardinality.json"
+    dataset.write_text(json.dumps(altered), encoding="utf-8")
+    with pytest.raises(ValueError, match="ticket count does not match profile"):
+        load_dataset(dataset)
 
 
 @pytest.mark.parametrize("size", ["small", "medium", "large", "xlarge"])
