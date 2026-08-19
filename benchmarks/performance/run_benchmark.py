@@ -385,7 +385,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             size = dataset["dimensions"]["size"]
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
         fixture_storage = dataset["storage_mode"] if dataset and args.storage is None else (args.storage or "sqlite")
-        if dataset and args.storage is not None and fixture_storage != args.storage:
+        if dataset and args.storage is not None and dataset["storage_mode"] != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
         materialized_manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
         if dataset:
