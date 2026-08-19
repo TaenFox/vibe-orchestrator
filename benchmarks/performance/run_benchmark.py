@@ -44,10 +44,10 @@ from vibe_orchestrator.ui import render_board, render_board_fragment
 from vibe_orchestrator.ui import start_server
 from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 try:
-    from .workloads import generate_fixture, load_dataset
+    from .workloads import generate_fixture, load_dataset, materialize_dataset
 except ImportError:  # direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from benchmarks.performance.workloads import generate_fixture, load_dataset
+    from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
 
@@ -378,6 +378,22 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
                 holder.close()
         return {"lock_wait_ms": sqlite_metrics.lock_wait_ms,
                 "transaction_ms": sqlite_metrics.transaction_ms}
+
+    def overlap_open_sessions() -> Any:
+        first = sessions.create([second_ticket_id])
+        try:
+            return sessions.create([second_ticket_id])
+        finally:
+            if sessions.database_enabled:
+                with sessions._db() as db:
+                    db.execute("DELETE FROM session_members WHERE session_id=?", (first.id,))
+                    db.execute("DELETE FROM events WHERE entity_kind='session' AND entity_id=?", (first.id,))
+                    db.execute("DELETE FROM sessions WHERE session_id=?", (first.id,))
+            else:
+                sessions.session_path(first).unlink(missing_ok=True)
+
+    malformed_session = project / ".vibe" / "benchmark-snapshots" / "malformed-session.yaml"
+    malformed_session.write_text("not: [a valid session", encoding="utf-8")
     # A repeated reserve uses a prepared run id and is therefore idempotent and
     # read-only after setup; it cannot contaminate subsequent samples.
     prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
@@ -392,9 +408,14 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("ticketstore.get.miss", "TicketStore", "get(missing)", lambda: store.get("FIX-MISSING")),
         ("ticketstore.load_path", "TicketStore", "load_path", lambda: store.load_path(ticket_yaml)),
         ("ticketstore.children_of", "TicketStore", "children_of", lambda: store.children_of(ticket_id)),
+        ("orchestrator.scan_sort_cycle", "Orchestrator", "scan, select and sort candidates", lambda: sorted(
+            select_candidates(workflow, store.list("delivery"), set()),
+            key=lambda candidate: (-candidate.stage_position, candidate.ticket.priority, candidate.ticket.id))),
         ("sessionstore.list", "SessionStore", "list", lambda: sessions.list()),
         ("sessionstore.get", "SessionStore", "get", lambda: sessions.get(session_id)),
+        ("sessionstore.get_missing.error", "SessionStore", "get missing persisted entity", lambda: sessions.get("SESSION-MISSING")),
         ("sessionstore.load_path", "SessionStore", "load_path", lambda: sessions.load_path(session_yaml)),
+        ("sessionstore.load_invalid_persisted.error", "SessionStore", "load invalid persisted entity", lambda: sessions.load_path(malformed_session)),
         ("sessionstore.create", "SessionStore", "create", lambda: isolated_session(lambda _: None)),
         ("sessionstore.activate", "SessionStore", "activate", lambda: isolated_session(lambda item: sessions.activate(item))),
         ("sessionstore.complete", "SessionStore", "complete", lambda: isolated_session(lambda item: (sessions.activate(item), sessions.complete(sessions.get(item.id))))),
@@ -403,6 +424,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("sessionstore.add_membership", "SessionStore", "add_ticket", lambda: isolated_session(lambda item: sessions.add_ticket(item, ticket_id))),
         ("sessionstore.remove_membership", "SessionStore", "remove_ticket", lambda: isolated_session(lambda item: sessions.remove_ticket(item, second_ticket_id))),
         ("sessionstore.validation.overlap.error", "SessionStore", "overlap validation", lambda: sessions.create([ticket_id])),
+        ("sessionstore.validation.multiple_open_overlap.error", "SessionStore", "overlap across open sessions", overlap_open_sessions),
         ("budgetledger.read_budget", "BudgetLedger", "read_budget", lambda: ledger.read_budget(budget_id)),
         ("budgetledger.get_budget", "BudgetLedger", "get_budget", lambda: ledger.get_budget(budget_id)),
         ("budgetledger.get_run", "BudgetLedger", "get_run", lambda: ledger.get_run("RUN-FIX-00000")),
@@ -418,13 +440,24 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.release", "BudgetLedger", "release (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.release(run_id))),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="compact")),
+        ("ui.render_board.flat", "UI", "render_board mode=flat", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="flat")),
+        ("ui.filter.flat", "UI", "filter mode=flat", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="flat")),
+        ("ui.filter.search", "UI", "filter search", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, search=ticket_id)),
+        ("ui.filter.status", "UI", "filter status", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, status=store.get(ticket_id).status)),
+        ("ui.filter.active", "UI", "filter active", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, active=True)),
         ("ui.render_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=ui_sessions)),
         ("http.handler.fragment", "HTTP", "handler /fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=sessions)),
         ("http.handler.api_tickets", "HTTP", "handler /api/tickets", lambda: [ticket.to_dict() for ticket in store.list()]),
         ("http.fragment", "HTTP", "GET /fragment network", lambda: http("/fragment?process=delivery")),
+        ("http.root", "HTTP", "GET / network", lambda: http("/?process=delivery")),
+        ("http.drawer", "HTTP", "GET /drawer network", lambda: http(f"/drawer?process=delivery&ticket={ticket_id}")),
         ("http.api_tickets", "HTTP", "GET /api/tickets", lambda: http("/api/tickets")),
         ("http.api_sessions", "HTTP", "GET /api/sessions", lambda: http("/api/sessions")),
         ("http.api_session", "HTTP", "GET /api/sessions/{id}", lambda: http(f"/api/sessions/{session_id}")),
+        ("http.api_agent_tickets", "HTTP", "GET /api/agent/tickets", lambda: http("/api/agent/tickets?process=delivery&limit=10")),
+        ("http.api_agent_sessions", "HTTP", "GET /api/agent/sessions", lambda: http("/api/agent/sessions?limit=10")),
+        ("http.api_agent_ticket", "HTTP", "GET /api/agent/tickets/{id}", lambda: http(f"/api/agent/tickets/{ticket_id}")),
+        ("http.api_agent_session", "HTTP", "GET /api/agent/sessions/{id}", lambda: http(f"/api/agent/sessions/{session_id}")),
         ("http.error.missing_session", "HTTP", "GET missing session (4xx)", lambda: http_error("/api/sessions/SESSION-MISSING")),
         ("http.error.unknown_endpoint", "HTTP", "GET unknown endpoint (4xx)", lambda: http_error("/missing-endpoint")),
         ("http.transport.error", "HTTP", "loopback transport error", lambda: urllib.request.urlopen("http://127.0.0.1:1/", timeout=0.1)),
@@ -435,8 +468,6 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         for index, item in enumerate(cases):
             if index == len(cases) - 1:
                 pass
-    if storage != "sqlite":
-        cases = [item for item in cases if not item[0].startswith("http.") or item[0].startswith("http.handler.")]
     # Keep endpoint/transport cases in the registry even when binding a local
     # server is forbidden. Their samples then carry the limitation and error
     # accounting instead of silently shrinking the claimed case matrix.
@@ -492,14 +523,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="vibe-performance-") as temp:
         isolated = Path(temp) / "project"; shutil.copytree(source, isolated, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
         size = args.size or ("small" if args.profile == "smoke" else "medium")
-        dataset = load_dataset(args.dataset) if args.dataset else None
+        dataset_manifest_path = (args.dataset / "manifest.json") if args.dataset and args.dataset.is_dir() else args.dataset
+        dataset = load_dataset(dataset_manifest_path) if dataset_manifest_path else None
         if dataset:
             size = dataset.get("dimensions", {}).get("size", size)
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
         fixture_storage = dataset.get("storage_mode", args.storage) if dataset else args.storage
         if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
-        manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
+        if dataset:
+            # The manifest is provenance for an already approved, redacted
+            # dataset.  Never replace its contents with a generated fixture.
+            manifest = materialize_dataset(isolated, args.dataset, dataset)
+        else:
+            manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
         cases = _cases(isolated, storage=args.storage); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
@@ -517,21 +554,65 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 case_result["limitations"].append(cold["limitation"])
             case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
             result["cases"].append(case_result)
-        selected = next((item for item in cases if item[0] == "scheduler.select_candidates"), None)
-        if selected:
+        profile_ids = {
+            "TicketStore": "ticketstore.list.delivery",
+            "SessionStore": "sessionstore.list",
+            "BudgetLedger": "budgetledger.list_runs",
+            "Orchestrator": "orchestrator.scan_sort_cycle",
+            "Scheduler": "scheduler.select_candidates",
+            "UI": "ui.render_board.compact",
+            "HTTP": "http.api_tickets",
+        }
+        profile_cases = [next((item for item in cases if item[0] == case_id), None)
+                         for case_id in profile_ids.values()]
+        profile_cases = [item for item in profile_cases if item is not None]
+        if profile_cases:
             profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
-            profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
-            profiler = cProfile.Profile(); profiler.enable(); selected[3](); profiler.disable(); profiler.dump_stats(profile_path)
-            with text_path.open("w", encoding="utf-8") as handle:
-                pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
+            profile_artifacts = []
+            for selected in profile_cases:
+                profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
+                profiler = cProfile.Profile(); profiler.enable()
+                try:
+                    selected[3]()
+                except Exception:
+                    # The profile still proves which code path was exercised;
+                    # runtime limitations are already recorded in case samples.
+                    pass
+                finally:
+                    profiler.disable()
+                profiler.dump_stats(profile_path)
+                with text_path.open("w", encoding="utf-8") as handle:
+                    pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
+                profile_artifacts.extend([str(profile_path), str(text_path)])
             profile_manifest = profile_dir / "profile-manifest.json"
             profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-                "artifacts": [str(profile_path), str(text_path)]}, indent=2), encoding="utf-8")
-            result["profiling"]["artifacts"] = [str(profile_path), str(text_path), str(profile_manifest)]
+                "case_ids": [item[0] for item in profile_cases], "manifest_hash": manifest["hashes"]["manifest_sha256"],
+                "artifacts": profile_artifacts}, indent=2), encoding="utf-8")
+            result["profiling"]["artifacts"] = profile_artifacts + [str(profile_manifest)]
             for case in result["cases"]:
-                if case["case_id"] == selected[0]:
+                if case["case_id"] in {item[0] for item in profile_cases}:
                     case["profile_artifacts"] = result["profiling"]["artifacts"]
+
+        compare_storage = getattr(args, "compare_storage", False)
+        if compare_storage:
+            alternate = "yaml" if fixture_storage == "sqlite" else "sqlite"
+            comparison_project = Path(temp) / "comparison-project"
+            shutil.copytree(source, comparison_project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
+            if dataset:
+                alternate_manifest = materialize_dataset(comparison_project, args.dataset, dataset)
+            else:
+                alternate_manifest = generate_fixture(comparison_project, seed=fixture_seed, size=size, storage_mode=alternate)
+            alternate_cases = _cases(comparison_project, storage=alternate)
+            alternate_results = []
+            for item in alternate_cases:
+                measured = _run_case(*item, comparison_project, args.warmup, iterations, effective_cold,
+                                     storage_mode=alternate, manifest=alternate_manifest)
+                alternate_results.append({"case_id": measured["case_id"], "component": measured["component"],
+                                          "statistics": measured["statistics"], "sample_count": measured["sample_count"]})
+            result["storage_comparison"] = {"baseline_storage": fixture_storage, "alternate_storage": alternate,
+                                             "baseline_cases": [{"case_id": item["case_id"], "statistics": item["statistics"]} for item in result["cases"]],
+                                             "alternate_cases": alternate_results,
+                                             "conclusion": "сравнение измерено на одном dataset и одинаковых параметрах"}
         result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
                                "cold_available": cold["available"], "cold_strategy": cold["strategy"],
                                "cold_limitation": cold["limitation"]}
@@ -547,7 +628,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); parser.add_argument("--compare-storage", action="store_true", help="measure the same dataset in the alternate storage mode"); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

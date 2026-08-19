@@ -7,7 +7,7 @@ import json
 import pytest
 
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
-from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
+from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, materialize_dataset, validate_manifest
 
 
 def test_percentile_is_deterministic_and_interpolated():
@@ -55,6 +55,18 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
         load_dataset(path)
 
 
+def test_dataset_bundle_materializes_existing_vibe_tree(tmp_path):
+    source = tmp_path / "approved"
+    manifest = generate_fixture(source, seed=21, size="small", storage_mode="yaml")
+    (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    target = tmp_path / "isolated"
+    target.mkdir()
+    materialized = materialize_dataset(target, source / "manifest.json", load_dataset(source / "manifest.json"))
+    assert materialized["source_kind"] == "approved_dataset"
+    assert (target / ".vibe" / "tickets").exists()
+    assert len(list((target / ".vibe" / "tickets").rglob("*.yaml"))) == manifest["counts"]["tickets"]
+
+
 def test_result_validation_rejects_mutated_source_and_sample_mismatch():
     manifest = {"hashes": {"manifest_sha256": "m"}}
     result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": manifest,
@@ -95,6 +107,9 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
         "budgetledger.concurrency.denied_overallocation",
         "budgetledger.concurrency.lock_wait",
         "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
+        "orchestrator.scan_sort_cycle", "ui.filter.flat", "ui.filter.search", "ui.filter.status", "ui.filter.active",
+        "sessionstore.get_missing.error", "sessionstore.load_invalid_persisted.error",
+        "sessionstore.validation.multiple_open_overlap.error", "http.api_agent_tickets", "http.api_agent_sessions",
     }
     assert required <= ids
     assert {item[3] for item in cases}
