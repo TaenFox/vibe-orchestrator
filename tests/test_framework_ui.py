@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from vibe_orchestrator.control import DeliverySessionStore
-from vibe_orchestrator.framework_ui import _board_html, _session_detail_html, _sessions_html, _ticket_html, create_app
+from vibe_orchestrator.framework_ui import _board_html, _resume_rework_if_requested, _session_detail_html, _sessions_html, _ticket_html, create_app
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.config import load_all_workflows
 
@@ -45,6 +45,22 @@ def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path)
     assert board.count("<span class=attention-badge") == 1
     assert "Agent rework" in board
     assert "Stopped rework" in board
+
+
+def test_manual_rework_resume_clears_only_cycle_block():
+    ticket = type("Ticket", (), {"type": "rework", "blocked_reason": "rework_cycle_stopped"})()
+
+    _resume_rework_if_requested(ticket, "selected_for_session")
+
+    assert ticket.blocked_reason is None
+
+
+def test_manual_rework_resume_does_not_clear_other_block():
+    ticket = type("Ticket", (), {"type": "rework", "blocked_reason": "budget_exceeded_tokens"})()
+
+    _resume_rework_if_requested(ticket, "selected_for_session")
+
+    assert ticket.blocked_reason == "budget_exceeded_tokens"
 
 
 def test_framework_ui_renders_session_list_and_membership(tmp_path: Path):

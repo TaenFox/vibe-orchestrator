@@ -44,6 +44,16 @@ def _parse_body(request_body: bytes) -> dict[str, str]:
     return {key: items[-1] for key, items in values.items()}
 
 
+def _resume_rework_if_requested(ticket: Any, target: str) -> None:
+    """Treat an explicit move to the session queue as a rework override."""
+    if (
+        target == "selected_for_session"
+        and getattr(ticket, "type", None) == "rework"
+        and getattr(ticket, "blocked_reason", None) == "rework_cycle_stopped"
+    ):
+        ticket.blocked_reason = None
+
+
 def _layout(content: str, process: str = "discovery") -> str:
     nav = "".join(f'<a class="{"active" if item == process else ""}" href="/?process={item}">{item}</a>'
                    for item in ("discovery", "delivery", "process_management"))
@@ -262,6 +272,7 @@ def create_app(project: str | Path) -> Starlette:
             target = _parse_body(await request.body()).get("target")
             if target != next_status_for_ticket(store, ticket):
                 return Response("Transition unavailable", status_code=400)
+            _resume_rework_if_requested(ticket, target)
             ticket.status = target
             store.save(ticket)
         except (KeyError, ValueError) as exc:
