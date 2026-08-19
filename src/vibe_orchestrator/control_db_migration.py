@@ -23,6 +23,7 @@ class MigrationReport:
     runs: int
     events: int
     prompts: int
+    applied_prompts: int
     results: int
     run_events: int
     telemetry: int
@@ -92,6 +93,12 @@ CREATE TABLE IF NOT EXISTS prompt_contracts (
     source_path TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_prompt_contracts_version ON prompt_contracts(prompt_version);
+CREATE TABLE IF NOT EXISTS run_prompts (
+    run_id TEXT PRIMARY KEY,
+    prompt_text TEXT NOT NULL,
+    prompt_path TEXT,
+    prompt_hash TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS run_results (
     run_id TEXT PRIMARY KEY,
     outcome TEXT,
@@ -173,6 +180,20 @@ def ensure_control_schema(database: Path) -> None:
         run_columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
         if "prompt_hash" not in run_columns:
             db.execute("ALTER TABLE runs ADD COLUMN prompt_hash TEXT")
+        backfilled = db.execute("SELECT value FROM migration_meta WHERE key = 'run_prompts_backfilled'").fetchone()
+        if backfilled is None:
+            for run_id, manifest_json in db.execute("SELECT run_id, manifest_json FROM runs"):
+                try:
+                    manifest = json.loads(manifest_json)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                prompt = manifest.get("prompt") if isinstance(manifest, dict) else None
+                if isinstance(prompt, str):
+                    db.execute(
+                        "INSERT OR IGNORE INTO run_prompts(run_id,prompt_text,prompt_path,prompt_hash) VALUES (?,?,?,?)",
+                        (run_id, prompt, manifest.get("prompt_path"), _text_hash(prompt)),
+                    )
+            db.execute("INSERT INTO migration_meta(key,value) VALUES ('run_prompts_backfilled','1')")
         db.execute("INSERT OR REPLACE INTO migration_meta(key,value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
         db.commit()
 
@@ -214,6 +235,7 @@ def migrate_control_plane(project: Path, database: Path | None = None, *, dry_ru
 
     run_rows = []
     prompt_rows: dict[str, tuple[Any, ...]] = {}
+    applied_prompt_rows = []
     result_rows = []
     run_event_rows = []
     telemetry_rows = []
@@ -241,6 +263,9 @@ def migrate_control_plane(project: Path, database: Path | None = None, *, dry_ru
                          manifest.get("attempt_kind"), None, None, None,
                          str(path.relative_to(project)), _json(manifest), prompt_hash))
         run_id = manifest["run_id"]
+        applied_prompt = manifest.get("prompt")
+        if isinstance(applied_prompt, str):
+            applied_prompt_rows.append((run_id, applied_prompt, manifest.get("prompt_path"), _text_hash(applied_prompt)))
         result_path = path.parent / "result.json"
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -271,7 +296,7 @@ def migrate_control_plane(project: Path, database: Path | None = None, *, dry_ru
                                    event.get("timestamp"), _json(event), str(events_path.relative_to(project))))
 
     report = MigrationReport(database, len(ticket_rows), len(session_rows), len(run_rows), len(events), len(prompt_rows),
-                             len(result_rows), len(run_event_rows), len(telemetry_rows), dry_run)
+                             len(applied_prompt_rows), len(result_rows), len(run_event_rows), len(telemetry_rows), dry_run)
     if dry_run:
         return report
 
@@ -284,6 +309,7 @@ def migrate_control_plane(project: Path, database: Path | None = None, *, dry_ru
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM run_events")
         db.execute("DELETE FROM run_results")
+        db.execute("DELETE FROM run_prompts")
         db.execute("DELETE FROM token_usage")
         db.execute("DELETE FROM runs")
         db.execute("DELETE FROM prompt_contracts")
@@ -293,6 +319,7 @@ def migrate_control_plane(project: Path, database: Path | None = None, *, dry_ru
         db.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)", session_rows)
         db.executemany("INSERT INTO session_members VALUES (?,?,?,?)", member_rows)
         db.executemany("INSERT INTO prompt_contracts VALUES (?,?,?,?)", prompt_rows.values())
+        db.executemany("INSERT INTO run_prompts VALUES (?,?,?,?)", applied_prompt_rows)
         db.executemany("INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?)", run_rows)
         db.executemany("INSERT INTO run_results VALUES (?,?,?,?,?,?,?)", result_rows)
         db.executemany("INSERT INTO run_events VALUES (?,?,?,?,?,?)", run_event_rows)

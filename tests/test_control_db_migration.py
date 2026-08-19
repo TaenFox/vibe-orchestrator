@@ -14,7 +14,7 @@ def test_migration_imports_control_plane_and_is_repeatable(tmp_path: Path):
     session = session_store.create([ticket.id], title="Imported session")
     run_dir = tmp_path / ".vibe" / "runs" / "run-1"
     run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(json.dumps({"run_id": "run-1", "ticket_id": ticket.id, "stage": "system_analysis"}), encoding="utf-8")
+    (run_dir / "run.json").write_text(json.dumps({"run_id": "run-1", "ticket_id": ticket.id, "stage": "system_analysis", "prompt": "Rendered prompt", "prompt_path": "discovery/system_analysis.md"}), encoding="utf-8")
     (run_dir / "prompt.contract.txt").write_text("Applied prompt", encoding="utf-8")
     (run_dir / "result.json").write_text(json.dumps({
         "outcome": "completed",
@@ -32,6 +32,7 @@ def test_migration_imports_control_plane_and_is_repeatable(tmp_path: Path):
     assert first.sessions == 1
     assert first.runs == 1
     assert first.prompts == 1
+    assert first.applied_prompts == 1
     assert first.results == 1
     assert first.run_events == 2
     assert first.telemetry == 1
@@ -43,6 +44,7 @@ def test_migration_imports_control_plane_and_is_repeatable(tmp_path: Path):
         assert db.execute("select count(*) from session_members").fetchone()[0] == 1
         assert db.execute("select count(*) from runs").fetchone()[0] == 1
         assert db.execute("select prompt_text from prompt_contracts").fetchone()[0] == "Applied prompt"
+        assert db.execute("select prompt_text from run_prompts").fetchone()[0] == "Rendered prompt"
         assert db.execute("select prompt_hash from runs").fetchone()[0]
         assert db.execute("select summary from run_results").fetchone()[0] == "Imported result"
         assert db.execute("select count(*) from run_events").fetchone()[0] == 2

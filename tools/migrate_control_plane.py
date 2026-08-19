@@ -17,7 +17,8 @@ def main() -> int:
     mode = "проверка" if report.dry_run else "миграция"
     print(f"{mode}: database={report.database}")
     print(f"tickets={report.tickets} sessions={report.sessions} runs={report.runs} prompts={report.prompts} "
-          f"results={report.results} run_events={report.run_events} telemetry={report.telemetry} events={report.events}")
+          f"applied_prompts={report.applied_prompts} results={report.results} run_events={report.run_events} "
+          f"telemetry={report.telemetry} events={report.events}")
     return 0
 
 

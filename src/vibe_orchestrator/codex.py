@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass
 from hashlib import sha256
@@ -16,6 +17,7 @@ from . import __version__
 from .config import PromptSpec, Stage, load_prompt_spec, package_root
 from .tickets import Ticket, TicketStore
 from .token_usage import parse_codex_usage, unknown_token_usage
+from .run_store import RunStore
 
 
 @dataclass(frozen=True)
@@ -104,17 +106,31 @@ class CodexRunner:
     async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None, on_process_started: Callable[[str], None] | None = None) -> AgentResult:
         contract = contract or self.prepare_execution_contract(stage, run_id or ticket.active_run)
         run_id = contract.run_id
+        database_mode = self.store.database_enabled
         run_dir = self.store.run_path(run_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        output_path = run_dir / "result.json"
-        events_path = run_dir / "events.jsonl"
-        manifest_path = run_dir / "run.json"
-        prompt_path = run_dir / "prompt.txt"
-        prompt_contract_path = run_dir / "prompt.contract.txt"
+        temporary_output: Path | None = None
+        if database_mode:
+            fd, temporary_name = tempfile.mkstemp(prefix=f"vibe-result-{run_id}-", suffix=".json")
+            os.close(fd)
+            temporary_output = Path(temporary_name)
+            output_path = temporary_output
+            events_path = None
+            manifest_path = None
+            prompt_path = None
+            prompt_contract_path = None
+        else:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            output_path = run_dir / "result.json"
+            events_path = run_dir / "events.jsonl"
+            manifest_path = run_dir / "run.json"
+            prompt_path = run_dir / "prompt.txt"
+            prompt_contract_path = run_dir / "prompt.contract.txt"
         workspace = workspace or self.store.project
         prompt = self._build_prompt(ticket, stage, contract, workspace=workspace)
-        prompt_path.write_text(prompt, encoding="utf-8")
-        prompt_contract_path.write_text(contract.prompt_contract, encoding="utf-8")
+        if not database_mode:
+            assert prompt_path is not None and prompt_contract_path is not None
+            prompt_path.write_text(prompt, encoding="utf-8")
+            prompt_contract_path.write_text(contract.prompt_contract, encoding="utf-8")
         manifest = {
             "run_id": run_id,
             "ticket_id": ticket.id,
@@ -138,12 +154,18 @@ class CodexRunner:
         }
         cmd = self._build_exec_args(output_path, contract=contract)
         manifest["command"] = cmd
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if database_mode:
+            RunStore(self.store.database).start(manifest, prompt_contract=contract.prompt_contract, prompt_text=prompt)
+        else:
+            assert manifest_path is not None
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         if on_process_started:
             on_process_started(run_id)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
-        events_path.write_bytes(stdout or b"")
+        if not database_mode:
+            assert events_path is not None
+            events_path.write_bytes(stdout or b"")
         token_usage = parse_codex_usage(
             stdout or b"",
             expected_run_id=contract.run_id,
@@ -151,12 +173,24 @@ class CodexRunner:
             reasoning_effort=contract.reasoning_effort,
         )
         manifest["token_usage"] = token_usage
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if not database_mode:
+            assert manifest_path is not None
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if process.returncode != 0:
-            raise RuntimeError(f"Codex exited with {process.returncode}; see {events_path}")
+            if database_mode:
+                RunStore(self.store.database).finish(run_id, manifest, stdout or b"", result=None, token_usage=token_usage, state="failed")
+            location = f"run {run_id} in SQLite" if database_mode else f"{events_path}"
+            if temporary_output is not None:
+                temporary_output.unlink(missing_ok=True)
+            raise RuntimeError(f"Codex exited with {process.returncode}; see {location}")
         data = json.loads(output_path.read_text(encoding="utf-8"))
         data["token_usage"] = token_usage
-        output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if database_mode:
+            RunStore(self.store.database).finish(run_id, manifest, stdout or b"", result=data, token_usage=token_usage, state="completed")
+            assert temporary_output is not None
+            temporary_output.unlink(missing_ok=True)
+        else:
+            output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return AgentResult(outcome=data["outcome"], summary=data["summary"], details=data.get("details", ""), token_usage=token_usage)
 
     def _build_prompt(

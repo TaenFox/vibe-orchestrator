@@ -79,13 +79,17 @@ class ControlPlaneReader:
         return self._query("SELECT * FROM run_events WHERE run_id = ? ORDER BY event_index LIMIT ? OFFSET ?",
                            (run_id, limit, offset))
 
+    def get_prompt(self, run_id: str) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM run_prompts WHERE run_id = ?", (run_id,))
+        return rows[0] if rows else None
+
     def get_token_usage(self, run_id: str | None = None) -> list[dict[str, Any]]:
         if run_id is None:
             return self._query("SELECT * FROM token_usage ORDER BY run_id")
         return self._query("SELECT * FROM token_usage WHERE run_id = ?", (run_id,))
 
     def counts(self) -> dict[str, int]:
-        tables = ("tickets", "sessions", "runs", "prompt_contracts", "run_results", "run_events", "token_usage", "events")
+        tables = ("tickets", "sessions", "runs", "prompt_contracts", "run_prompts", "run_results", "run_events", "token_usage", "events")
         with self._connect() as db:
             return {table: db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in tables}
 
