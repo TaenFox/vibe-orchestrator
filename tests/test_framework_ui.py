@@ -29,7 +29,7 @@ def test_framework_ui_builds_board_and_ticket_detail(tmp_path: Path):
 def test_framework_ui_exposes_expected_routes(tmp_path: Path):
     paths = {route.path for route in create_app(tmp_path).routes}
 
-    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/workers"}
+    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/ticket/{ticket_id}/recover-stale-run", "/workers"}
 
 
 def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path):
