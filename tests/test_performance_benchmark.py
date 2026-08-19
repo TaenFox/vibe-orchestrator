@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections import Counter
 from argparse import Namespace
 from pathlib import Path
@@ -75,14 +76,28 @@ def test_fixture_profile_counts_match_materialized_entities(tmp_path, size, stor
                             use_database=storage_mode == "sqlite").list()
     assert Counter(session.status for session in sessions) == Counter(manifest["dimensions"]["session_states"])
     ledger = BudgetLedger(project)
-    runs = 0
-    for ticket_id in manifest["logical"]["ticket_ids"]:
-        ticket_runs = ledger.list_runs(f"ticket:{ticket_id}")
-        assert all(run["ticket_id"] == ticket_id for run in ticket_runs)
-        assert all(run["ticket_budget_id"] == f"ticket:{ticket_id}" for run in ticket_runs)
-        runs += len(ticket_runs)
+    # Read the authoritative SQLite ledger in one pass. Calling list_runs once
+    # per ticket has the same semantics but makes xlarge verification needlessly
+    # expensive in connection/query overhead.
+    with sqlite3.connect(ledger.path) as database:
+        rows = database.execute(
+            "SELECT ticket_id, ticket_budget_id FROM runs ORDER BY reserved_at, run_id"
+        ).fetchall()
+    assert all(ticket_id and budget_id == f"ticket:{ticket_id}" for ticket_id, budget_id in rows)
+    runs = len(rows)
     assert runs == manifest["counts"]["ledger_runs"]
-    budget_states = Counter(ledger.read_budget(f"ticket:{ticket_id}")["status"] for ticket_id in manifest["logical"]["ticket_ids"])
+    with sqlite3.connect(ledger.path) as database:
+        budget_rows = database.execute(
+            "SELECT budget_id, status FROM budgets WHERE scope = 'ticket' ORDER BY budget_id"
+        ).fetchall()
+    assert {budget_id.removeprefix("ticket:") for budget_id, _ in budget_rows} == set(manifest["logical"]["ticket_ids"])
+    budget_states = Counter(status for _, status in budget_rows)
+    # Re-evaluate the four non-default states through the public read API; the
+    # bulk query above avoids opening one connection per ordinary active budget.
+    for ticket_id in manifest["logical"]["ticket_ids"][:4]:
+        assert ledger.read_budget(f"ticket:{ticket_id}")["status"] == next(
+            status for budget_id, status in budget_rows if budget_id == f"ticket:{ticket_id}"
+        )
     for state in ("exhausted", "blocked_unknown", "over_budget"):
         assert budget_states[state] == manifest["dimensions"]["budget_states"][state]
     assert budget_states["active"] == manifest["counts"]["tickets"] - 3

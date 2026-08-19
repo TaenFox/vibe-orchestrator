@@ -45,8 +45,10 @@ identity входного dataset; при mismatch выбрасывается `V
 `output.write_text()`, а fallback к CLI/default synthetic dataset запрещён.
 
 Baseline без `--dataset` сохраняет генерацию по CLI seed/profile/storage. Read-back
-проверки fixture перечитывают реальные tickets, sessions и ledger runs для каждого
-профиля small/medium/large/xlarge, а не только manifest counts.
+проверки fixture перечитывают реальные tickets, sessions и все строки authoritative
+SQLite ledger для каждого профиля small/medium/large/xlarge и обоих storage modes,
+а не только manifest counts; ownership каждой ledger row сверяется с её ticket
+budget.
 
 ## Ограничения
 

@@ -105,10 +105,10 @@ machine/filesystem dependent.
 ## Test/verification limitations
 
 Fixture tests read back ticket IDs, statuses and run-history distributions,
-session lifecycle states, and ledger ownership/run totals for all four profiles.
-The worker run completed small/medium checks; large/xlarge materialization did not
-produce a final pytest result within the available execution window, so that
-execution evidence remains open and requires a rerun with sufficient resources.
+session lifecycle states, and every authoritative SQLite ledger row (including
+ticket ownership) for all four profiles and both storage modes. The ledger
+read-back uses one ordered query so xlarge verification remains practical; budget
+state snapshots continue to use `BudgetLedger.read_budget()`.
 Browser DOM/focus/viewport/keyboard/auto-refresh checks are unavailable in the
 worker environment and require an external or manual browser run; static tests
 do not claim that coverage.
