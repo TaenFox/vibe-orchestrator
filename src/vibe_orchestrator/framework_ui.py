@@ -17,6 +17,7 @@ from starlette.routing import Mount, Route
 from .config import load_all_workflows
 from .control_db import ControlPlaneReader
 from .control import DeliverySessionStore, SessionError, WorkerControl
+from .orchestrator import resume_rework
 from .tickets import TicketStore, next_status_for_ticket
 
 LOG = logging.getLogger(__name__)
@@ -135,6 +136,8 @@ def _ticket_html(store: TicketStore, workflows: dict, ticket_id: str, reader: Co
     data = data or _ticket_data(ticket)
     next_status = next_status_for_ticket(store, ticket)
     action = f'<form method=post action="/ticket/{_escape(ticket.id)}/move"><input type=hidden name=target value="{_escape(next_status)}"><button>Перевести в {_escape(next_status)}</button></form>' if next_status else ""
+    if ticket.type == "rework" and ticket.blocked_reason == "rework_cycle_stopped":
+        action += f'<form method=post action="/ticket/{_escape(ticket.id)}/resume-rework"><button>Разрешить ещё один проход реворка</button></form>'
     history = "".join(f'<li><b>{_escape(item.get("event", "event"))}</b> · {_escape(item.get("stage", ""))} · {_escape(item.get("timestamp", ""))}<br>{_escape(item.get("summary", ""))}</li>' for item in reversed(data.get("run_history", [])))
     run_cards = []
     if reader:
@@ -279,6 +282,13 @@ def create_app(project: str | Path) -> Starlette:
             return Response(str(exc), status_code=400)
         return RedirectResponse(f"/?process={ticket.process}", status_code=303)
 
+    async def resume_rework_ticket(request):
+        try:
+            ticket = resume_rework(store, request.path_params["ticket_id"])
+        except (KeyError, ValueError) as exc:
+            return Response(str(exc), status_code=400)
+        return RedirectResponse(f"/ticket/{urllib.parse.quote(ticket.id)}", status_code=303)
+
     async def reorder_tickets(request):
         try:
             payload = await request.json()
@@ -316,7 +326,7 @@ def create_app(project: str | Path) -> Starlette:
         Route("/", board), Route("/healthz", health), Route("/ticket/{ticket_id}", ticket),
         Route("/new", new_ticket), Route("/sessions", sessions_page, methods=["GET", "POST"]), Route("/sessions/new", new_session), Route("/sessions/{session_id}", session_detail), Route("/sessions/{session_id}/{action}", session_action, methods=["POST"]),
         Route("/tickets/reorder", reorder_tickets, methods=["POST"]), Route("/tickets", create_ticket, methods=["POST"]),
-        Route("/ticket/{ticket_id}/move", move_ticket, methods=["POST"]),
+        Route("/ticket/{ticket_id}/move", move_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/resume-rework", resume_rework_ticket, methods=["POST"]),
         Route("/workers", workers_page, methods=["GET", "POST"]),
     ])
 
