@@ -13,7 +13,7 @@ from .config import load_all_workflows
 from .budget_ledger import BudgetLedger
 from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, resume_rework
 from .tickets import TicketStore
 from .framework_ui import serve, start_server
 
@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Запустить оркестратор"); run.add_argument("project", type=project_path); run.add_argument("--poll", type=float, default=2.0); run.add_argument("--max-agents", type=non_negative_int); run.add_argument("--ui", action="store_true", help="Запустить UI вместе с оркестратором"); run.add_argument("--ui-host", default="127.0.0.1"); run.add_argument("--ui-port", type=int, default=8765); run.add_argument("--no-browser", action="store_true")
     workers = sub.add_parser("workers", help="Показать или изменить лимит воркеров"); workers.add_argument("project", type=project_path); workers.add_argument("count", nargs="?", type=non_negative_int)
     release_retry = sub.add_parser("release-retry", help="Повторить интеграцию дерева тикета"); release_retry.add_argument("project", type=project_path); release_retry.add_argument("ticket")
+    resume = sub.add_parser("resume-rework", help="Разрешить дополнительный проход реворка"); resume.add_argument("project", type=project_path); resume.add_argument("ticket")
     ui = sub.add_parser("ui", help="Запустить минимальный локальный Kanban UI"); ui.add_argument("project", type=project_path); ui.add_argument("--host", default="127.0.0.1"); ui.add_argument("--port", type=int, default=8765); ui.add_argument("--no-browser", action="store_true")
     session = sub.add_parser("session", aliases=["sessions"], help="Управление Delivery-сессиями")
     session_sub = session.add_subparsers(dest="session_command", required=True)
@@ -130,6 +131,13 @@ def main(argv: Sequence[str] | None = None, *, authorizer: Callable[..., Any] | 
         if not manager.reset_integration(args.ticket): raise SystemExit("Для тикета нет ожидающего merge-конфликта")
         ticket = store.get(args.ticket); ticket.last_outcome = None; ticket.last_summary = None; store.save(ticket)
         print(f"Повтор интеграции разрешен: {args.ticket}"); return
+    if args.command == "resume-rework":
+        store = TicketStore(args.project); store.init()
+        try:
+            ticket = resume_rework(store, args.ticket)
+        except (KeyError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Дополнительный проход реворка разрешен: {ticket.id}"); return
     if args.command == "run":
         server = None
         try:

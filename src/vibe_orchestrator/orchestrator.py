@@ -26,6 +26,29 @@ from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 log = logging.getLogger("vibe")
 
 
+def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
+    """Authorize one explicit corrective pass after the cycle guard fired."""
+    ticket = store.get(ticket_id)
+    if ticket.process != "delivery" or ticket.type != "rework":
+        raise ValueError("Возобновить можно только Delivery rework")
+    if ticket.blocked_reason != "rework_cycle_stopped":
+        raise ValueError("Тикет не ожидает ручного разрешения реворка")
+    ticket.status = "ready_for_development"
+    ticket.blocked_reason = None
+    ticket.last_outcome = "manual_rework_resumed"
+    ticket.last_summary = "Ручное разрешение: запущен дополнительный проход реворка"
+    store.record_run_event(
+        ticket,
+        run_id=None,
+        stage_id="ready_for_development",
+        event="manual_rework_resumed",
+        reason="rework_cycle_stopped",
+        to_status=ticket.status,
+    )
+    store.save(ticket)
+    return ticket
+
+
 class Orchestrator:
     def __init__(
         self,
