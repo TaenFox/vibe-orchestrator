@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from vibe_orchestrator.framework_ui import _board_html, _ticket_html, create_app
+from vibe_orchestrator.control import DeliverySessionStore
+from vibe_orchestrator.framework_ui import _board_html, _session_detail_html, _sessions_html, _ticket_html, create_app
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.config import load_all_workflows
 
@@ -26,7 +27,7 @@ def test_framework_ui_builds_board_and_ticket_detail(tmp_path: Path):
 def test_framework_ui_exposes_expected_routes(tmp_path: Path):
     paths = {route.path for route in create_app(tmp_path).routes}
 
-    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/workers"}
+    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/workers"}
 
 
 def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path):
@@ -44,3 +45,19 @@ def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path)
     assert board.count("<span class=attention-badge") == 1
     assert "Agent rework" in board
     assert "Stopped rework" in board
+
+
+def test_framework_ui_renders_session_list_and_membership(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Session ticket")
+    sessions = DeliverySessionStore(tmp_path)
+    session = sessions.create("Release session")
+    sessions.add(session.id, ticket.id, store)
+
+    listing = _sessions_html(sessions)
+    detail = _session_detail_html(sessions, store, session.id)
+
+    assert "Release session" in listing
+    assert ticket.id in detail
+    assert "Запустить сессию" in detail
