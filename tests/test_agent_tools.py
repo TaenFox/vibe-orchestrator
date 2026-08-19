@@ -110,6 +110,26 @@ def test_agent_write_contract_validates_lifecycle_and_audits(tmp_path: Path):
     assert len(TicketStore(tmp_path).get(created["id"]).audit_events) == 2
 
 
+def test_delivery_child_can_be_created_under_rework(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    parent = store.create("delivery", "task", "Parent", status="review")
+    rework = store.create("delivery", "rework", "Rework", parent=parent.id, status="selected_for_session")
+
+    child = TicketWriteService(tmp_path).create_ticket(
+        {
+            "process": "delivery",
+            "type": "task",
+            "title": "Rework subtask",
+            "parent": rework.id,
+            "origin": "codex:test",
+        },
+        actor="codex:test",
+    )
+
+    assert child.parent == rework.id
+    assert child.status == "todo"
+
+
 def test_agent_create_commits_run_history_and_audit_in_one_save(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = TicketStore(tmp_path)
     store.init()
