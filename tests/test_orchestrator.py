@@ -8,10 +8,10 @@ import pytest
 
 from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
-from vibe_orchestrator.orchestrator import Orchestrator
+from vibe_orchestrator.orchestrator import Orchestrator, resume_rework
 from vibe_orchestrator.scheduler import Candidate, select_candidates
 from vibe_orchestrator.technical_debt import TechnicalDebtError, technical_debt_basis
-from vibe_orchestrator.tickets import TicketWriteService, next_status_for_ticket, reset_failed_retry
+from vibe_orchestrator.tickets import TicketStore, TicketWriteService, next_status_for_ticket, reset_failed_retry
 
 
 CONFIRMED_USAGE = {
@@ -432,6 +432,21 @@ def test_rework_needs_rework_stops_the_automatic_cycle(tmp_path: Path):
     assert updated.blocked_reason == "rework_cycle_stopped"
     assert orchestrator.store.children_of(ticket.id, process="delivery") == []
     assert select_candidates(workflow, [updated], set()) == []
+
+
+def test_manual_resume_rework_returns_to_development_queue(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "rework", "Resume rework", status="selected_for_session", rework_stage="review")
+    ticket.blocked_reason = "rework_cycle_stopped"
+    store.save(ticket)
+
+    resumed = resume_rework(store, ticket.id)
+
+    assert resumed.status == "ready_for_development"
+    assert resumed.blocked_reason is None
+    assert resumed.last_outcome == "manual_rework_resumed"
+    assert resumed.run_history[-1]["event"] == "manual_rework_resumed"
 
 
 @pytest.mark.parametrize(

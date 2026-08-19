@@ -1,35 +1,64 @@
-# Performance audit
+# Аудит производительности control plane
 
-## 1. Назначение и область аудита
+## Назначение и область аудита
 
-Документ фиксирует baseline локального control plane и процедуру повторного измерения UI/API, scheduler, TicketStore, SessionStore и BudgetLedger. Production behavior и форматы хранения не меняются. Browser-level DOM, focus, viewport, keyboard и фактическая задержка auto-refresh требуют внешнего/manual прогона.
+Аудит измеряет production control plane без изменения его семантики: TicketStore и
+SessionStore, scheduler, BudgetLedger, UI rendering и HTTP endpoints. Фикстуры
+синтетические и анонимные; benchmark запускается на изолированной копии проекта,
+а `source_checksum_before/after` проверяет отсутствие записи в исходное дерево.
 
-## 2. Functional baseline: UI/API, scheduler, persistence, budget lifecycle
+## Functional baseline: UI/API, scheduler, persistence, budget lifecycle
 
-UI предоставляет `/`, `/fragment`, `/api/tickets`, `/api/sessions` и `/api/sessions/{id}`; board получает tickets workflow, применяет mode/search/status/active фильтры и рендерит HTML. Клиент запрашивает `/fragment` с интервалом 8 секунд. Scheduler выполняет полный scan, отбрасывает running/blocked/session/WIP/retry/dependency ограничения и сортирует кандидатов.
+Baseline включает `list/get/load_path/children_of` TicketStore; чтение, membership,
+validation, overlap и lifecycle SessionStore; чтение, reservation lifecycle,
+reconcile и error paths BudgetLedger; scheduler selection; UI board/fragment и
+HTTP success/error endpoints. SQLite является runtime control plane. Режим `yaml`
+использует `use_database=False` для tickets/sessions и сохраняет legacy YAML files;
+ledger остаётся SQLite, поскольку это его authoritative persistence.
+Варианты профиля материализуют small/medium/large/xlarge ticket sets и связанные
+профильные counts сессий и ledger runs; manifest хранит фактические counts, а не
+только поддерживаемые labels. Reservation/concurrency cases используют отдельные
+synthetic budget IDs и удаляются после sample.
 
-TicketStore и SessionStore в runtime используют `.vibe/control.sqlite3`; `use_database=False` оставлен для legacy YAML/migration comparison. TicketStore поддерживает get/list/load_path/children_of/save. SessionStore поддерживает list/get/load_path/save/create/activate/complete/cancel и membership validation. BudgetLedger хранит `.vibe/budgets/ledger.sqlite3`, а lifecycle reservation — `reserved_pending_start → started → finalized|released|unknown`; reconcile обрабатывает pending/unknown состояния.
+## States and errors
 
-## 3. States and errors
+Фикстура материализует ticket statuses, draft/active/completed/cancelled sessions и
+active/exhausted/blocked_unknown/over_budget budgets. В error cases проверяются
+missing entities, malformed dataset, membership/validation failures, budget denial и
+HTTP 4xx. В result ошибки ссылаются на конкретный `sample_index`.
 
-Измерительный fixture включает ready/todo, selected, active agent statuses, blocked и done, parents/dependencies, retry metadata, run_history 0/1/10, draft/active sessions и ledger runs. Missing ticket/session и исключения сохраняются в `errors`, malformed legacy files и lock/busy failures должны быть представлены отдельными cases при legacy/concurrency прогоне; unknown usage не трактуется как zero. Ошибки HTTP должны измеряться отдельными endpoint cases.
+## Методика
 
-## 4. Методика
+CLI: `python3 benchmarks/performance/run_benchmark.py --project . --profile smoke
+--size small --storage sqlite --warmup 5 --iterations 30 --seed 35527
+--output /tmp/performance.json`. Доступны размеры `small=100`, `medium=1000`,
+`large=5000`, `xlarge=10000`, а также `--dataset manifest.json`. Seed влияет на
+порядок, статусы, parent/blocked связи и run histories. Warmup не попадает в raw
+samples и агрегаты. `--cold` сообщает capability; если OS cache eviction недоступен,
+samples помечены descriptive-only и не используются для cold conclusion.
 
-Команда: `python benchmarks/performance/run_benchmark.py --project . --profile smoke --warmup 5 --iterations 30 --seed 35527 --output results/DEL-355F27-smoke.json`; full использует medium fixture. Harness копирует project во временное isolated дерево, передаёт стабильный seed и пишет только output. `perf_counter_ns` даёт wall milliseconds, `process_time_ns` — CPU milliseconds. Warmup исключён; cold filesystem cases используют 100 samples. Manifest содержит counts, dimensions, redaction policy и SHA-256. Raw sample schema: `sample_index`, `wall_ms`, `cpu_ms`, `fs_ops`, `fs_bytes`, `sqlite_queries`, `sqlite_lock_ms`, `error`. Aggregates: min/p50/p95/p99/max/mean/stdev.
+Каждый case содержит стабильный `case_id`, component/operation/storage/dimensions,
+raw timings, expected outcome, errors, sample count и aggregates. Mutation cases
+используют заранее подготовленные IDs и idempotent lifecycle paths; исходный проект
+не изменяется.
 
-## 5. Baseline results и hotspots
+## Baseline results и hotspots
 
-Числовой baseline генерируется командой и не подменяется неподтверждёнными цифрами в документации. Каждый result связан с `case_id`, `run_id`, git commit, source checksums и manifest hash. CPU evidence: `python benchmarks/performance/profile.py --project <isolated-copy> --scenario scheduler.select_candidates --output results/profile`; артефакты `.pstats` и text report указываются в `profiling.artifacts` при внешнем запуске.
+Numerical baseline создаётся только командой CLI и сохраняется в указанном JSON;
+репозиторий не подменяет machine-specific timings. Выбранные profiling cases
+создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
+manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
 
-## 6. Filesystem/SQLite attribution
+## Filesystem/SQLite attribution
 
-Результат отдельно фиксирует CPU/wall и instrumented file-count/byte deltas; это не syscall trace. SQLite query/lock counters требуют доступного wrapper/profiler и иначе помечаются `null` с limitation. Runtime baseline SQLite-first; legacy YAML должен запускаться отдельным dataset/storage mode. Без второй согласованной filesystem машины comparison остаётся limitation, а не выводом о переносимой производительности.
+`fs_ops`/`fs_bytes` — наблюдаемые deltas файлового дерева, не syscall trace. Для
+SQLite instrumented benchmark connections собирают query/transaction/error counts,
+lock wait time и `EXPLAIN QUERY PLAN`; для non-SQLite cases поля имеют `null` и
+причину недоступности, а не zero. HTTP handler invocation и urllib network round
+trip представлены отдельными cases.
 
-## 7. Optimization criteria
+## Ограничения и открытые решения
 
-Рабочие SLO и thresholds требуют утверждения владельца. Предлагаемый gate: улучшение p95 не менее 20% считается существенным, regression p95 от 5% — поводом для расследования. Сравниваются одинаковые seed, manifest, case table, environment и cold/warm mode; повторяемость проверяется по counts/hashes и доверительному разбросу raw samples.
-
-## 8. Ограничения и открытые решения
-
-Текущий committed harness использует synthetic fallback: production-representative anonymized dataset, обязательные latency SLO, thresholds и разрешённые OS tools ещё не утверждены. Filesystem counters неполны без strace/dtruss/equivalent; browser-level проверки недоступны в worker-контексте. Запрещено сохранять titles/descriptions/prompts/raw sensitive payloads.
+Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
+cache eviction и alternate filesystems capability-dependent; при недоступности
+результат содержит причину и не формулирует portable comparison conclusion.
