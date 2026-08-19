@@ -43,10 +43,10 @@ from vibe_orchestrator.ui import render_board, render_board_fragment
 from vibe_orchestrator.ui import start_server
 from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 try:
-    from .workloads import generate_fixture, load_dataset
+    from .workloads import assert_manifest_identity, generate_fixture, load_dataset
 except ImportError:  # direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from benchmarks.performance.workloads import generate_fixture, load_dataset
+    from benchmarks.performance.workloads import assert_manifest_identity, generate_fixture, load_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
 
@@ -386,7 +386,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         fixture_storage = dataset["storage_mode"] if dataset else args.storage
         if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
-        manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
+        materialized_manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
+        if dataset:
+            # The manifest-only mode has no artifact bundle to load.  It is safe
+            # to use deterministic materialization only after proving logical
+            # equivalence; otherwise cases and output must not be created.
+            assert_manifest_identity(dataset, materialized_manifest)
+        manifest = materialized_manifest
         cases = _cases(isolated, storage=args.storage); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
+from argparse import Namespace
 from pathlib import Path
 
-import json
 import pytest
 
+from benchmarks.performance import run_benchmark
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
-from benchmarks.performance.workloads import BUDGET_STATES, PROFILE_DIMENSIONS, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
+from benchmarks.performance.workloads import (BUDGET_STATES, PROFILE_DIMENSIONS, RUNS_PER_TICKET,
+                                              assert_manifest_identity, generate_fixture, load_dataset,
+                                              manifest_identity, validate_manifest)
+from vibe_orchestrator.budget_ledger import BudgetLedger
+from vibe_orchestrator.sessions import SessionStore
+from vibe_orchestrator.tickets import TicketStore
 
 
 def test_percentile_is_deterministic_and_interpolated():
@@ -52,15 +59,102 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
         load_dataset(path)
 
 
-@pytest.mark.parametrize("size", ["small", "medium",
-                                   pytest.param("large", marks=pytest.mark.skip(reason="large materialization exceeds worker test timeout")),
-                                   pytest.param("xlarge", marks=pytest.mark.skip(reason="xlarge materialization exceeds worker test timeout"))])
-def test_fixture_profile_counts_match_materialized_entities(tmp_path, size):
-    manifest = generate_fixture(tmp_path / size, seed=21, size=size)
+@pytest.mark.parametrize("size", ["small", "medium", "large", "xlarge"])
+@pytest.mark.parametrize("storage_mode", ["sqlite"])
+def test_fixture_profile_counts_match_materialized_entities(tmp_path, size, storage_mode):
+    project = tmp_path / f"{storage_mode}-{size}"
+    manifest = generate_fixture(project, seed=21, size=size, storage_mode=storage_mode)
     assert manifest["counts"] == {"tickets": {"small": 100, "medium": 1000, "large": 5000, "xlarge": 10000}[size],
                                    "sessions": PROFILE_DIMENSIONS[size]["sessions"],
                                    "ledger_runs": PROFILE_DIMENSIONS[size]["ledger_runs"]}
+    tickets = TicketStore(project, use_database=storage_mode == "sqlite").list("delivery")
+    assert {ticket.id for ticket in tickets} == set(manifest["logical"]["ticket_ids"])
+    assert Counter(ticket.status for ticket in tickets) == Counter(manifest["dimensions"]["ticket_status"])
+    assert Counter(str(len(ticket.run_history)) for ticket in tickets) == Counter(manifest["dimensions"]["runs_per_ticket_counts"])
+    sessions = SessionStore(project, TicketStore(project, use_database=storage_mode == "sqlite"),
+                            use_database=storage_mode == "sqlite").list()
+    assert Counter(session.status for session in sessions) == Counter(manifest["dimensions"]["session_states"])
+    ledger = BudgetLedger(project)
+    runs = 0
+    for ticket_id in manifest["logical"]["ticket_ids"]:
+        ticket_runs = ledger.list_runs(f"ticket:{ticket_id}")
+        assert all(run["ticket_id"] == ticket_id for run in ticket_runs)
+        runs += len(ticket_runs)
+    assert runs == manifest["counts"]["ledger_runs"]
+    budget_states = Counter(ledger.read_budget(f"ticket:{ticket_id}")["status"] for ticket_id in manifest["logical"]["ticket_ids"])
+    assert budget_states["exhausted"] == 1
+    assert budget_states["blocked_unknown"] == 1
+    assert budget_states["over_budget"] == 1
     validate_manifest(manifest)
+
+
+def test_yaml_fixture_readback_uses_legacy_ticket_and_session_stores(tmp_path):
+    project = tmp_path / "yaml-small"
+    manifest = generate_fixture(project, seed=22, size="small", storage_mode="yaml")
+    tickets = TicketStore(project, use_database=False).list("delivery")
+    sessions = SessionStore(project, TicketStore(project, use_database=False), use_database=False).list()
+    assert len(tickets) == manifest["counts"]["tickets"]
+    assert len(sessions) == manifest["counts"]["sessions"]
+    assert Counter(ticket.status for ticket in tickets) == Counter(manifest["dimensions"]["ticket_status"])
+    assert Counter(session.status for session in sessions) == Counter(manifest["dimensions"]["session_states"])
+
+
+def test_manifest_identity_gate_rejects_valid_altered_manifest(tmp_path):
+    manifest = generate_fixture(tmp_path / "fixture", seed=31)
+    altered = json.loads(json.dumps(manifest))
+    altered["logical"]["ticket_ids"][0] = "FIX-00031-99999"
+    payload, checksum = manifest_identity(altered)
+    altered["logical"] = payload
+    altered["hashes"]["manifest_sha256"] = checksum
+    altered["logical_checksum"] = checksum
+    altered["fixture_files_sha256"] = checksum
+    validate_manifest(altered)
+    with pytest.raises(ValueError, match="dataset identity mismatch"):
+        assert_manifest_identity(altered, manifest)
+
+
+def _run_args(project, dataset, output):
+    return Namespace(project=project, output=output, dataset=dataset, profile="smoke", size=None,
+                     storage="sqlite", seed=35527, warmup=0, iterations=1, cold=False)
+
+
+def test_dataset_identity_gate_runs_before_cases_and_output(tmp_path, monkeypatch):
+    manifest = generate_fixture(tmp_path / "manifest-fixture", seed=37)
+    altered = json.loads(json.dumps(manifest))
+    altered["logical"]["ticket_ids"][0] = "FIX-00037-99999"
+    payload, checksum = manifest_identity(altered)
+    altered["logical"] = payload
+    altered["hashes"]["manifest_sha256"] = checksum
+    altered["logical_checksum"] = checksum
+    altered["fixture_files_sha256"] = checksum
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(altered), encoding="utf-8")
+    output = tmp_path / "result.json"
+    called = False
+
+    def sentinel(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(run_benchmark, "_cases", sentinel)
+    with pytest.raises(ValueError, match="dataset identity mismatch"):
+        run_benchmark.run(_run_args(Path("."), dataset, output))
+    assert not called
+    assert not output.exists()
+
+
+def test_identical_dataset_manifest_materializes_and_preserves_identity(tmp_path, monkeypatch):
+    project = tmp_path / "manifest-fixture"
+    manifest = generate_fixture(project, seed=41)
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(run_benchmark, "_cases", lambda *args, **kwargs: [])
+    result = run_benchmark.run(_run_args(Path("."), dataset, output))
+    assert output.exists()
+    assert result["dataset_manifest_hash"] == manifest["hashes"]["manifest_sha256"]
+    validate_result(result)
 
 
 def test_manifest_hash_fields_are_canonical(tmp_path):
