@@ -6,7 +6,7 @@
 
 ## 2. Functional baseline: UI/API, scheduler, persistence, budget lifecycle
 
-UI предоставляет `/`, `/fragment`, `/api/tickets`, `/api/sessions` и `/api/sessions/{id}`; board получает tickets workflow, применяет mode/search/status/active фильтры и рендерит HTML. Клиент запрашивает `/fragment` с интервалом 8 секунд. Scheduler выполняет полный scan, отбрасывает running/blocked/session/WIP/retry/dependency ограничения и сортирует кандидатов.
+UI предоставляет `/`, `/fragment`, `/api/tickets`, `/api/sessions` и `/api/sessions/{id}`; board получает tickets workflow, применяет mode/search/status/active фильтры и рендерит HTML. Клиент запрашивает `/fragment` с интервалом 8 секунд. Scheduler выполняет полный scan, отбрасывает running/blocked/session/WIP/retry/dependency ограничения и сортирует кандидатов. В аудите handler rendering и urllib loopback round-trip являются разными case_id.
 
 TicketStore и SessionStore в runtime используют `.vibe/control.sqlite3`; `use_database=False` оставлен для legacy YAML/migration comparison. TicketStore поддерживает get/list/load_path/children_of/save. SessionStore поддерживает list/get/load_path/save/create/activate/complete/cancel и membership validation. BudgetLedger хранит `.vibe/budgets/ledger.sqlite3`, а lifecycle reservation — `reserved_pending_start → started → finalized|released|unknown`; reconcile обрабатывает pending/unknown состояния.
 

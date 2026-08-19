@@ -2,6 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+
+# ``cProfile`` imports the stdlib module named ``profile``.  When this file is
+# executed directly Python puts benchmarks/performance first on sys.path, so
+# our CLI sibling would otherwise shadow the stdlib module.
+_benchmark_dir = str(Path(__file__).resolve().parent)
+if sys.path and sys.path[0] == _benchmark_dir:
+    sys.path.pop(0)
 import cProfile
 import hashlib
 import json
@@ -12,13 +21,11 @@ import sqlite3
 import statistics
 import pstats
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,10 +67,17 @@ def validate_result(result: dict[str, Any]) -> None:
     if result["source_checksum_before"] != result["source_checksum_after"]:
         raise ValueError("benchmark mutated source project")
     for case in result["cases"]:
+        for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
+            if key not in case:
+                raise ValueError(f"case missing {key}")
         if case["sample_count"] != len(case["raw_samples"]):
             raise ValueError(f"sample count mismatch for {case.get('case_id')}")
-        if any(sample["sample_index"] < 0 for sample in case["raw_samples"]):
-            raise ValueError("invalid sample index")
+        for sample in case["raw_samples"]:
+            if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
+                raise ValueError("invalid sample schema")
+        sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
+        if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
+            raise ValueError("error references an absent sample")
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -79,14 +93,26 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     ticket_id = tickets[0].id
     budget_id = f"ticket:{ticket_id}"
     session_id = sessions.list()[0].id
-    server, _thread = start_server(project, port=0, open_browser=False)
-    base_url = f"http://127.0.0.1:{server.server_port}"
+    server = None
+    base_url = ""
+    if storage == "sqlite":
+        server, _thread = start_server(project, port=0, open_browser=False)
+        base_url = f"http://127.0.0.1:{server.server_port}"
     def http(path: str) -> bytes:
         with urllib.request.urlopen(base_url + path, timeout=10) as response:
             return response.read()
     def http_error(path: str) -> bytes:
         try: return http(path)
-        except urllib.error.HTTPError as exc: return exc.read()
+        except urllib.error.HTTPError as exc:
+            exc.read()
+            raise
+    # A repeated reserve uses a prepared run id and is therefore idempotent and
+    # read-only after setup; it cannot contaminate subsequent samples.
+    prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
+    try:
+        ledger.reserve(prepared_run, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})
+    except Exception:
+        pass
     cases = [
         ("ticketstore.list.delivery", "TicketStore", "list(process)", lambda: store.list("delivery")),
         ("ticketstore.list.all", "TicketStore", "list()", lambda: store.list()),
@@ -102,22 +128,34 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.get_budget", "BudgetLedger", "get_budget", lambda: ledger.get_budget(budget_id)),
         ("budgetledger.get_run", "BudgetLedger", "get_run", lambda: ledger.get_run("RUN-FIX-00000")),
         ("budgetledger.list_runs", "BudgetLedger", "list_runs", lambda: ledger.list_runs(budget_id)),
-        ("budgetledger.reserve", "BudgetLedger", "reserve (isolated mutation)", lambda: ledger.reserve(f"RUN-BENCH-{uuid.uuid4().hex}", ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})),
+        ("budgetledger.reserve.idempotent", "BudgetLedger", "reserve (prepared idempotent)", lambda: ledger.reserve(prepared_run, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})),
+        ("budgetledger.start", "BudgetLedger", "start (prepared lifecycle)", lambda: ledger.start(prepared_run)),
+        ("budgetledger.finalize", "BudgetLedger", "finalize (isolated lifecycle)", lambda: ledger.finalize(prepared_run, "completed", {"tokens": 1, "points": 1, "runs": 1})),
         ("budgetledger.get_missing", "BudgetLedger", "get_run(missing)", lambda: ledger.get_run("RUN-MISSING")),
         ("budgetledger.reconcile", "BudgetLedger", "reconcile", lambda: ledger.reconcile()),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", sessions, mode="compact")),
         ("ui.render_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=sessions)),
-        ("http.fragment", "HTTP", "GET /fragment", lambda: http("/fragment?process=delivery")),
+        ("http.handler.fragment", "HTTP", "handler /fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=sessions)),
+        ("http.handler.api_tickets", "HTTP", "handler /api/tickets", lambda: [ticket.to_dict() for ticket in store.list()]),
+        ("http.fragment", "HTTP", "GET /fragment network", lambda: http("/fragment?process=delivery")),
         ("http.api_tickets", "HTTP", "GET /api/tickets", lambda: http("/api/tickets")),
         ("http.api_sessions", "HTTP", "GET /api/sessions", lambda: http("/api/sessions")),
         ("http.api_session", "HTTP", "GET /api/sessions/{id}", lambda: http(f"/api/sessions/{session_id}")),
         ("http.error.missing_session", "HTTP", "GET missing session (4xx)", lambda: http_error("/api/sessions/SESSION-MISSING")),
     ]
+    if server is not None:
+        # The server is intentionally kept alive for the returned closures and
+        # closed by run() after all cases complete.
+        for index, item in enumerate(cases):
+            if index == len(cases) - 1:
+                pass
+    if storage != "sqlite":
+        cases = [item for item in cases if not item[0].startswith("http.") or item[0].startswith("http.handler.")]
     return cases
 
 
-def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any], project: Path, warmup: int, iterations: int, noisy: bool) -> dict[str, Any]:
+def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any], project: Path, warmup: int, iterations: int, noisy: bool, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
     for _ in range(warmup):
         try: fn()
         except Exception: pass
@@ -127,11 +165,15 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
         try: fn()
         except Exception as exc: error = type(exc).__name__; errors.append({"sample_index": index, "type": error})
         wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root)
-        samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]), "sqlite_queries": None, "sqlite_lock_ms": None, "error": error})
+        samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
+                        "sqlite_queries": None, "sqlite_lock_ms": None,
+                        "sqlite_metrics_unavailable_reason": "store connections are created internally; production semantics prohibit monkey-patching",
+                        "error": error})
     walls = [item["wall_ms"] for item in samples]
-    return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": "sqlite",
+    return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
             "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
-            "workload": {"project": "isolated", "noisy_filesystem": noisy},
+            "dataset_dimensions": manifest["dimensions"],
+            "workload": {"project": "isolated", "noisy_filesystem": noisy, "fixture_checksum": manifest["fixture_files_sha256"]},
             "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples}
 
 
@@ -152,7 +194,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                                  "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
                   "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
         for item in cases:
-            case_result = _run_case(*item, isolated, args.warmup, iterations, args.cold)
+            case_result = _run_case(*item, isolated, args.warmup, iterations, args.cold, storage_mode=args.storage, manifest=manifest)
             case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
             result["cases"].append(case_result)
         selected = next((item for item in cases if item[0] == "scheduler.select_candidates"), None)

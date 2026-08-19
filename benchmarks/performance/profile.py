@@ -1,7 +1,12 @@
 """Produce cProfile evidence for a benchmark scenario."""
 from __future__ import annotations
-import argparse, cProfile, json, pstats, sys, platform, hashlib
+import argparse, json, pstats, sys, platform, hashlib
 from pathlib import Path
+# Avoid shadowing the stdlib ``profile`` module while cProfile imports it.
+_profile_dir = str(Path(__file__).resolve().parent)
+if sys.path and sys.path[0] == _profile_dir:
+    sys.path.pop(0)
+import cProfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from benchmarks.performance.run_benchmark import _cases
 
