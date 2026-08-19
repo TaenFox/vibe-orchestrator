@@ -103,7 +103,7 @@ class CodexRunner:
             reasoning_effort=profile["reasoning_effort"],
         )
 
-    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None, on_process_started: Callable[[str], None] | None = None) -> AgentResult:
+    async def run(self, ticket: Ticket, stage: Stage, run_id: str | None = None, *, contract: ExecutionContract | None = None, workspace: Path | None = None, environment: dict[str, str] | None = None, environment_instructions: str | None = None, on_process_started: Callable[[str], None] | None = None) -> AgentResult:
         contract = contract or self.prepare_execution_contract(stage, run_id or ticket.active_run)
         run_id = contract.run_id
         database_mode = self.store.database_enabled
@@ -126,7 +126,7 @@ class CodexRunner:
             prompt_path = run_dir / "prompt.txt"
             prompt_contract_path = run_dir / "prompt.contract.txt"
         workspace = workspace or self.store.project
-        prompt = self._build_prompt(ticket, stage, contract, workspace=workspace)
+        prompt = self._build_prompt(ticket, stage, contract, workspace=workspace, environment_instructions=environment_instructions)
         if not database_mode:
             assert prompt_path is not None and prompt_contract_path is not None
             prompt_path.write_text(prompt, encoding="utf-8")
@@ -159,7 +159,7 @@ class CodexRunner:
         else:
             assert manifest_path is not None
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        process = await asyncio.create_subprocess_exec(*cmd, cwd=workspace, env=environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         if on_process_started:
             on_process_started(run_id)
         stdout, _ = await process.communicate(prompt.encode("utf-8"))
@@ -199,6 +199,7 @@ class CodexRunner:
         stage: Stage,
         contract: ExecutionContract,
         workspace: Path | None = None,
+        environment_instructions: str | None = None,
     ) -> str:
         prompt = self._render_prompt(
             stage=stage,
@@ -220,6 +221,8 @@ class CodexRunner:
         correction_context = self._correction_context(ticket)
         if correction_context:
             prompt += f"\n\n## Контекст завершённых Correction\n{correction_context}\n"
+        if environment_instructions:
+            prompt += f"\n\n## Окружение проекта\n{environment_instructions}\n"
         if ticket.context:
             context_yaml = yaml.safe_dump(ticket.context, sort_keys=False, allow_unicode=True).rstrip()
             prompt += f"\n\n## Актуальный контекст тикета (ревизия {ticket.context_revision})\n```yaml\n{context_yaml}\n```\n"
