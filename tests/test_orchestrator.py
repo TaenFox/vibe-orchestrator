@@ -406,7 +406,7 @@ def test_reservation_metadata_is_carried_to_contract_and_history(tmp_path: Path)
         assert run_events(completed)[1]["reservation"] == metadata
 
     asyncio.run(scenario())
-def test_rework_needs_rework_stops_the_automatic_cycle(tmp_path: Path):
+def test_rework_needs_rework_allows_three_review_attempts_then_stops(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     ticket = orchestrator.store.create(
         "delivery",
@@ -415,21 +415,28 @@ def test_rework_needs_rework_stops_the_automatic_cycle(tmp_path: Path):
         status="review",
         rework_stage="review",
     )
-    ticket.active_run = "run-rework-review"
-    orchestrator.store.save(ticket)
-
     workflow = load_workflow("delivery")
-    orchestrator._apply_result(
-        workflow,
-        ticket.id,
-        workflow.by_id["review"],
-        AgentResult(outcome="needs_rework", summary="Нужен integration-тест", details="AC-7.4"),
-    )
+    review = workflow.by_id["review"]
+    for attempt in range(1, 4):
+        current = orchestrator.store.get(ticket.id)
+        current.active_run = f"run-rework-review-{attempt}"
+        orchestrator.store.save(current)
+        orchestrator._apply_result(
+            workflow,
+            ticket.id,
+            review,
+            AgentResult(outcome="needs_rework", summary="Нужен integration-тест", details="AC-7.4"),
+        )
+        updated = orchestrator.store.get(ticket.id)
+        if attempt < 3:
+            assert updated.status == "ready_for_development"
+            assert updated.blocked_reason is None
+        else:
+            assert updated.status == "selected_for_session"
+            assert updated.blocked_reason == "rework_cycle_stopped"
 
     updated = orchestrator.store.get(ticket.id)
-    assert updated.status == "selected_for_session"
     assert updated.last_outcome == "needs_rework"
-    assert updated.blocked_reason == "rework_cycle_stopped"
     assert orchestrator.store.children_of(ticket.id, process="delivery") == []
     assert select_candidates(workflow, [updated], set()) == []
 
