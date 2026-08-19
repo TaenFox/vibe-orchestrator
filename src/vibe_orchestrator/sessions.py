@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+import sqlite3
 import re
 import tempfile
 import uuid
@@ -100,15 +103,32 @@ class DeliverySession:
 class SessionStore:
     """Persistent delivery-session state under ``.vibe/sessions``."""
 
-    def __init__(self, project: Path, ticket_store: TicketStore | None = None):
+    def __init__(self, project: Path, ticket_store: TicketStore | None = None, *, use_database: bool | None = None):
         self.project = project.resolve()
         self.root = self.project / ".vibe"
         self.sessions_root = self.root / "sessions"
         self.lock_path = self.root / "sessions.lock"
         self.ticket_store = ticket_store or TicketStore(self.project)
+        self.use_database = self.ticket_store.database_enabled if use_database is None else use_database
         self._migrating = False
 
+    @property
+    def database_enabled(self) -> bool:
+        return self.use_database and self.ticket_store.database.exists()
+
+    def _db(self) -> sqlite3.Connection:
+        from .control_db_migration import ensure_control_schema
+        ensure_control_schema(self.ticket_store.database)
+        db = sqlite3.connect(self.ticket_store.database, timeout=10)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=10000")
+        return db
+
     def init(self) -> None:
+        if self.database_enabled:
+            self._db().close()
+            return
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy()
 
@@ -136,6 +156,15 @@ class SessionStore:
         return session
 
     def get(self, session_id: str) -> DeliverySession:
+        if self.database_enabled:
+            self._validate_session_id(session_id)
+            with self._db() as db:
+                row = db.execute("SELECT payload_json FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            session = DeliverySession.from_dict(json.loads(row["payload_json"]))
+            self._validate_lifecycle(session, check_updated_order=True)
+            return session
         path = self.session_path(session_id)
         if not path.exists():
             raise KeyError(session_id)
@@ -154,10 +183,51 @@ class SessionStore:
         return session
 
     def list(self) -> list[DeliverySession]:
+        if self.database_enabled:
+            with self._db() as db:
+                rows = db.execute("SELECT payload_json FROM sessions ORDER BY session_id").fetchall()
+            return [DeliverySession.from_dict(json.loads(row["payload_json"])) for row in rows]
         self.init()
         return [self.load_path(path) for path in sorted(self.sessions_root.glob("*.yaml"))]
 
     def save(self, session: DeliverySession, *, _allow_active_membership_extension: bool = False) -> None:
+        if self.database_enabled:
+            self._validate_session_id(session.id)
+            with self._save_lock():
+                try:
+                    persisted = self.get(session.id)
+                except KeyError:
+                    persisted = None
+                if persisted is not None:
+                    self._validate_transition(persisted, session, allow_active_membership_extension=_allow_active_membership_extension)
+                self._validate_session(session, allow_active_membership_extension=_allow_active_membership_extension)
+                session.updated_at = now_iso()
+                payload = session.to_dict()
+                encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                with self._db() as db:
+                    db.execute(
+                        """INSERT INTO sessions(session_id,title,status,created_at,updated_at,started_at,completed_at,cancelled_at,source_path,payload_json,payload_hash)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(session_id) DO UPDATE SET title=excluded.title,status=excluded.status,updated_at=excluded.updated_at,
+                        started_at=excluded.started_at,completed_at=excluded.completed_at,cancelled_at=excluded.cancelled_at,
+                        payload_json=excluded.payload_json,payload_hash=excluded.payload_hash""",
+                        (session.id, session.title, session.status, session.created_at, session.updated_at, session.started_at,
+                         session.completed_at, session.cancelled_at, f".vibe/sessions/{session.id}.yaml", encoded,
+                         hashlib.sha256(encoded.encode("utf-8")).hexdigest()),
+                    )
+                    db.execute("DELETE FROM session_members WHERE session_id = ?", (session.id,))
+                    direct = set(session.ticket_ids)
+                    members = [(session.id, ticket_id, position, "direct") for position, ticket_id in enumerate(session.ticket_ids)]
+                    members.extend((session.id, ticket_id, position, "effective") for position, ticket_id in enumerate(sorted(self.effective_ticket_ids(session)), start=len(session.ticket_ids)) if ticket_id not in direct)
+                    db.executemany("INSERT INTO session_members VALUES (?,?,?,?)", members)
+                    db.execute("DELETE FROM events WHERE entity_kind = 'session' AND entity_id = ?", (session.id,))
+                    db.executemany("INSERT INTO events VALUES (?,?,?,?,?,?)", [
+                        ("session", session.id, index, str(event.get("event", "unknown")), event.get("timestamp"),
+                         json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                        for index, event in enumerate(session.audit_events)
+                    ])
+                    db.commit()
+            return
         path = self._validate_session_path(self.session_path(session))
         with self._save_lock():
             persisted = self.load_path(path) if path.exists() else None

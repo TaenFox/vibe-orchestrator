@@ -139,7 +139,7 @@ vibe add /path/to/your-project discovery idea "Моя идея" \
   --description "Что я хочу исследовать"
 ```
 
-Запустите UI:
+Запустите UI на Starlette/Uvicorn:
 
 ```bash
 vibe ui /path/to/your-project
@@ -152,6 +152,16 @@ UI можно запустить вместе с оркестратором од
 ```bash
 vibe run /path/to/your-project --ui
 ```
+
+Новый UI использует серверный рендеринг и не требует отдельной сборки
+frontend-пакетов. Доска, поиск, карточка тикета и создание тикетов работают
+через framework routes; старый `http.server` больше не используется командами
+`vibe ui` и `vibe run --ui`.
+
+Если существует `.vibe/control.sqlite3`, доска и карточка читаются из SQLite.
+Операции изменения также записываются транзакционно в SQLite. YAML-файлы после
+миграции не читаются и не обновляются; они остаются только историческим
+источником миграции.
 
 В верхней части UI доступна форма создания тикетов Discovery, Delivery и Process Management. Поля `тип`, `заголовок`, `описание`, `приоритет` и `родительский ID` сохраняются сразу в локальное состояние `.vibe/tickets`.
 
@@ -247,6 +257,37 @@ vibe session cancel /path/to/your-project SES-XXXXXX --override "Состав у
     ├── delivery/
     └── process_management/
 ```
+
+### Снимок control plane в SQLite
+
+Для подготовки к переносу runtime-состояния в базу используется только скрипт
+миграции. Он читает YAML тикетов и сессий, `run.json` и фактически применённые
+`prompt.contract.txt`, а затем атомарно
+пересобирает SQLite-снимок:
+
+```bash
+.venv/bin/python tools/migrate_control_plane.py . --dry-run
+.venv/bin/python tools/migrate_control_plane.py .
+```
+
+По умолчанию база создаётся в `.vibe/control.sqlite3` и игнорируется Git.
+Повторный запуск идемпотентен и используется только для первоначального импорта
+или явного восстановления из исторического YAML-снимка. После миграции runtime
+работает только с SQLite.
+
+В таблице `prompt_contracts` одинаковые применённые промты дедуплицируются по
+SHA-256. Каждый запуск хранит ссылку на этот неизменяемый снимок через
+`prompt_hash`; актуальный шаблон промта для будущих запусков будет отдельным
+справочником на следующем этапе.
+
+При DB-primary запуске `CodexRunner` сохраняет manifest, контракт, фактически
+отрендеренный prompt, результат, события stdout и token usage непосредственно
+в SQLite. Текстовые файлы внутри `.vibe/runs/<run_id>` для новых запусков не
+создаются; временный файл output удаляется после чтения результата.
+
+`result.json` импортируется в `run_results`, строки `events.jsonl` — в
+`run_events`, а блок `token_usage` — в `token_usage`. Некорректные строки
+`events.jsonl` пропускаются, исходные файлы при этом не изменяются.
 
 Тикет — это один YAML-файл. Пример:
 
@@ -428,7 +469,8 @@ conflicting idempotency и ambiguous dedup возвращают conflict/result 
 Ошибки имеют envelope `orchestrator.errors.v1` и path; основные коды:
 `TECH_DEBT_INVALID`, `TECH_DEBT_SOURCE_NOT_FOUND`, `TECH_DEBT_SOURCE_MISMATCH`,
 `TECH_DEBT_PREFLIGHT_UNAVAILABLE`, `TECH_DEBT_MUTATION_BLOCKED`. Read-only операции
-не создают миграции, каталоги или кэш. MVP хранит YAML локально, runs вне Git;
+не создают миграции, каталоги или кэш. Runtime хранит control plane в SQLite,
+runs и бинарные артефакты — в файловой системе;
 atomic save не является fsync/межфайловой транзакцией, audit не защищен от
 ручного редактирования, внешней authorization/DB/Jira и budget enforcement нет.
 

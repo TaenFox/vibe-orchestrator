@@ -7,7 +7,7 @@ name = "vibe-orchestrator"
 version = "0.1.0"
 description = "Локальная pull-оркестрация для Codex CLI-агентов"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "Starlette>=0.37,<1", "Uvicorn>=0.30,<1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

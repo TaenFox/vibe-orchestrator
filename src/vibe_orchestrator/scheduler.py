@@ -33,7 +33,7 @@ def select_candidates(
     by_id = workflow.by_id
     candidates: list[Candidate] = []
     for ticket in tickets:
-        if ticket.id in running_ids or ticket.active_run or ticket.blocked_by:
+        if ticket.id in running_ids or ticket.active_run or ticket.blocked_by or ticket.blocked_reason:
             continue
         # Technical-debt children are deferred until explicitly included in
         # an active Delivery session. Preserve legacy scheduling for ordinary
