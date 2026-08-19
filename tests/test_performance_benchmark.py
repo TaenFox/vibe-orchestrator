@@ -85,6 +85,25 @@ def test_manifest_rejects_internally_consistent_wrong_profile_ticket_count(tmp_p
         load_dataset(dataset)
 
 
+def test_manifest_rejects_budget_distribution_with_wrong_total(tmp_path):
+    manifest = generate_fixture(tmp_path / "fixture", seed=24, size="small")
+    altered = json.loads(json.dumps(manifest))
+    altered["dimensions"]["budget_states"]["active"] -= 1
+    altered["dimensions"]["budget_states"]["exhausted"] += 1
+    payload, checksum = manifest_identity(altered)
+    altered["logical"] = payload
+    altered["hashes"]["manifest_sha256"] = checksum
+    altered["logical_checksum"] = checksum
+    altered["fixture_files_sha256"] = checksum
+    altered["dimensions"]["budget_states"]["active"] -= 1
+    altered["logical"], checksum = manifest_identity(altered)
+    altered["hashes"]["manifest_sha256"] = checksum
+    altered["logical_checksum"] = checksum
+    altered["fixture_files_sha256"] = checksum
+    with pytest.raises(ValueError, match="budget state counts"):
+        validate_manifest(altered)
+
+
 @pytest.mark.parametrize("size", ["small", "medium", "large", "xlarge"])
 @pytest.mark.parametrize("storage_mode", ["sqlite", "yaml"])
 def test_fixture_profile_counts_match_materialized_entities(tmp_path, size, storage_mode):
@@ -172,9 +191,9 @@ def test_manifest_identity_gate_reports_altered_dimensions(tmp_path):
         assert_manifest_identity(altered, manifest)
 
 
-def _run_args(project, dataset, output):
+def _run_args(project, dataset, output, *, storage="sqlite"):
     return Namespace(project=project, output=output, dataset=dataset, profile="smoke", size=None,
-                     storage="sqlite", seed=35527, warmup=0, iterations=1, cold=False)
+                     storage=storage, seed=35527, warmup=0, iterations=1, cold=False)
 
 
 def test_dataset_identity_gate_runs_before_cases_and_output(tmp_path, monkeypatch):
@@ -219,6 +238,39 @@ def test_identical_dataset_manifest_materializes_and_preserves_identity(tmp_path
     assert all(case["dataset_manifest_hash"] == manifest["hashes"]["manifest_sha256"]
                for case in result["cases"])
     validate_result(result)
+
+
+def test_yaml_dataset_uses_manifest_storage_when_cli_storage_is_omitted(tmp_path, monkeypatch):
+    manifest = generate_fixture(tmp_path / "manifest-fixture", seed=42, storage_mode="yaml")
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "result.json"
+    seen = []
+    monkeypatch.setattr(run_benchmark, "_cases", lambda project, *, storage: (
+        seen.append(storage) or [("identity.case", "test", "identity", lambda: None)]))
+    result = run_benchmark.run(_run_args(Path("."), dataset, output, storage=None))
+    assert seen == ["yaml"]
+    assert result["parameters"]["storage"] == "yaml"
+    assert result["cases"][0]["storage_mode"] == "yaml"
+
+
+def test_yaml_dataset_rejects_explicit_sqlite_before_cases_and_output(tmp_path, monkeypatch):
+    manifest = generate_fixture(tmp_path / "manifest-fixture", seed=43, storage_mode="yaml")
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "result.json"
+    called = False
+
+    def sentinel(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(run_benchmark, "_cases", sentinel)
+    with pytest.raises(ValueError, match="--storage must match"):
+        run_benchmark.run(_run_args(Path("."), dataset, output, storage="sqlite"))
+    assert not called
+    assert not output.exists()
 
 
 def test_manifest_hash_fields_are_canonical(tmp_path):

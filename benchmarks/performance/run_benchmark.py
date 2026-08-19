@@ -384,8 +384,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if dataset:
             size = dataset["dimensions"]["size"]
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
-        fixture_storage = dataset["storage_mode"] if dataset else args.storage
-        if dataset and fixture_storage != args.storage:
+        fixture_storage = dataset["storage_mode"] if dataset and args.storage is None else (args.storage or "sqlite")
+        if dataset and args.storage is not None and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
         materialized_manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
         if dataset:
@@ -394,7 +394,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # equivalence; otherwise cases and output must not be created.
             assert_manifest_identity(dataset, materialized_manifest)
         manifest = materialized_manifest
-        cases = _cases(isolated, storage=args.storage); iterations = args.iterations
+        cases = _cases(isolated, storage=fixture_storage); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
@@ -408,7 +408,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for item in cases:
             if effective_cold:
                 _prepare_cold(cold)
-            case_result = _run_case(*item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
+            case_result = _run_case(*item, isolated, args.warmup, iterations, effective_cold, storage_mode=fixture_storage, manifest=manifest)
             if args.cold and not effective_cold:
                 case_result["limitations"].append(cold["limitation"])
             case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
@@ -443,7 +443,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml")); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

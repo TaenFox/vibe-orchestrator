@@ -165,7 +165,6 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
     ledger = BudgetLedger(project)
     ledger_count = PROFILE_DIMENSIONS[size]["ledger_runs"]
     # Four explicit budgets make the state dimension material, even for smoke fixtures.
-    budget_counts = {state: 0 for state in BUDGET_STATES}
     for state_index, state in enumerate(BUDGET_STATES):
         owner = ticket_ids[state_index]
         limits = {"tokens": 100000, "points": 1000, "runs": 100}
@@ -176,7 +175,6 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
         elif state == "over_budget":
             limits = {"tokens": 1, "points": 1, "runs": 1}
         budget_id = ledger.create_budget("ticket", owner, limits=limits)
-        budget_counts[state] += 1
         if state == "blocked_unknown":
             run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
             try:
@@ -233,6 +231,15 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
             pass
 
     actual_ledger_count = sum(len(ledger.list_runs(f"ticket:{ticket_id}")) for ticket_id in ticket_ids)
+    ticket_budgets = ledger.read_budgets(scope="ticket", owner_ids=ticket_ids)
+    if {budget["owner_id"] for budget in ticket_budgets} != set(ticket_ids):
+        raise ValueError("fixture must materialize exactly one budget for every ticket")
+    budget_counts = {state: 0 for state in BUDGET_STATES}
+    for budget in ticket_budgets:
+        status = budget["status"]
+        if status not in budget_counts:
+            raise ValueError(f"unsupported materialized budget state: {status}")
+        budget_counts[status] += 1
     logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, actual_ledger_count, budget_counts, run_counts)
     materialized_checksum = _hash_tree(project)
     manifest = {
@@ -309,6 +316,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if set(session_states) != set(SESSION_STATES) or any(session_states[state] < 1 for state in SESSION_STATES):
         raise ValueError("all session states must be materialized")
     budget_states = dimensions.get("budget_states", {})
+    if (set(budget_states) != set(BUDGET_STATES) or
+            any(isinstance(budget_states[state], bool) or not isinstance(budget_states[state], int) or
+                budget_states[state] < 0 for state in BUDGET_STATES) or
+            sum(budget_states.values()) != counts["tickets"]):
+        raise ValueError("budget state counts do not match materialized tickets")
     if any(budget_states[state] < 1 for state in BUDGET_STATES):
         raise ValueError("all budget states must be materialized")
     statuses = dimensions.get("ticket_status", {})
