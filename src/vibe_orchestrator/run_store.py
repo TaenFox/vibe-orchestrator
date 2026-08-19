@@ -31,6 +31,7 @@ class RunStore:
 
     def _db(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.database, timeout=10)
+        db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=10000")
         return db
@@ -88,3 +89,18 @@ class RunStore:
                      token_usage.get("captured_at"), token_usage.get("normalization_version"), _json(token_usage)),
                 )
             db.commit()
+
+    def get(self, run_id: str) -> dict[str, Any] | None:
+        with self._db() as db:
+            row = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def abort(self, run_id: str, *, reason: str) -> bool:
+        """Mark an abandoned started run terminal without inventing a result."""
+        with self._db() as db:
+            updated = db.execute(
+                "UPDATE runs SET state='aborted', terminal_at=? WHERE run_id=? AND state='started'",
+                (_now(), run_id),
+            ).rowcount
+            db.commit()
+        return bool(updated)

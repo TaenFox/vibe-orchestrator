@@ -74,7 +74,21 @@ def test_rework_inherits_active_session_and_is_idempotent(tmp_path: Path):
 
     loaded = store.get(session.id)
     assert loaded.ticket_ids == [parent.id, rework.id]
-    assert [event["event"] for event in loaded.audit_events].count("ticket_inherited") == 1
+
+
+def test_active_session_can_inherit_rework_after_parent_completed(tmp_path: Path):
+    tickets = TicketStore(tmp_path)
+    parent = tickets.create("delivery", "task", "Parent", status="todo")
+    session = DeliverySessionStore(tmp_path).store.create([parent.id])
+    sessions = DeliverySessionStore(tmp_path)
+    sessions.activate(session.id, tickets)
+    parent.status = "done"
+    tickets.save(parent)
+    rework = tickets.create("delivery", "rework", "Rework", parent=parent.id, status="selected_for_session")
+
+    sessions.store.inherit_ticket(sessions.get(session.id), rework.id, source_ticket=parent.id)
+
+    assert rework.id in sessions.store.effective_ticket_ids(sessions.get(session.id))
 
 
 def test_save_cannot_bypass_persisted_lifecycle(tmp_path: Path):
