@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from .codex import AgentResult, CodexRunner, ExecutionContract, ticket_prompt_metadata
+from .environment import ProjectEnvironment
 from .config import Stage, Workflow, load_all_workflows
 from .control import WorkerControl
 from .git_trees import GitTreeError, GitTreeManager
@@ -70,6 +71,8 @@ class Orchestrator:
         self._last_worker_limit = initial_worker_limit
         self.observation_verifier = observation_verifier
         self.tree_manager = GitTreeManager(project, self.store)
+        self.environment = ProjectEnvironment(project)
+        self.environment.ensure()
         self.ledger = BudgetLedger(project)
         self.running: dict[str, asyncio.Task[None]] = {}
 
@@ -279,6 +282,9 @@ class Orchestrator:
             run_kwargs = {"contract": contract}
             if workspace is not None:
                 run_kwargs["workspace"] = workspace
+            if self.environment.agent_environment() is not None:
+                run_kwargs["environment"] = self.environment.agent_environment()
+                run_kwargs["environment_instructions"] = self.environment.instructions()
             ledger_run = self.ledger.get_run(contract.run_id)
             if ledger_run is not None:
                 run_kwargs["on_process_started"] = lambda started_run_id: self.ledger.start(started_run_id)
@@ -287,6 +293,10 @@ class Orchestrator:
             parameters = inspect.signature(self.runner.run).parameters
             if "on_process_started" not in parameters and not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
                 run_kwargs.pop("on_process_started", None)
+            if "environment" not in parameters and not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                run_kwargs.pop("environment", None)
+            if "environment_instructions" not in parameters and not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                run_kwargs.pop("environment_instructions", None)
             result = await self.runner.run(ticket, stage, contract.run_id, **run_kwargs)
             ledger_run = self.ledger.get_run(contract.run_id)
             if ledger_run is not None and ledger_run["state"] == "reserved_pending_start":

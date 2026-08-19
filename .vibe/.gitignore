@@ -1,5 +1,6 @@
 runs/
 tmp/
+tmp/environment.json
 locks/
 tickets/
 sessions/
