@@ -333,7 +333,7 @@ def _parent_is_compatible(parent: Ticket, process: str, ticket_type: str) -> boo
     if process == "delivery":
         if ticket_type == "rework":
             return parent.process == "delivery" and parent.type != "rework"
-        return (parent.process == "discovery" and parent.type == "idea") or (parent.process == "delivery" and parent.type != "rework")
+        return (parent.process == "discovery" and parent.type == "idea") or (parent.process == "delivery")
     return False
 
 
