@@ -19,7 +19,9 @@ HTTP success/error endpoints. SQLite является runtime control plane. Р�
 ledger остаётся SQLite, поскольку это его authoritative persistence.
 Варианты профиля материализуют small/medium/large/xlarge ticket sets и связанные
 профильные counts сессий и ledger runs; manifest хранит фактические counts, а не
-только поддерживаемые labels. Reservation/concurrency cases используют отдельные
+только поддерживаемые labels. Для tickets действует точная cardinality-проверка:
+`small=100`, `medium=1000`, `large=5000`, `xlarge=10000`, и `counts.tickets`
+обязан совпадать с `SIZES[size]`. Reservation/concurrency cases используют отдельные
 synthetic budget IDs и удаляются после sample.
 
 ## States and errors
@@ -65,3 +67,60 @@ trip представлены отдельными cases.
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
+
+## Fixture contract / dataset loading
+
+Performance fixtures are synthetic audit data, not production interchange. The
+baseline materializes tickets, delivery sessions and BudgetLedger runs for
+`small`, `medium`, `large` and `xlarge`, including all declared ticket/session/
+budget states and dimensions. SQLite is authoritative for the ledger in both
+storage modes; YAML uses legacy ticket/session files.
+
+The `performance-fixture.v2` manifest is strict: it records schema/source kind,
+seed, storage, actual counts, dimensions, redaction policy, logical checksum and
+materialized-tree checksum. The canonical logical checksum is SHA-256 of compact,
+sorted-key JSON. `validate_manifest()` recomputes it and rejects missing fields,
+unsupported values, profile counts (including exact ticket cardinality),
+unmaterialized dimensions, non-synthetic IDs and tampered hashes. Consistent derived
+dimensions and checksums do not make a manifest valid when `counts.tickets` differs
+from the declared profile's `SIZES[size]`.
+
+`dimensions.budget_states` is read back from every materialized ticket budget using
+the effective status from the authoritative SQLite ledger. It contains every declared
+state, uses non-negative integer counts, and its sum must equal `counts.tickets`.
+
+`--dataset` is fail-closed. The supplied manifest is authoritative and is fully
+validated before benchmark cases run. A manifest-only dataset may be materialized
+deterministically into the isolated project using its validated seed/profile/storage;
+the generated manifest's canonical logical payload and SHA-256 must equal the
+supplied manifest before it can be used. `materialized_tree_sha256` is provenance
+only and is excluded from this portable comparison. The result records
+`dataset_materialization` and `dataset_manifest_hash` only after that proof. An
+omitted `--storage` leaves the manifest's `storage_mode` authoritative; explicit
+`--size`/`--storage` mismatches, malformed or incompatible manifests fail before
+case construction and result output. No silent fallback to CLI defaults or
+regeneration of another dataset is allowed; a mismatch raises `ValueError` and
+the output JSON is not written.
+
+Without `--dataset`, baseline generated mode remains controlled by CLI
+seed/profile/storage. With `--dataset`, deterministic materialization is allowed
+only as the documented manifest-only mode, and the isolated TicketStore,
+SessionStore and BudgetLedger entities are used after identity verification.
+
+The policy permits synthetic identifiers, counts, statuses and fixed timestamps
+only. Non-empty titles, descriptions, prompts, raw payloads and production
+identifiers are prohibited. Results carry dataset identity for every case and
+retain equal source checksums before and after the run. Browser-level coverage is
+unavailable in this worker context; cold-cache and materialized-tree checksums are
+machine/filesystem dependent.
+
+## Test/verification limitations
+
+Fixture tests read back ticket IDs, statuses and run-history distributions,
+session lifecycle states, and every authoritative SQLite ledger row (including
+ticket ownership) for all four profiles and both storage modes. The ledger
+read-back uses one ordered query so xlarge verification remains practical; budget
+state snapshots continue to use `BudgetLedger.read_budget()`.
+Browser DOM/focus/viewport/keyboard/auto-refresh checks are unavailable in the
+worker environment and require an external or manual browser run; static tests
+do not claim that coverage.

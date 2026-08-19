@@ -44,10 +44,10 @@ from vibe_orchestrator.ui import render_board, render_board_fragment
 from vibe_orchestrator.ui import start_server
 from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 try:
-    from .workloads import generate_fixture, load_dataset, materialize_dataset
+    from .workloads import assert_manifest_identity, generate_fixture, load_dataset, materialize_dataset
 except ImportError:  # direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
+    from benchmarks.performance.workloads import assert_manifest_identity, generate_fixture, load_dataset, materialize_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
 
@@ -169,6 +169,8 @@ def validate_result(result: dict[str, Any]) -> None:
     manifest_hash = manifest.get("hashes", {}).get("manifest_sha256")
     if not manifest_hash:
         raise ValueError("dataset manifest has no logical hash")
+    if result.get("dataset_manifest_hash") != manifest_hash:
+        raise ValueError("result dataset identity is missing or inconsistent")
     integrity = result.get("integrity", {})
     if integrity.get("warmup_excluded") is not True:
         raise ValueError("warmup samples must be excluded")
@@ -191,6 +193,8 @@ def validate_result(result: dict[str, Any]) -> None:
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
+        if case.get("dataset_manifest_hash") != result.get("dataset_manifest_hash"):
+            raise ValueError("case dataset identity mismatch")
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -509,6 +513,7 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
                         "error": error})
     walls = [item["wall_ms"] for item in samples]
     return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
+            "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"],
             "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
@@ -526,31 +531,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         size = args.size or ("small" if args.profile == "smoke" else "medium")
         dataset_manifest_path = (args.dataset / "manifest.json") if args.dataset and args.dataset.is_dir() else args.dataset
         dataset = load_dataset(dataset_manifest_path) if dataset_manifest_path else None
+        if dataset and args.size and dataset["dimensions"]["size"] != args.size:
+            raise ValueError("--size must match the dataset manifest profile")
         if dataset:
-            size = dataset.get("dimensions", {}).get("size", size)
+            size = dataset["dimensions"]["size"]
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
-        fixture_storage = dataset.get("storage_mode", args.storage) if dataset else args.storage
-        if dataset and fixture_storage != args.storage:
+        fixture_storage = dataset["storage_mode"] if dataset and args.storage is None else (args.storage or "sqlite")
+        if dataset and args.storage is not None and dataset["storage_mode"] != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
         if dataset:
-            # The manifest is provenance for an already approved, redacted
-            # dataset.  Never replace its contents with a generated fixture.
-            manifest = materialize_dataset(isolated, args.dataset, dataset)
+            if args.dataset.is_dir():
+                # A dataset bundle is authoritative; never replace its files
+                # with a newly generated fixture.
+                manifest = materialize_dataset(isolated, args.dataset, dataset)
+            else:
+                materialized_manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
+                assert_manifest_identity(dataset, materialized_manifest)
+                manifest = materialized_manifest
         else:
             manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
-        cases = _cases(isolated, storage=args.storage); iterations = args.iterations
+        cases = _cases(isolated, storage=fixture_storage); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
-                                 "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
-                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
+                                 "dataset_source": str(args.dataset) if args.dataset else "synthetic",
+                                 "dataset_materialization": "manifest-only deterministic materialization" if dataset else "generated"},
+                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest,
+                  "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"], "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
         cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
         effective_cold = bool(args.cold and cold["available"])
         for item in cases:
             if effective_cold:
                 _prepare_cold(cold)
-            case_result = _run_case(*item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
+            case_result = _run_case(*item, isolated, args.warmup, iterations, effective_cold, storage_mode=fixture_storage, manifest=manifest)
             if args.cold and not effective_cold:
                 case_result["limitations"].append(cold["limitation"])
             case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
@@ -635,7 +649,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); parser.add_argument("--compare-storage", action="store_true", help="measure the same dataset in the alternate storage mode"); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml")); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); parser.add_argument("--compare-storage", action="store_true", help="measure the same dataset in the alternate storage mode"); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

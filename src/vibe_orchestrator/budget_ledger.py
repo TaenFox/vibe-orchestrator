@@ -482,6 +482,42 @@ class BudgetLedger:
         result["enforcement_state_exact"] = True
         return result
 
+    def read_budgets(self, *, scope: str | None = None,
+                     owner_ids: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        """Return authoritative effective snapshots for a set of budgets."""
+        if scope is not None and scope not in {"ticket", "session"}:
+            raise ValueError("invalid budget scope")
+        if owner_ids is not None and not owner_ids:
+            return []
+        query = "SELECT * FROM budgets WHERE 1=1"
+        params: list[Any] = []
+        if scope is not None:
+            query += " AND scope=?"
+            params.append(scope)
+        if owner_ids is not None:
+            query += f" AND owner_id IN ({','.join('?' for _ in owner_ids)})"
+            params.extend(owner_ids)
+        with self._connect() as db:
+            rows = db.execute(query + " ORDER BY budget_id", params).fetchall()
+            now = self.clock()
+            result = []
+            for row in rows:
+                item = dict(row)
+                effective = self._effective_limits(db, row, now=now)
+                item["limits"] = effective
+                item["aggregates"] = {kind: {d: item[f"{kind}_{d}"] for d in DIMENSIONS}
+                                       for kind in ("planned", "reserved", "finalized")}
+                item["available"] = {
+                    d: None if effective[d] is None else effective[d] - sum(item[f"{kind}_{d}"]
+                                                                              for kind in ("planned", "reserved", "finalized"))
+                    for d in DIMENSIONS
+                }
+                item["status"] = self._derived_status(db, row, effective, now=now)
+                item["snapshot_status"] = "fresh"
+                item["enforcement_state_exact"] = True
+                result.append(item)
+        return result
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()

@@ -5,6 +5,7 @@ import hashlib
 import json
 import random
 import shutil
+import re
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,50 @@ def _logical_manifest(seed: int, size: str, storage_mode: str, statuses: dict[st
         "budget_states": budget_counts,
     }
     return {"sha256": _logical_hash(logical), "logical": logical}
+
+
+def _canonical_manifest_payload(manifest: dict[str, Any]) -> dict[str, Any]:
+    logical = manifest.get("logical")
+    dimensions = manifest.get("dimensions", {})
+    counts = manifest.get("counts", {})
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "seed": manifest.get("seed"),
+        "size": dimensions.get("size"),
+        "storage_mode": manifest.get("storage_mode"),
+        "ticket_count": counts.get("tickets"),
+        "ticket_ids": logical.get("ticket_ids") if isinstance(logical, dict) else None,
+        "ticket_status": dimensions.get("ticket_status"),
+        "session_states": dimensions.get("session_states"),
+        "ledger_runs": counts.get("ledger_runs"),
+        "runs_per_ticket": dimensions.get("runs_per_ticket_counts"),
+        "budget_states": dimensions.get("budget_states"),
+    }
+
+
+def manifest_identity(manifest: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Return the portable logical identity used for dataset equivalence."""
+    payload = _canonical_manifest_payload(manifest)
+    return payload, _logical_hash(payload)
+
+
+def assert_manifest_identity(expected: dict[str, Any], actual: dict[str, Any]) -> None:
+    """Reject materialization that does not reproduce the supplied manifest."""
+    expected_payload, expected_hash = manifest_identity(expected)
+    actual_payload, actual_hash = manifest_identity(actual)
+    supplied_hash = expected.get("hashes", {}).get("manifest_sha256")
+    generated_hash = actual.get("hashes", {}).get("manifest_sha256")
+    if (supplied_hash != expected_hash or generated_hash != actual_hash or
+            expected_hash != actual_hash or expected_payload != actual_payload):
+        differing_fields = sorted(
+            key for key in set(expected_payload) | set(actual_payload)
+            if expected_payload.get(key) != actual_payload.get(key)
+        )
+        suffix = f"; differing canonical fields={differing_fields}" if differing_fields else ""
+        raise ValueError(
+            "dataset identity mismatch: supplied="
+            f"{supplied_hash or expected_hash}, materialized={generated_hash or actual_hash}{suffix}"
+        )
 
 
 def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
@@ -129,18 +174,16 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
     ledger = BudgetLedger(project)
     ledger_count = PROFILE_DIMENSIONS[size]["ledger_runs"]
     # Four explicit budgets make the state dimension material, even for smoke fixtures.
-    budget_counts = {state: 0 for state in BUDGET_STATES}
     for state_index, state in enumerate(BUDGET_STATES):
         owner = ticket_ids[state_index]
         limits = {"tokens": 100000, "points": 1000, "runs": 100}
         if state == "exhausted":
-            limits = {"tokens": 1, "points": 1, "runs": 1}
+            limits = {"tokens": 2, "points": 1, "runs": 1}
         elif state == "blocked_unknown":
             limits = {"tokens": 100, "points": 100, "runs": 100}
         elif state == "over_budget":
             limits = {"tokens": 1, "points": 1, "runs": 1}
         budget_id = ledger.create_budget("ticket", owner, limits=limits)
-        budget_counts[state] += 1
         if state == "blocked_unknown":
             run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
             try:
@@ -157,7 +200,10 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
                 ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"tokens": 1, "points": 1, "runs": 1})
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "model": "fixture",
+                    "reasoning_effort": "minimal", "usage_ref": run_id, "captured_at": "2024-01-01T00:00:00+00:00",
+                    "source": "provider", "normalization_version": "synthetic.v1", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 1, "runs": 1})
             except Exception:
                 pass
         elif state == "over_budget":
@@ -167,9 +213,10 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
                 ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"run_id": run_id, "input_tokens": 1,
-                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 2,
-                    "normalization_version": "synthetic.v1", "runs": 1})
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "model": "fixture",
+                    "reasoning_effort": "minimal", "usage_ref": run_id, "captured_at": "2024-01-01T00:00:00+00:00",
+                    "source": "provider", "normalization_version": "synthetic.v1", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 2, "runs": 1})
             except Exception:
                 pass
         assert ledger.get_budget(budget_id) is not None
@@ -183,13 +230,25 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
             ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
             if index % 4 == 0:
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"tokens": 1, "points": 1, "runs": 1})
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "model": "fixture",
+                    "reasoning_effort": "minimal", "usage_ref": run_id, "captured_at": "2024-01-01T00:00:00+00:00",
+                    "source": "provider", "normalization_version": "synthetic.v1", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 1, "runs": 1})
             elif index % 4 == 1:
                 ledger.release(run_id)
         except Exception:
             pass
 
     actual_ledger_count = sum(len(ledger.list_runs(f"ticket:{ticket_id}")) for ticket_id in ticket_ids)
+    ticket_budgets = ledger.read_budgets(scope="ticket", owner_ids=ticket_ids)
+    if {budget["owner_id"] for budget in ticket_budgets} != set(ticket_ids):
+        raise ValueError("fixture must materialize exactly one budget for every ticket")
+    budget_counts = {state: 0 for state in BUDGET_STATES}
+    for budget in ticket_budgets:
+        status = budget["status"]
+        if status not in budget_counts:
+            raise ValueError(f"unsupported materialized budget state: {status}")
+        budget_counts[status] += 1
     logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, actual_ledger_count, budget_counts, run_counts)
     materialized_checksum = _hash_tree(project)
     manifest = {
@@ -322,27 +381,37 @@ def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, A
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    required = {"schema_version", "seed", "storage_mode", "counts", "dimensions", "hashes", "redaction_policy", "logical"}
+    required = {"schema_version", "source_kind", "seed", "storage_mode", "counts", "dimensions", "hashes",
+                "fixture_files_sha256", "logical_checksum", "materialized_tree_sha256", "redaction_policy", "logical"}
     missing = required - set(manifest)
     if missing:
         raise ValueError(f"manifest missing fields: {sorted(missing)}")
     counts = manifest["counts"]
     if any(not isinstance(counts.get(key), int) or counts[key] < 0 for key in ("tickets", "sessions", "ledger_runs")):
         raise ValueError("manifest counts must be non-negative integers")
-    if manifest["storage_mode"] not in {"sqlite", "yaml"} or manifest["redaction_policy"] != REDACTION_POLICY:
+    if manifest["schema_version"] != SCHEMA_VERSION or manifest["source_kind"] not in {"synthetic", "approved_dataset"}:
+        raise ValueError("invalid dataset source or schema")
+    if not isinstance(manifest["seed"], int) or manifest["storage_mode"] not in {"sqlite", "yaml"} or manifest["redaction_policy"] != REDACTION_POLICY:
         raise ValueError("invalid manifest storage or redaction policy")
     dimensions = manifest["dimensions"]
     if dimensions.get("runs_per_ticket") != list(RUNS_PER_TICKET) or dimensions.get("ledger_run_counts") != list(LEDGER_RUN_COUNTS):
         raise ValueError("required workload dimensions are incomplete")
     if dimensions.get("session_counts") != list(SESSION_COUNTS) or set(dimensions.get("budget_states", {})) != set(BUDGET_STATES):
         raise ValueError("required session/budget states are incomplete")
-    size = dimensions.get("size", manifest.get("logical", {}).get("size"))
+    size = dimensions.get("size")
+    if size not in PROFILE_DIMENSIONS:
+        raise ValueError("manifest must declare a supported profile size")
     if size in PROFILE_DIMENSIONS:
         expected = PROFILE_DIMENSIONS[size]
         if dimensions.get("profile_counts") != expected:
             raise ValueError("profile dimensions do not match materialized fixture")
         if counts["sessions"] != expected["sessions"] or counts["ledger_runs"] != expected["ledger_runs"]:
             raise ValueError("manifest counts do not match materialized profile")
+        if counts["tickets"] != SIZES[size]:
+            raise ValueError(
+                "manifest ticket count does not match profile: "
+                f"size={size}, expected={SIZES[size]}, actual={counts['tickets']}"
+            )
     run_counts = dimensions.get("runs_per_ticket_counts", {})
     if set(run_counts) != {str(value) for value in RUNS_PER_TICKET} or sum(run_counts.values()) != counts["tickets"]:
         raise ValueError("runs_per_ticket counts do not match materialized tickets")
@@ -352,6 +421,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if set(session_states) != set(SESSION_STATES) or any(session_states[state] < 1 for state in SESSION_STATES):
         raise ValueError("all session states must be materialized")
     budget_states = dimensions.get("budget_states", {})
+    if (set(budget_states) != set(BUDGET_STATES) or
+            any(isinstance(budget_states[state], bool) or not isinstance(budget_states[state], int) or
+                budget_states[state] < 0 for state in BUDGET_STATES) or
+            sum(budget_states.values()) != counts["tickets"]):
+        raise ValueError("budget state counts do not match materialized tickets")
     if any(budget_states[state] < 1 for state in BUDGET_STATES):
         raise ValueError("all budget states must be materialized")
     if sum(session_states.values()) != counts["sessions"]:
@@ -362,6 +436,24 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     expected_hash = _logical_hash(logical) if isinstance(logical, dict) else None
     if manifest["hashes"].get("manifest_sha256") != expected_hash:
         raise ValueError("manifest logical checksum does not match logical payload")
+    statuses = dimensions.get("ticket_status", {})
+    if set(statuses) != set(STATUSES) or sum(statuses.values()) != counts["tickets"]:
+        raise ValueError("ticket status counts do not match materialized tickets")
+    ticket_ids = manifest["logical"].get("ticket_ids")
+    if (not isinstance(ticket_ids, list) or len(ticket_ids) != counts["tickets"] or
+            len(set(ticket_ids)) != len(ticket_ids) or
+            any(not isinstance(item, str) or not re.fullmatch(r"FIX-\d{5}-\d{5}", item) for item in ticket_ids)):
+        raise ValueError("manifest ticket ids are not synthetic and materialized")
+    expected_logical = _canonical_manifest_payload(manifest)
+    if manifest["logical"] != expected_logical:
+        raise ValueError("manifest logical payload does not match materialized fields")
+    logical_hash = _logical_hash(expected_logical)
+    if not isinstance(manifest["hashes"], dict) or manifest["hashes"].get("manifest_sha256") != logical_hash:
+        raise ValueError("manifest checksum mismatch")
+    if manifest["logical_checksum"] != logical_hash or manifest["fixture_files_sha256"] != logical_hash:
+        raise ValueError("logical fixture checksum mismatch")
+    if not isinstance(manifest["materialized_tree_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", manifest["materialized_tree_sha256"]):
+        raise ValueError("invalid materialized tree checksum")
 
 
 def manifest_for_dataset(path: Path, *, seed: int = 35527, size: str = "small", storage_mode: str = "sqlite") -> dict[str, Any]:
