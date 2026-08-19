@@ -186,7 +186,8 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
     manifest = {
         "schema_version": SCHEMA_VERSION, "source_kind": "synthetic", "seed": seed,
         "storage_mode": storage_mode, "hashes": {"manifest_sha256": logical["sha256"]},
-        "counts": {"tickets": count, "sessions": session_count, "ledger_runs": actual_ledger_count},
+        "counts": {"tickets": len(store.list("delivery")), "sessions": len(sessions.list()),
+                    "ledger_runs": actual_ledger_count},
         "dimensions": {"size": size, "sizes": SIZES, "ticket_status": statuses,
                        "runs_per_ticket": list(RUNS_PER_TICKET), "runs_per_ticket_counts": run_counts,
                        "session_counts": list(SESSION_COUNTS),
@@ -243,14 +244,22 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     run_counts = dimensions.get("runs_per_ticket_counts", {})
     if set(run_counts) != {str(value) for value in RUNS_PER_TICKET} or sum(run_counts.values()) != counts["tickets"]:
         raise ValueError("runs_per_ticket counts do not match materialized tickets")
+    if sum(dimensions.get("ticket_status", {}).values()) != counts["tickets"]:
+        raise ValueError("ticket status counts do not match materialized tickets")
     session_states = dimensions.get("session_states", {})
     if set(session_states) != set(SESSION_STATES) or any(session_states[state] < 1 for state in SESSION_STATES):
         raise ValueError("all session states must be materialized")
     budget_states = dimensions.get("budget_states", {})
     if any(budget_states[state] < 1 for state in BUDGET_STATES):
         raise ValueError("all budget states must be materialized")
+    if sum(session_states.values()) != counts["sessions"]:
+        raise ValueError("session state counts do not match materialized sessions")
     if dimensions.get("ticket_status", {}).get("todo", 0) + sum(dimensions.get("ticket_status", {}).values()) == 0:
         raise ValueError("ticket state distribution is empty")
+    logical = manifest["logical"]
+    expected_hash = _logical_hash(logical) if isinstance(logical, dict) else None
+    if manifest["hashes"].get("manifest_sha256") != expected_hash:
+        raise ValueError("manifest logical checksum does not match logical payload")
 
 
 def manifest_for_dataset(path: Path, *, seed: int = 35527, size: str = "small", storage_mode: str = "sqlite") -> dict[str, Any]:

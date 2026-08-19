@@ -62,8 +62,22 @@ class SQLiteMetrics:
         self.transactions = 0
         self.errors = 0
         self.lock_ms = 0.0
+        self.transaction_ms = 0.0
+        self.lock_wait_ms = 0.0
         self.busy_errors = 0
         self._transaction_started = None
+
+
+def _trace_sqlite(metrics: SQLiteMetrics, statement: str) -> None:
+    normalized = statement.strip().upper()
+    metrics.queries += 1
+    if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
+        metrics.transactions += 1
+    if normalized.startswith("BEGIN"):
+        metrics._transaction_started = time.perf_counter_ns()
+    elif normalized in {"COMMIT", "ROLLBACK"} and metrics._transaction_started:
+        metrics.transaction_ms += (time.perf_counter_ns() - metrics._transaction_started) / 1_000_000
+        metrics._transaction_started = None
 
 
 class InstrumentedLedger(BudgetLedger):
@@ -74,18 +88,7 @@ class InstrumentedLedger(BudgetLedger):
     def _connect(self) -> sqlite3.Connection:
         connection = super()._connect()
 
-        def trace(statement: str) -> None:
-            normalized = statement.strip().upper()
-            self.metrics.queries += 1
-            if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
-                self.metrics.transactions += 1
-            if normalized.startswith("BEGIN"):
-                self.metrics._transaction_started = time.perf_counter_ns()
-            elif normalized in {"COMMIT", "ROLLBACK"} and getattr(self.metrics, "_transaction_started", None):
-                self.metrics.lock_ms += (time.perf_counter_ns() - self.metrics._transaction_started) / 1_000_000
-                self.metrics._transaction_started = None
-
-        connection.set_trace_callback(trace)
+        connection.set_trace_callback(lambda statement: _trace_sqlite(self.metrics, statement))
         return connection
 
 
@@ -122,15 +125,29 @@ def validate_result(result: dict[str, Any]) -> None:
             raise ValueError(f"result missing {key}")
     if result["source_checksum_before"] != result["source_checksum_after"]:
         raise ValueError("benchmark mutated source project")
+    manifest = result["dataset_manifest"]
+    manifest_hash = manifest.get("hashes", {}).get("manifest_sha256")
+    if not manifest_hash:
+        raise ValueError("dataset manifest has no logical hash")
+    integrity = result.get("integrity", {})
+    if integrity.get("warmup_excluded") is not True:
+        raise ValueError("warmup samples must be excluded")
+    if integrity.get("cold_available") is False and any(case.get("mode") == "cold" for case in result["cases"]):
+        raise ValueError("cold samples cannot be reported without cache eviction capability")
     for case in result["cases"]:
         for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
             if key not in case:
                 raise ValueError(f"case missing {key}")
         if case["sample_count"] != len(case["raw_samples"]):
             raise ValueError(f"sample count mismatch for {case.get('case_id')}")
+        if case.get("dataset_manifest_hash") != manifest_hash:
+            raise ValueError(f"case manifest linkage mismatch for {case.get('case_id')}")
         for sample in case["raw_samples"]:
             if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
                 raise ValueError("invalid sample schema")
+            for metric in ("sqlite_queries", "sqlite_transactions", "sqlite_lock_ms", "sqlite_transaction_ms", "sqlite_errors"):
+                if metric not in sample:
+                    raise ValueError(f"sample missing {metric}")
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
@@ -186,6 +203,15 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     store, sessions, workflow, ledger = TicketStore(project, use_database=use_database), None, load_workflow("delivery"), InstrumentedLedger(project, sqlite_metrics)
     sessions = SessionStore(project, store, use_database=use_database)
     store.init(); sessions.init(); tickets = store.list("delivery")
+    def instrument_store(store: Any) -> None:
+        original_connect = store._db
+        def connect() -> sqlite3.Connection:
+            connection = original_connect()
+            connection.set_trace_callback(lambda statement: _trace_sqlite(sqlite_metrics, statement))
+            return connection
+        store._db = connect
+    instrument_store(store)
+    instrument_store(sessions)
     ticket_id = next((item.id for item in tickets
                       if (ledger.get_budget(f"ticket:{item.id}") or {}).get("status") == "active"), tickets[0].id)
     second_ticket_id = next(item.id for item in tickets if item.id != ticket_id)
@@ -260,6 +286,27 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
             with ledger._connect() as db:
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
+    def concurrent_overallocation() -> dict[str, Any]:
+        owner = f"BENCH-OVERALLOC-{uuid.uuid4().hex}"
+        ledger.create_budget("ticket", owner, limits={"tokens": 1, "points": 1, "runs": 1})
+        run_ids = [f"RUN-BENCH-OVER-{uuid.uuid4().hex}-{index}" for index in range(4)]
+        def reserve(run_id: str) -> str:
+            try:
+                return ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}, budget_owner_ticket_id=owner).state
+            except Exception as exc:
+                return type(exc).__name__
+        try:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                states = list(pool.map(reserve, run_ids))
+            budget = ledger.get_budget(f"ticket:{owner}") or {}
+            return {"states": states, "denied": any(state == "BudgetDenied" for state in states),
+                    "reserved_runs": budget.get("reserved_runs"),
+                    "non_negative": all(budget.get(key, 0) >= 0 for key in ("reserved_runs", "finalized_runs")),
+                    "terminal_states": [ledger.get_run(run_id).get("state") for run_id in run_ids if ledger.get_run(run_id)]}
+        finally:
+            with ledger._connect() as db:
+                db.execute("DELETE FROM runs WHERE ticket_budget_id=?", (f"ticket:{owner}",))
+                db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
     # A repeated reserve uses a prepared run id and is therefore idempotent and
     # read-only after setup; it cannot contaminate subsequent samples.
     prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
@@ -295,6 +342,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.get_missing", "BudgetLedger", "get_run(missing)", lambda: ledger.get_run("RUN-MISSING")),
         ("budgetledger.reconcile", "BudgetLedger", "reconcile", lambda: ledger.reconcile()),
         ("budgetledger.concurrency.atomic_reserve", "BudgetLedger", "concurrent atomic reservation", concurrent_reservation),
+        ("budgetledger.concurrency.denied_overallocation", "BudgetLedger", "concurrent denied overallocation", concurrent_overallocation),
         ("budgetledger.release", "BudgetLedger", "release (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.release(run_id))),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="compact")),
@@ -350,7 +398,8 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
                         "sqlite_transactions": metrics.transactions if metrics is not None else None,
-                        "sqlite_lock_ms": metrics.lock_ms if metrics is not None else None,
+                        "sqlite_lock_ms": metrics.lock_wait_ms if metrics is not None else None,
+                        "sqlite_transaction_ms": metrics.transaction_ms if metrics is not None else None,
                         "sqlite_errors": metrics.errors if metrics is not None else None,
                         "sqlite_metrics_unavailable_reason": None if metrics is not None else "case does not use SQLite",
                         "error": error})

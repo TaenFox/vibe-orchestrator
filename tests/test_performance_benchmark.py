@@ -50,14 +50,19 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError):
         load_dataset(path)
+    path.write_text(json.dumps(manifest | {"hashes": {"manifest_sha256": "tampered"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum"):
+        load_dataset(path)
 
 
 def test_result_validation_rejects_mutated_source_and_sample_mismatch():
-    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+    manifest = {"hashes": {"manifest_sha256": "m"}}
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": manifest,
               "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
                           "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
-                          "sample_count": 0, "raw_samples": []}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+                          "sample_count": 0, "raw_samples": [], "dataset_manifest_hash": "m"}],
+              "source_checksum_before": "a", "source_checksum_after": "a",
+              "integrity": {"warmup_excluded": True}}
     validate_result(result)
     result["cases"][0]["sample_count"] = 1
     with pytest.raises(ValueError):
@@ -87,6 +92,7 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
         "sessionstore.create", "sessionstore.activate", "sessionstore.complete", "sessionstore.cancel",
         "budgetledger.reserve.idempotent", "budgetledger.start", "budgetledger.finalize",
         "budgetledger.release", "budgetledger.reconcile", "budgetledger.concurrency.atomic_reserve",
+        "budgetledger.concurrency.denied_overallocation",
         "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
     }
     assert required <= ids

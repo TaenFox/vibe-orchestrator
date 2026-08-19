@@ -20,6 +20,10 @@ profile links. `sample_count == len(raw_samples)`, warmup samples отсутст
 ошибки ссылаются на существующий sample.
 
 SQLite cases сохраняют query/transaction/error counters, lock timing и explain plans.
+Concurrency registry включает отдельные idempotent и denied-overallocation cases;
+результат фиксирует non-negative counters и terminal states. `sqlite_transaction_ms`
+отделён от `sqlite_lock_ms` (lock wait; при отсутствии наблюдаемого wait значение
+остаётся нулевым, а не подменяется длительностью transaction).
 Профилирование выбранного scheduler case связывает pstats/text/profile manifest с
 `run_id`, `case_id` и manifest hash. Смотрите [каноническую методику](../../docs/performance.md).
 
