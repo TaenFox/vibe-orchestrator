@@ -7,7 +7,7 @@ from vibe_orchestrator.tickets import TicketStore
 
 
 def test_reader_supports_filters_pagination_and_json_payloads(tmp_path: Path):
-    store = TicketStore(tmp_path)
+    store = TicketStore(tmp_path, use_database=False)
     store.init()
     first = store.create("delivery", "task", "First", status="todo", priority=20)
     store.create("discovery", "idea", "Second", status="ready", priority=10)
@@ -22,7 +22,7 @@ def test_reader_supports_filters_pagination_and_json_payloads(tmp_path: Path):
 
 
 def test_integrity_audit_reports_healthy_snapshot(tmp_path: Path):
-    store = TicketStore(tmp_path)
+    store = TicketStore(tmp_path, use_database=False)
     store.init()
     ticket = store.create("delivery", "task", "Audited")
     run_dir = tmp_path / ".vibe" / "runs" / "run-1"

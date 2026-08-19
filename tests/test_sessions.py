@@ -195,6 +195,7 @@ def test_save_rejects_invalid_new_lifecycle(
 
 def test_invalid_type_duplicate_and_legacy_missing_updated_at(tmp_path: Path):
     tickets, store = stores(tmp_path)
+    store = SessionStore(tmp_path, tickets, use_database=False)
     discovery_ticket = tickets.create("discovery", "idea", "Wrong process")
     session = store.create()
     with pytest.raises(ValueError, match="Invalid delivery ticket type"):
@@ -209,7 +210,8 @@ def test_invalid_type_duplicate_and_legacy_missing_updated_at(tmp_path: Path):
 
 
 def test_legacy_updated_at_is_restored_from_created_at(tmp_path: Path):
-    _, store = stores(tmp_path)
+    tickets, _ = stores(tmp_path)
+    store = SessionStore(tmp_path, tickets, use_database=False)
     path = tmp_path / ".vibe" / "sessions" / "SESSION-LEGACY.yaml"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -232,7 +234,8 @@ def test_legacy_updated_at_is_restored_from_created_at(tmp_path: Path):
 
 
 def test_legacy_aggregate_store_is_migrated_to_versioned_session_files(tmp_path: Path):
-    _, store = stores(tmp_path)
+    tickets, _ = stores(tmp_path)
+    store = SessionStore(tmp_path, tickets, use_database=False)
     legacy_root = tmp_path / ".vibe" / "tmp"
     legacy_root.mkdir(parents=True)
     legacy_root.joinpath("delivery-sessions.yaml").write_text(
@@ -363,11 +366,7 @@ def test_session_lifecycle_updates_scheduler_compatibility_file(tmp_path: Path):
 
     assert active.status == "active"
     assert tickets.get(first.id).status == "selected_for_session"
-    assert yaml.safe_load((tmp_path / ".vibe/tmp/delivery-session.yaml").read_text()) == {
-        "active": True,
-        "session_id": session.id,
-        "participants": [first.id, second.id],
-    }
+    assert not (tmp_path / ".vibe/tmp/delivery-session.yaml").exists()
 
     with pytest.raises(SessionError, match="неполная"):
         sessions.complete(session.id, tickets)
@@ -402,10 +401,8 @@ def test_session_activation_does_not_partially_select_tickets_on_invalid_members
     sessions = DeliverySessionStore(tmp_path)
     session = sessions.create("Release")
     session.participants = [first.id, "DEL-MISSING"]
-    sessions._replace(session)
-
-    with pytest.raises(SessionError, match="Участник не найден"):
-        sessions.activate(session.id, tickets)
+    with pytest.raises(SessionError, match="Unknown ticket"):
+        sessions._replace(session)
 
     assert tickets.get(first.id).status == "todo"
     assert sessions.get(session.id).status == "draft"

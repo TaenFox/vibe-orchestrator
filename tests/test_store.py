@@ -52,7 +52,7 @@ def test_retry_state_is_persisted(tmp_path: Path):
 
 
 def test_loads_legacy_ticket_without_run_history(tmp_path: Path):
-    store = TicketStore(tmp_path)
+    store = TicketStore(tmp_path, use_database=False)
     store.init()
     path = tmp_path / ".vibe" / "tickets" / "delivery" / "DEL-LEGACY.yaml"
     path.write_text(
@@ -83,7 +83,7 @@ def test_loads_legacy_ticket_without_run_history(tmp_path: Path):
 
 
 def test_legacy_ticket_has_no_required_token_usage_contract(tmp_path: Path):
-    store = TicketStore(tmp_path)
+    store = TicketStore(tmp_path, use_database=False)
     store.init()
     path = tmp_path / ".vibe" / "tickets" / "delivery" / "DEL-LEGACY-USAGE.yaml"
     path.write_text(yaml.safe_dump({

@@ -47,40 +47,17 @@ class DeliverySessionControl:
 
     def __init__(self, project: Path):
         self.project = project.resolve()
-        self.path = self.project / ".vibe" / "tmp" / "delivery-session.yaml"
         self.store = SessionStore(self.project)
 
     def get_participants(self) -> set[str] | None:
-        """Return participant IDs, or ``None`` when no active session exists.
-
-        A missing file and an explicitly inactive session use legacy mode. An
-        active but malformed session fails closed by returning no participants.
-        """
+        """Return participant IDs from the SQLite session store."""
         try:
             active = next((session for session in self.store.list() if session.status == "active"), None)
             if active is not None:
                 return self.store.effective_ticket_ids(active)
-            if self.store.database_enabled:
-                return None
         except (OSError, UnicodeError, ValueError, yaml.YAMLError):
             return set()
-        # Keep reading the marker for projects that have not yet got a
-        # versioned session document; it is only a migration fallback.
-        try:
-            payload = yaml.safe_load(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except (OSError, UnicodeError, yaml.YAMLError):
-            return set()
-        if isinstance(payload, dict):
-            if payload.get("active") is not True:
-                return None
-        else:
-            return set()
-        participants = payload.get("participants")
-        if not isinstance(participants, list) or any(not isinstance(item, str) or not item for item in participants):
-            return set()
-        return set(participants)
+        return None
 
 
 class SessionError(ValueError):
@@ -93,8 +70,6 @@ class DeliverySessionStore:
     def __init__(self, project: Path):
         self.project = project.resolve()
         self.store = SessionStore(self.project)
-        self.root = self.project / ".vibe" / "tmp"
-        self.active_path = self.root / "delivery-session.yaml"
 
     def list(self):
         try:
@@ -136,13 +111,6 @@ class DeliverySessionStore:
             self.store.save(changed)
             return changed
         except (KeyError, TypeError, ValueError) as exc:
-            # Keep the adapter able to inspect malformed legacy membership so
-            # activation can fail closed without changing ticket state.
-            if "Unknown ticket:" in str(exc):
-                self.store.session_path(changed).write_text(
-                    yaml.safe_dump(changed.to_dict(), sort_keys=False, allow_unicode=True), encoding="utf-8"
-                )
-                return changed
             raise SessionError(str(exc)) from exc
 
     def _active(self):
@@ -201,14 +169,6 @@ class DeliverySessionStore:
             if message == "Cannot activate an empty session":
                 message = "Нельзя активировать пустую сессию"
             raise SessionError(message) from exc
-        if not self.store.database_enabled:
-            self.active_path.parent.mkdir(parents=True, exist_ok=True)
-            marker = {"active": True, "session_id": session.id, "participants": session.ticket_ids}
-            if session.budget_policy != "legacy" or session.membership_policy != "legacy" or any(
-                    value is not None for value in session.budget_limits.values()):
-                marker.update({"budget_policy": session.budget_policy, "budget_limits": session.budget_limits,
-                               "membership_policy": session.membership_policy})
-            self.active_path.write_text(yaml.safe_dump(marker, sort_keys=False, allow_unicode=True), encoding="utf-8")
         return session
 
     def _finish(self, session_id: str, status: str, ticket_store: Any, reason: str | None):
@@ -229,8 +189,6 @@ class DeliverySessionStore:
             (self.store.complete if status == "completed" else self.store.cancel)(session)
         except (KeyError, TypeError, ValueError) as exc:
             raise SessionError(str(exc)) from exc
-        if not self.store.database_enabled:
-            self.active_path.unlink(missing_ok=True)
         return session
 
     def complete(self, session_id: str, ticket_store: Any, reason: str | None = None):

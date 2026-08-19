@@ -8,7 +8,7 @@
 
 ### Термины и границы контракта
 
-- **Тикет** — YAML-агрегат control plane с одним текущим `status`; код, знания и
+- **Тикет** — SQLite-агрегат control plane с одним текущим `status`; код, знания и
   артефакты реализации находятся в целевом репозитории и не становятся полями
   тикета.
 - **Контекст тикета** (`context`) — актуальный структурированный handoff между
@@ -158,12 +158,13 @@ frontend-пакетов. Доска, поиск, карточка тикета �
 через framework routes; старый `http.server` больше не используется командами
 `vibe ui` и `vibe run --ui`.
 
-Если существует `.vibe/control.sqlite3`, доска и карточка читаются из SQLite.
-Операции изменения также записываются транзакционно в SQLite. YAML-файлы после
-миграции не читаются и не обновляются; они остаются только историческим
-источником миграции.
+Доска, карточка и все операции изменения читаются из SQLite
+`.vibe/control.sqlite3` и записываются транзакционно в него. Runtime больше не
+читает и не создаёт YAML-файлы тикетов или сессий. Исторические YAML допустимы
+только как вход одноразового мигратора и после миграции должны быть убраны из
+рабочих каталогов.
 
-В верхней части UI доступна форма создания тикетов Discovery, Delivery и Process Management. Поля `тип`, `заголовок`, `описание`, `приоритет` и `родительский ID` сохраняются сразу в локальное состояние `.vibe/tickets`.
+В верхней части UI доступна форма создания тикетов Discovery, Delivery и Process Management. Поля `тип`, `заголовок`, `описание`, `приоритет` и `родительский ID` сохраняются сразу в SQLite.
 
 Во втором терминале VS Code:
 
@@ -187,7 +188,8 @@ vibe release-retry /path/to/your-project DEL-XXXXXX  # повторить merge 
 
 При запуске из `stable` оркестратор автоматически находит checkout ветки `main` или создаёт временный worktree в `.vibe/tmp/worktrees/__main__`. `VIBE_MAIN_WORKTREE` и `VIBE_MAIN_BRANCH` можно использовать как override. Worktree тикета создаётся в `.vibe/tmp/worktrees/`; состояние тикетов остаётся только в `stable`. При конфликте release-операция делает `merge --abort`, оставляет тикет на `ready_for_release` и ждёт ручного разрешения перед `vibe release-retry`.
 
-Для планирования целостной Delivery-сессии можно создать `.vibe/tmp/delivery-session.yaml`:
+Для планирования целостной Delivery-сессии используйте UI или CLI. Файл
+`.vibe/tmp/delivery-session.yaml` больше не поддерживается:
 
 ```yaml
 active: true
@@ -197,8 +199,8 @@ participants:
 ```
 
 Пока сессия активна, в `system_analysis` проходят только перечисленные тикеты;
-`wip_exempt`-тикеты (например, rework) сохраняют прежнее поведение. При отсутствии
-активного файла старые тикеты работают в legacy-режиме без миграции.
+`wip_exempt`-тикеты (например, rework) сохраняют прежнее поведение. Состояние
+сессии хранится в SQLite.
 
 ### Ограничения UI, telemetry и performance
 
@@ -210,10 +212,8 @@ UI проверяется регрессионными тестами для Dis
 
 Интерфейс рассчитан на локальную работу и не собирает telemetry: браузер не
 отправляет события, метрики или содержимое полей во внешний сервис. Рендеринг
-доски и endpoint `/api/tickets` перечитывают локальные YAML-файлы целиком на
-каждый запрос, поэтому UI не является пагинированным мониторингом для больших
-объемов данных. Для MVP приемлемы локальные очереди и ручная проверка; при росте
-числа тикетов потребуется отдельная оптимизация хранилища и обновления по diff.
+доски и endpoint `/api/tickets` читают локальную SQLite-базу на каждый запрос;
+YAML-файлы control plane в этом пути не участвуют.
 
 ## Управляемые Delivery-сессии
 
@@ -250,18 +250,14 @@ vibe session cancel /path/to/your-project SES-XXXXXX --override "Состав у
 │       └── result.json
 ├── tmp/
 │   └── workers.yaml  # локальный runtime-лимит воркеров
-├── sessions/         # локальные Delivery-сессии, игнорируются Git
-├── sessions.lock     # lock-файл локальных Delivery-сессий
-└── tickets/          # локальный радар stable, не часть code plane
-    ├── discovery/
-    ├── delivery/
-    └── process_management/
+├── control.sqlite3   # единственный runtime control plane
+└── archive/          # исторические YAML и снятые runtime-артефакты
 ```
 
 ### Снимок control plane в SQLite
 
-Для подготовки к переносу runtime-состояния в базу используется только скрипт
-миграции. Он читает YAML тикетов и сессий, `run.json` и фактически применённые
+Для первоначального переноса runtime-состояния в базу используется только скрипт
+миграции. Он читает исторические YAML тикетов и сессий, `run.json` и фактически применённые
 `prompt.contract.txt`, а затем атомарно
 пересобирает SQLite-снимок:
 
@@ -272,8 +268,9 @@ vibe session cancel /path/to/your-project SES-XXXXXX --override "Состав у
 
 По умолчанию база создаётся в `.vibe/control.sqlite3` и игнорируется Git.
 Повторный запуск идемпотентен и используется только для первоначального импорта
-или явного восстановления из исторического YAML-снимка. После миграции runtime
-работает только с SQLite.
+или явного восстановления из архивного YAML-снимка. После миграции runtime
+работает только с SQLite; обычные `TicketStore()` и `SessionStore()` не имеют
+режима чтения или записи YAML.
 
 В таблице `prompt_contracts` одинаковые применённые промты дедуплицируются по
 SHA-256. Каждый запуск хранит ссылку на этот неизменяемый снимок через
@@ -289,7 +286,7 @@ SHA-256. Каждый запуск хранит ссылку на этот не�
 `run_events`, а блок `token_usage` — в `token_usage`. Некорректные строки
 `events.jsonl` пропускаются, исходные файлы при этом не изменяются.
 
-Тикет — это один YAML-файл. Пример:
+Исторический YAML-снимок тикета выглядел так (новые тикеты так не хранятся):
 
 ```yaml
 id: DISC-A1B2C3
@@ -325,7 +322,7 @@ run_history:
 
 Source of truth для аудита разделен на два слоя:
 
-- `.vibe/tickets/**` — локальное долговечное состояние control plane. Оно принадлежит checkout `stable`, не входит в code plane и не переносится merge-операциями между ветками. Поля `status`, `active_run`, `last_outcome`, `last_summary`, `consecutive_failures`, `retry_after` и `run_history` определяют, что произошло с тикетом.
+- `.vibe/control.sqlite3` — локальное долговечное состояние control plane. Оно принадлежит checkout `stable`, не входит в code plane и не переносится merge-операциями между ветками. Поля `status`, `active_run`, `last_outcome`, `last_summary`, `consecutive_failures`, `retry_after` и `run_history` определяют, что произошло с тикетом.
 - `.vibe/runs/<run_id>/` — локальные артефакты конкретного запуска. Здесь лежат `run.json` с execution profile и идентичностью запуска, `events.jsonl` с сырым выводом `codex exec` и `result.json` со структурированным ответом агента. Каталоги `tickets/`, `runs/` и `tmp/` не должны попадать в коммиты code plane.
 
 Как интерпретировать поля:
@@ -341,7 +338,7 @@ Source of truth для аудита разделен на два слоя:
 - `prompt_path` и `prompt_version` в `run_history`/`run.json` — идентичность prompt-контракта конкретного запуска. `prompt_version` вычисляется как `sha256` от канонического prompt-контракта, сохраненного в `.vibe/runs/<run_id>/prompt.contract.txt` и `run.json["prompt_contract"]`: markdown prompt плюс execution-contract wrapper, placeholders runtime-полей и stage-specific execution profile.
 - `model` и `reasoning_effort` в `run_history`/`run.json` — явная фиксация execution profile, с которым был выполнен конкретный запуск.
 - `ticket_title`, `ticket_priority`, `ticket_parent`, `ticket_description` в `run_history`/`run.json` — durable snapshot mutable ticket-полей, которые реально были встроены в prompt этого запуска.
-- `audit_events[]` — append-only журнал успешных `create_ticket`/`update_ticket`; legacy YAML без этого поля читается как пустой список.
+- `audit_events[]` — append-only журнал успешных `create_ticket`/`update_ticket`; при миграции отсутствующее поле трактуется как пустой список.
 
 ### Write tools
 
@@ -367,19 +364,15 @@ suggested_scope и evidence; basis сохраняется immutable. Поиск 
 
 При replay `technical_analysis` с тем же canonical tech-debt key exact active
 ticket остается неизменным: сохраняются его parent, status, metadata,
-`audit_events` и YAML-представление. Такой ticket считается результатом текущей
+`audit_events` и SQLite-представление. Такой ticket считается результатом текущей
 reconciliation по своему ID и не деактивируется, даже если его нет в обычном
 `delivery_tickets` snapshot. Повтор с тем же `source_run` сохраняет ровно один
 active matching ticket.
 
 При `create_ticket` новый тикет сначала полностью формируется в памяти: в него
 попадают `run_history.created` и обязательное событие `ticket_created`, после
-чего выполняется одна atomic-замена YAML. Тикет без соответствующего audit event
-не считается опубликованным результатом. Если commit завершается ошибкой,
-исключение передается вызывающему коду, а временный файл очищается существующим
-контрактом `TicketStore.save()`. Это гарантия атомарности одной записи control
-plane, а не `fsync`-гарантия после отключения питания и не транзакция между
-несколькими файлами.
+чего выполняется одна транзакция SQLite. Это гарантия атомарности одной записи
+control plane, а не `fsync`-гарантия после отключения питания.
 
 Практическое правило для расследований: сначала смотрите `run_history` в тикете как индекс запусков, затем открывайте `.vibe/runs/<run_id>/run.json` и `result.json`, и только после этого при необходимости углубляйтесь в `events.jsonl`.
 
@@ -416,8 +409,8 @@ dedup key и либо возвращает exact/ambiguous результат, �
 а `source_run` — совпадать с `run_history` либо `.vibe/runs/<source_run>/run.json`.
 Если manifest существует, он является источником истины и неполные metadata не
 подменяются history; проверяются точные `ticket_id`, `stage` и `run_id`. Evidence
-должен быть файлом внутри project root, не `.vibe/tickets/**`, не
-`.vibe/sessions/**` и не каталогом; `identifier` ищется в файле, observation
+должен быть файлом внутри project root, не `.vibe/archive/**`, не
+`.vibe/runs/**` и не каталогом; `identifier` ищется в файле, observation
 проходит verifier. Ошибка preflight не создает частичный набор задач.
 
 Defaults materialization: `status=todo`, `process=delivery`, `type=task`,
@@ -471,7 +464,7 @@ conflicting idempotency и ambiguous dedup возвращают conflict/result 
 `TECH_DEBT_PREFLIGHT_UNAVAILABLE`, `TECH_DEBT_MUTATION_BLOCKED`. Read-only операции
 не создают миграции, каталоги или кэш. Runtime хранит control plane в SQLite,
 runs и бинарные артефакты — в файловой системе;
-atomic save не является fsync/межфайловой транзакцией, audit не защищен от
+транзакция не является fsync-гарантией после отключения питания, audit не защищен от
 ручного редактирования, внешней authorization/DB/Jira и budget enforcement нет.
 
 ## Read-only agent queries
@@ -512,11 +505,11 @@ bounds, не вызывают init/save/migration и не меняют ticket YA
 `update_session_membership` атомарно заменяет полный состав. Элементы имеют
 `ticket_id`, необязательные уникальные неотрицательные `position` и `priority`;
 порядок сохраняется в `ticket_ids`, а `membership_priorities` хранится отдельно
-от `Ticket.priority` (legacy YAML без этого поля читаются с default `100`).
+от `Ticket.priority` (при миграции отсутствие этого поля заменяется на default `100`).
 Успешная запись добавляет append-only audit event с `actor`, `origin`, временем,
 `before`, `after` и `changed_fields`; повтор без изменений события не создаёт.
-Запись выполняется под `sessions.lock` через atomic tempfile/replace, поэтому
-ошибка валидации не оставляет частичного состава.
+Запись выполняется транзакционно в SQLite под процессным lock, поэтому ошибка
+валидации не оставляет частичного состава.
 
 Агенты не получают `activate`, `complete` или `cancel` и не могут менять active,
 completed или cancelled session. Автоматический Delivery rework по-прежнему
@@ -535,13 +528,15 @@ Rework, созданный оркестратором для Delivery-родит
 
 ## Конфигурация процессов
 
-Процессы описываются декларативными YAML-файлами в `workflows/`. Промпты лежат в `prompts/`. Для прототипа это сделано намеренно; позднее файлового провайдера промптов можно будет заменить на версионируемый KMS-провайдер без изменения механики тикетов и процессов.
+Процессы описываются декларативными YAML-файлами в `workflows/`. Промпты лежат в
+`prompts/`. Это конфигурация приложения, а не хранение состояния тикетов и
+сессий.
 
 ## Безопасность
 
 Песочница Codex по умолчанию — `workspace-write`, а не `danger-full-access`.
-Агентский contract не предоставляет `TicketStore.save` и прямую запись
-`.vibe/tickets/**`; lifecycle остается у UI и оркестратора. `origin` фиксирует
+Агентский contract не предоставляет `TicketStore.save` и прямую запись control
+plane; lifecycle остается у UI и оркестратора. `origin` фиксирует
 источник операции, но не заменяет авторизацию. Оркестратор не коммитит файлы
 аутентификации Codex. Храните `.codex/auth.json` и другие учетные данные вне
 проектных репозиториев.
@@ -576,7 +571,7 @@ confidence и fresh/stale/unavailable metadata. Card, drawer и session panel
 - `technical_analysis` создает Delivery-тикеты только из YAML-блока в `details`. `implementation_required: true` требует хотя бы один обязательный Delivery-тикет, а `implementation_required: false` требует пустой `delivery_tickets`; несогласованный результат возвращается на исправление. Tech-debt candidates после preflight используют тот же safe write boundary и find-or-create.
 - В том же верхнеуровневом YAML `details` можно передать `tech_debt_candidates` версии `tech_debt_candidates.v1`. Каждый кандидат обязан содержать непустые `problem`, `impact`, `suggested_scope`, `source_ticket`, `source_stage`, `source_run`, `type: task`, `urgency: low|medium|high`, неотрицательный целочисленный `priority` и `evidence` с `path`, `identifier`, `observation`. Отсутствующий ключ означает пустой список; неизвестная версия, поле или malformed payload — ошибка.
 - Preflight отклоняет кандидата с отсутствующим или отличающимся `run.json.run_id`, а также с отсутствующими, нестроковыми, пустыми или whitespace-only `ticket_id`/`stage`, ошибкой `TECH_DEBT_SOURCE_MISMATCH` по пути `tech_debt_candidates.candidates[N].source_run`; при этом source ticket, session и Delivery children не изменяются.
-- Dedup key не включает source_run, source_ticket, urgency, priority, actor или origin; scan, ambiguity decision и atomic save защищены межпроцессным lock-файлом. Ошибка чтения/lock не создаёт тикет.
+- Dedup key не включает source_run, source_ticket, urgency, priority, actor или origin; scan, ambiguity decision и транзакционная запись защищены межпроцессным lock-файлом. Ошибка чтения/lock не создаёт тикет.
 - При отсутствии manifest допускается legacy fallback на последнюю matching-запись `run_history`, но выбранная запись обязана содержать непустые строковые `ticket_id` и `stage`, точно совпадающие с source ticket/source stage, а `run_id` — с `source_run` кандидата. Неполная identity-запись отклоняется без попытки использовать другую history-запись.
 - Accepted manifest metadata: `{"run_id":"run-1","ticket_id":"DISC-ABC123","stage":"technical_analysis"}` при соответствующих `source_run`, source ticket и source stage кандидата. Rejected: `{ "run_id": "run-1" }`, `ticket_id: null`, `stage: "   "` или любое нестроковое значение; matching history не используется, если такой `run.json` уже существует.
 - Перед любым созданием Delivery-тикета выполняется read-only preflight: проверяются source ticket, stage, run artifact, согласованность run metadata, активные Delivery-сессии и безопасный путь evidence. Единый error envelope имеет `contract_version: orchestrator.errors.v1`, `code`, `path`, `message`; ошибки `TECH_DEBT_INVALID`, `TECH_DEBT_SOURCE_NOT_FOUND`, `TECH_DEBT_SOURCE_MISMATCH` и `TECH_DEBT_PREFLIGHT_UNAVAILABLE` блокируют mutation. Такие contract errors не являются `needs_correction`: source ticket и session остаются без изменений, `_record_failure` и follow-up не вызываются, corrective или Delivery children не создаются. Кандидат автоматически в сессию не добавляется.

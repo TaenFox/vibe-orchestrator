@@ -37,9 +37,8 @@ def test_generated_vibe_readme_is_localized(tmp_path: Path):
 
     readme = (tmp_path / ".vibe" / "README.md").read_text(encoding="utf-8")
     gitignore = (tmp_path / ".vibe" / ".gitignore").read_text(encoding="utf-8")
-    assert "Состояние тикетов для vibe-orchestrator" in readme
-    assert "`runs/` содержит локальные артефакты запусков" in readme
-    assert "`run.json`, `events.jsonl`, `result.json`" in readme
+    assert "control plane хранится в `control.sqlite3`" in readme
+    assert "`runs/` и `tmp/` содержат локальные runtime-артефакты" in readme
     assert "tmp/" in gitignore
     assert "tickets/" in gitignore
     assert "sessions/" in gitignore

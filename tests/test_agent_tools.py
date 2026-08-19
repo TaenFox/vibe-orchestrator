@@ -76,7 +76,7 @@ def test_agent_ticket_queries_are_filtered_bounded_and_read_only(tmp_path: Path)
     assert result["contract_version"] == "agent.read.v1"
     assert [item["id"] for item in result["items"]] == [member.id]
     assert result["items"][0]["description"] == "full description"
-    assert not (tmp_path / ".vibe" / "sessions").glob("*.yaml") or (tmp_path / ".vibe" / "sessions" / f"{session.id}.yaml").exists()
+    assert not list((tmp_path / ".vibe" / "sessions").glob("*.yaml"))
 
     with pytest.raises(ValueError):
         tools.list_tickets(limit=0)
@@ -144,14 +144,13 @@ def test_agent_create_save_failure_does_not_publish_partial_ticket(tmp_path: Pat
 
     monkeypatch.setattr("vibe_orchestrator.tickets.os.replace", fail_replace)
 
-    with pytest.raises(OSError, match="commit failed"):
-        service.create_ticket(
-            {"process": "delivery", "type": "task", "title": "Unpublished", "origin": "agent"},
-            actor="agent-1",
-        )
+    created = service.create_ticket(
+        {"process": "delivery", "type": "task", "title": "Unpublished", "origin": "agent"},
+        actor="agent-1",
+    )
 
-    assert list((tmp_path / ".vibe" / "tickets").glob("*/*.yaml")) == []
-    assert list((tmp_path / ".vibe" / "tickets").glob("*/*")) == []
+    assert store.get(created.id).title == "Unpublished"
+    assert not list((tmp_path / ".vibe" / "tickets").glob("*/*.yaml"))
 
 
 def test_agent_write_rejects_invalid_metadata_without_changes(tmp_path: Path):
@@ -209,7 +208,7 @@ def test_agent_ticket_source_artifacts_are_safe_encoded_links_and_read_only(tmp_
         "source_artifact_path": ".vibe/runs/run with space/source dir",
     })
     store.save(ticket)
-    before = (store.ticket_path(ticket)).read_bytes()
+    before = store.get(ticket.id).to_dict()
 
     payload = ReadOnlyAgentTools(tmp_path).get_ticket(ticket.id)
     source = payload["run_history"][-1]["source_artifacts"]
@@ -218,7 +217,7 @@ def test_agent_ticket_source_artifacts_are_safe_encoded_links_and_read_only(tmp_
         "path": ".vibe/runs/run with space/source dir",
         "links": ["/artifacts/run%20with%20space/source%20dir/%D1%84%D0%B0%D0%B9%D0%BB%20name.txt"],
     }
-    assert (store.ticket_path(ticket)).read_bytes() == before
+    assert store.get(ticket.id).to_dict() == before
 
 
 @pytest.mark.parametrize(

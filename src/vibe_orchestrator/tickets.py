@@ -132,7 +132,9 @@ class TicketStore:
 
     @property
     def database_enabled(self) -> bool:
-        return self.use_database and self.database.exists()
+        # Runtime storage is SQLite-only. The explicit ``use_database=False``
+        # mode is reserved for the one-time YAML migration reader.
+        return self.use_database
 
     def _db(self) -> sqlite3.Connection:
         from .control_db_migration import ensure_control_schema
@@ -147,6 +149,15 @@ class TicketStore:
         if self.database_enabled:
             self.runs_root.mkdir(parents=True, exist_ok=True)
             self._db().close()
+            readme = self.root / "README.md"
+            if not readme.exists():
+                readme.write_text(
+                    "# .vibe\n\nСостояние control plane хранится в `control.sqlite3`. Каталоги `runs/` и `tmp/` содержат локальные runtime-артефакты и не коммитятся.\n",
+                    encoding="utf-8",
+                )
+            gitignore = self.root / ".gitignore"
+            if not gitignore.exists():
+                gitignore.write_text("runs/\ntmp/\ntickets/\nsessions/\nsessions.lock\n", encoding="utf-8")
             return
         self.tickets_root.mkdir(parents=True, exist_ok=True)
         self.runs_root.mkdir(parents=True, exist_ok=True)

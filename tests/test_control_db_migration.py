@@ -7,10 +7,10 @@ from vibe_orchestrator.tickets import TicketStore
 
 
 def test_migration_imports_control_plane_and_is_repeatable(tmp_path: Path):
-    tickets = TicketStore(tmp_path)
+    tickets = TicketStore(tmp_path, use_database=False)
     tickets.init()
     ticket = tickets.create("delivery", "task", "Imported ticket", status="todo")
-    session_store = SessionStore(tmp_path, tickets)
+    session_store = SessionStore(tmp_path, tickets, use_database=False)
     session = session_store.create([ticket.id], title="Imported session")
     run_dir = tmp_path / ".vibe" / "runs" / "run-1"
     run_dir.mkdir(parents=True)
@@ -52,7 +52,7 @@ def test_migration_imports_control_plane_and_is_repeatable(tmp_path: Path):
 
 
 def test_migration_dry_run_does_not_create_database(tmp_path: Path):
-    tickets = TicketStore(tmp_path)
+    tickets = TicketStore(tmp_path, use_database=False)
     tickets.init()
     tickets.create("discovery", "idea", "Dry run")
     database = tmp_path / ".vibe" / "control.sqlite3"
@@ -64,11 +64,11 @@ def test_migration_dry_run_does_not_create_database(tmp_path: Path):
 
 
 def test_migration_preserves_effective_session_membership(tmp_path: Path):
-    tickets = TicketStore(tmp_path)
+    tickets = TicketStore(tmp_path, use_database=False)
     tickets.init()
     direct = tickets.create("delivery", "task", "Direct member", status="todo")
     inherited = tickets.create("delivery", "task", "Effective member", status="todo")
-    session_store = SessionStore(tmp_path, tickets)
+    session_store = SessionStore(tmp_path, tickets, use_database=False)
     session = session_store.create([direct.id], title="Membership session")
     session_store.activate(session)
     session_store.override_ticket(session, inherited.id, actor="test", reason="preserve effective membership")
