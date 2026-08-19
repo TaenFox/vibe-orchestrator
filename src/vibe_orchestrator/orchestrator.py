@@ -607,6 +607,13 @@ class Orchestrator:
         )
 
     def _deactivate_delivery_child(self, child: Ticket) -> None:
+        # A stale decomposition entry may still contain real implementation
+        # work. Never mark it done before its tree has reached the integration
+        # target; otherwise the release reconciler will no longer see it.
+        if self.tree_manager.enabled():
+            record = self.tree_manager.trees.get(child.id)
+            if record and record.integration_status != "merged":
+                self.tree_manager.release(child)
         child.parent = None
         child.blocked_by = []
         child.active_run = None
