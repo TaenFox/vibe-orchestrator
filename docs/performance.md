@@ -9,16 +9,17 @@ SessionStore, scheduler, BudgetLedger, UI rendering и HTTP endpoints. Фикс�
 
 ## Functional baseline: UI/API, scheduler, persistence, budget lifecycle
 
-Baseline включает `list/get/load_path/children_of` TicketStore; чтение, membership,
-validation, overlap и lifecycle SessionStore; чтение, reservation lifecycle,
-reconcile и error paths BudgetLedger; scheduler selection; UI board/fragment и
-HTTP success/error endpoints. SQLite является runtime control plane. Режим `yaml`
+Baseline включает `list/get/load_path/children_of/is_done/run_path` и write paths
+TicketStore; чтение, membership, agent membership, validation, overlap и lifecycle
+SessionStore; чтение, reservation/decision lifecycle, reconcile и error paths
+BudgetLedger; scheduler selection/WIP count; UI board/fragment/drawer и HTTP
+success/error endpoints. SQLite является runtime control plane. Режим `yaml`
 использует `use_database=False` для tickets/sessions и сохраняет legacy YAML files;
 ledger остаётся SQLite, поскольку это его authoritative persistence.
 Варианты профиля материализуют small/medium/large/xlarge ticket sets и связанные
 профильные counts сессий и ledger runs; manifest хранит фактические counts, а не
 только поддерживаемые labels. Reservation/concurrency cases используют отдельные
-synthetic budget IDs и удаляются после sample.
+synthetic budget IDs и удаляются после каждого sample.
 
 ## States and errors
 
@@ -26,6 +27,23 @@ synthetic budget IDs и удаляются после sample.
 active/exhausted/blocked_unknown/over_budget budgets. В error cases проверяются
 missing entities, malformed dataset, membership/validation failures, budget denial и
 HTTP 4xx. В result ошибки ссылаются на конкретный `sample_index`.
+
+## Изменения DEL-FDFFF6: registry и isolation
+
+Каждый registry item — именованный `CaseSpec` с `case_id`, component, operation,
+`kind` (`read_only` или `mutation`), `expected_outcome`, `storage_modes` и
+callbacks setup/run/teardown. Старый tuple-доступ сохранён для совместимых
+потребителей. Успешные и ожидаемо ошибочные публичные операции представлены
+отдельными cases; недоступный transport получает `limitations`, а не исчезает.
+
+Перед каждым sample harness снимает normalized logical snapshot control-plane
+SQLite/YAML entities и paths. Нормализация исключает только явно перечисленные
+volatile timestamp fields. Mutation callbacks владеют synthetic IDs и удаляют
+child rows/events до parent rows в `finally`. Результат содержит `isolation` с
+`before_hash`, `after_hash`, `leaked_entities`, `leaked_paths`, `cleanup_errors`
+и `clean`; mutation без evidence или с `clean=false` отклоняется
+`validate_result()`. Ожидаемая exception остаётся в `errors` с `sample_index` и
+не является загрязнением при чистом snapshot.
 
 ## Методика
 
@@ -37,10 +55,10 @@ CLI: `python3 benchmarks/performance/run_benchmark.py --project . --profile smok
 samples и агрегаты. `--cold` сообщает capability; если OS cache eviction недоступен,
 samples помечены descriptive-only и не используются для cold conclusion.
 
-Каждый case содержит стабильный `case_id`, component/operation/storage/dimensions,
-raw timings, expected outcome, errors, sample count и aggregates. Mutation cases
-используют заранее подготовленные IDs и idempotent lifecycle paths; исходный проект
-не изменяется.
+Каждый case содержит стабильный `case_id`, component/operation/kind/storage
+applicability/dimensions, raw timings, expected outcome, errors, sample count,
+aggregates и isolation evidence. Warmup проходит callback, но не попадает в
+samples; исходный проект не изменяется.
 
 ## Baseline results и hotspots
 
@@ -62,3 +80,6 @@ trip представлены отдельными cases.
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
+HTTP loopback может быть запрещён окружением, а YAML registry не запускает
+network-level routes; оба ограничения записываются в `limitations`. Статические
+render/handler тесты не являются browser-level проверкой.

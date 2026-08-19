@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
@@ -27,7 +28,8 @@ import time
 import uuid
 import urllib.error
 import urllib.request
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterator
 
 import yaml
 
@@ -49,6 +51,78 @@ except ImportError:  # direct script execution
     from benchmarks.performance.workloads import generate_fixture, load_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
+
+
+@dataclass
+class CaseSpec:
+    """Named benchmark case.  ``__getitem__`` keeps the v1 tuple adapter."""
+
+    case_id: str
+    component: str
+    operation: str
+    run: Callable[[], Any]
+    kind: str = "read_only"
+    storage_modes: tuple[str, ...] = ("sqlite", "yaml")
+    expected_outcome: str = "success"
+    setup: Callable[[], Any] | None = None
+    teardown: Callable[[], Any] | None = None
+    limitations: list[str] = field(default_factory=list)
+
+    def __getitem__(self, index: int) -> Any:
+        # Existing callers used (case_id, component, operation, callable).
+        return (self.case_id, self.component, self.operation, self.run)[index]
+
+
+class CaseRegistry(list[CaseSpec]):
+    """List-compatible registry with explicit resource ownership."""
+
+    def __init__(self, cases: Iterator[CaseSpec], cleanup: Callable[[], None] | None = None):
+        super().__init__(cases)
+        self.cleanup = cleanup or (lambda: None)
+
+
+_VOLATILE_FIELDS = {"created_at", "updated_at", "started_at", "completed_at", "cancelled_at",
+                    "reserved_at", "started_at", "terminal_at", "timestamp", "consumed_at"}
+
+
+def _normalize_logical(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_logical(item) for key, item in sorted(value.items())
+                if key not in _VOLATILE_FIELDS and not key.endswith("_at")}
+    if isinstance(value, list):
+        normalized = [_normalize_logical(item) for item in value]
+        return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    return value
+
+
+def _logical_snapshot(project: Path) -> dict[str, Any]:
+    """Capture control-plane entities and files, excluding only volatile times."""
+    root = project / ".vibe"
+    entities: dict[str, Any] = {}
+    for database in sorted(root.rglob("*.sqlite3")) if root.exists() else []:
+        try:
+            with sqlite3.connect(database) as db:
+                db.row_factory = sqlite3.Row
+                tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+                entities[str(database.relative_to(root))] = {
+                    table: _normalize_logical([dict(row) for row in db.execute(f'SELECT * FROM "{table}"')])
+                    for table in sorted(tables)
+                }
+        except sqlite3.Error:
+            continue
+    files = {}
+    if root.exists():
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.suffix in {".yaml", ".yml", ".json"} and path.name not in {"manifest.json"}:
+                try:
+                    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    files[str(path.relative_to(root))] = _normalize_logical(loaded)
+                except (OSError, yaml.YAMLError):
+                    files[str(path.relative_to(root))] = path.read_bytes().hex()
+    payload = _normalize_logical({"entities": entities, "files": files})
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()
+    return {"hash": hashlib.sha256(encoded).hexdigest(), "entities": payload["entities"],
+            "paths": sorted(files)}
 
 
 class SQLiteMetrics:
@@ -126,6 +200,11 @@ def validate_result(result: dict[str, Any]) -> None:
         for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
             if key not in case:
                 raise ValueError(f"case missing {key}")
+        kind = case.get("kind", "read_only")
+        if kind not in {"read_only", "mutation"}:
+            raise ValueError(f"unknown case kind for {case.get('case_id')}")
+        if kind == "mutation" and "isolation" not in case:
+            raise ValueError(f"mutation case missing isolation for {case.get('case_id')}")
         if case["sample_count"] != len(case["raw_samples"]):
             raise ValueError(f"sample count mismatch for {case.get('case_id')}")
         for sample in case["raw_samples"]:
@@ -134,6 +213,12 @@ def validate_result(result: dict[str, Any]) -> None:
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
+        if "isolation" in case:
+            for key in ("before_hash", "after_hash", "leaked_entities", "leaked_paths", "cleanup_errors", "clean"):
+                if key not in case["isolation"]:
+                    raise ValueError(f"isolation missing {key} for {case.get('case_id')}")
+            if kind == "mutation" and case["isolation"]["clean"] is not True:
+                raise ValueError(f"unclean mutation case {case.get('case_id')}")
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -202,7 +287,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     ui_worker = WorkerControl(project)
     server = None
     base_url = ""
-    http_limitation = None
+    http_limitation = None if storage == "sqlite" else "HTTP loopback cases are unavailable in YAML registry mode"
     if storage == "sqlite":
         try:
             server, _thread = start_server(project, port=0, open_browser=False)
@@ -260,13 +345,6 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
             with ledger._connect() as db:
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
-    # A repeated reserve uses a prepared run id and is therefore idempotent and
-    # read-only after setup; it cannot contaminate subsequent samples.
-    prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
-    try:
-        ledger.reserve(prepared_run, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})
-    except Exception:
-        pass
     cases = [
         ("ticketstore.list.delivery", "TicketStore", "list(process)", lambda: store.list("delivery")),
         ("ticketstore.list.all", "TicketStore", "list()", lambda: store.list()),
@@ -289,7 +367,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.get_budget", "BudgetLedger", "get_budget", lambda: ledger.get_budget(budget_id)),
         ("budgetledger.get_run", "BudgetLedger", "get_run", lambda: ledger.get_run("RUN-FIX-00000")),
         ("budgetledger.list_runs", "BudgetLedger", "list_runs", lambda: ledger.list_runs(budget_id)),
-        ("budgetledger.reserve.idempotent", "BudgetLedger", "reserve (prepared idempotent)", lambda: ledger.reserve(prepared_run, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})),
+        ("budgetledger.reserve.idempotent", "BudgetLedger", "reserve (isolated idempotent)", lambda: isolated_run(lambda run_id: (ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}), ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})))),
         ("budgetledger.start", "BudgetLedger", "start (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.start(run_id))),
         ("budgetledger.finalize", "BudgetLedger", "finalize (isolated lifecycle)", lambda: isolated_run(lambda run_id: (ledger.start(run_id), ledger.finalize(run_id, "completed", {"run_id": run_id, "tokens": 1, "points": 1, "runs": 1})))),
         ("budgetledger.get_missing", "BudgetLedger", "get_run(missing)", lambda: ledger.get_run("RUN-MISSING")),
@@ -309,59 +387,143 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("http.error.unknown_endpoint", "HTTP", "GET unknown endpoint (4xx)", lambda: http_error("/missing-endpoint")),
         ("http.transport.error", "HTTP", "loopback transport error", lambda: urllib.request.urlopen("http://127.0.0.1:1/", timeout=0.1)),
     ]
-    if server is not None:
-        # The server is intentionally kept alive for the returned closures and
-        # closed by run() after all cases complete.
-        for index, item in enumerate(cases):
-            if index == len(cases) - 1:
-                pass
-    if storage != "sqlite":
-        cases = [item for item in cases if not item[0].startswith("http.") or item[0].startswith("http.handler.")]
+    def isolated_budget(action: Callable[[str, str], Any]) -> Any:
+        owner = f"BENCH-BUDGET-{uuid.uuid4().hex}"
+        ledger.create_budget("ticket", owner, limits={"tokens": 1000, "points": 1000, "runs": 1000})
+        try:
+            return action(owner, f"ticket:{owner}")
+        finally:
+            with ledger._connect() as db:
+                db.execute("DELETE FROM reconciliation_facts WHERE run_id IN (SELECT run_id FROM runs WHERE ticket_budget_id=?)", (f"ticket:{owner}",))
+                db.execute("DELETE FROM adjustments WHERE adjusts_run_id IN (SELECT run_id FROM runs WHERE ticket_budget_id=?)", (f"ticket:{owner}",))
+                db.execute("DELETE FROM runs WHERE ticket_budget_id=?", (f"ticket:{owner}",))
+                db.execute("DELETE FROM budget_decisions WHERE target_id IN (?, ?)", (owner, f"ticket:{owner}"))
+                db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
+
+    def isolated_ticket(action: Callable[[Any], Any]) -> Any:
+        item = store.create("delivery", "task", "benchmark synthetic")
+        try:
+            return action(item)
+        finally:
+            if store.database_enabled:
+                with store._db() as db:
+                    db.execute("DELETE FROM events WHERE entity_kind='ticket' AND entity_id=?", (item.id,))
+                    db.execute("DELETE FROM tickets WHERE ticket_id=?", (item.id,))
+            else:
+                store.ticket_path(item).unlink(missing_ok=True)
+
+    def limited_mutation(label: str) -> Callable[[], Any]:
+        def invoke() -> None:
+            raise RuntimeError(f"{label} requires a network/UI actor context")
+        setattr(invoke, "_limitations", ["handler mutation requires an external request context"])
+        return invoke
+
+    # Add the public operation matrix even where a capability-specific operation
+    # is expected to reject its synthetic input. Such a case is still useful:
+    # the rejection and its clean teardown are measured and reported explicitly.
+    cases.extend([
+        ("ticketstore.save", "TicketStore", "save", lambda: isolated_ticket(lambda item: store.save(item))),
+        ("ticketstore.create", "TicketStore", "create", lambda: isolated_ticket(lambda item: item)),
+        ("ticketstore.record_run_event", "TicketStore", "record_run_event", lambda: isolated_ticket(lambda item: store.record_run_event(item.id, "benchmark", {"run_id": "BENCH"}))),
+        ("ticketstore.is_done", "TicketStore", "is_done", lambda: store.is_done(store.get(ticket_id))),
+        ("ticketstore.run_path", "TicketStore", "run_path", lambda: store.run_path("RUN-FIX-00000")),
+        ("sessionstore.effective_ticket_ids", "SessionStore", "effective_ticket_ids", lambda: sessions.effective_ticket_ids(sessions.get(session_id))),
+        ("sessionstore.participants", "SessionStore", "participants", lambda: sessions.get(session_id).participants),
+        ("sessionstore.inherit_ticket", "SessionStore", "inherit_ticket", lambda: isolated_session(lambda item: sessions.inherit_ticket(item, second_ticket_id, source_ticket=ticket_id))),
+        ("sessionstore.override_ticket", "SessionStore", "override_ticket", lambda: isolated_session(lambda item: sessions.override_ticket(item, ticket_id, actor="benchmark", reason="coverage"))),
+        ("sessionstore.agent_add_ticket", "SessionStore", "agent_add_ticket", lambda: isolated_session(lambda item: sessions.agent_add_ticket(item.id, ticket_id, actor="benchmark", origin="benchmark"))),
+        ("sessionstore.agent_remove_ticket", "SessionStore", "agent_remove_ticket", lambda: isolated_session(lambda item: sessions.agent_remove_ticket(item.id, second_ticket_id, actor="benchmark", origin="benchmark"))),
+        ("sessionstore.agent_update_membership", "SessionStore", "agent_update_membership", lambda: isolated_session(lambda item: sessions.agent_update_membership(item.id, [{"ticket_id": second_ticket_id, "priority": 10}], actor="benchmark", origin="benchmark"))),
+        ("budgetledger.create_budget", "BudgetLedger", "create_budget", lambda: isolated_budget(lambda owner, budget_id: ledger.get_budget(budget_id))),
+        ("budgetledger.set_status", "BudgetLedger", "set_status", lambda: isolated_budget(lambda owner, _: ledger.set_status(f"ticket:{owner}", "active"))),
+        ("budgetledger.reserve", "BudgetLedger", "reserve", lambda: isolated_run(lambda run_id: ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}))),
+        ("budgetledger.increase_limit", "BudgetLedger", "increase_limit", lambda: ledger.increase_limit(actor="benchmark", target_scope="ticket", target_id=budget_id, dimension="tokens", delta=1, reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.allow_overrun", "BudgetLedger", "allow_overrun", lambda: ledger.allow_overrun(actor="benchmark", target_scope="ticket", target_id=budget_id, dimensions=["tokens"], reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.resolve_unknown", "BudgetLedger", "resolve_unknown", lambda: ledger.resolve_unknown(actor="benchmark", run_id="RUN-MISSING", reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.adjustment", "BudgetLedger", "adjustment", lambda: isolated_run(lambda run_id: ledger.adjustment(run_id, {"tokens": 0, "points": 0, "runs": 0}, reason="coverage", author="benchmark"))),
+        ("budgetledger.list_decisions", "BudgetLedger", "list_decisions", lambda: ledger.list_decisions()),
+        ("budgetledger.list_reconciliation_facts", "BudgetLedger", "list_reconciliation_facts", lambda: ledger.list_reconciliation_facts()),
+        ("scheduler.wip_count", "Scheduler", "wip_count", lambda: __import__("vibe_orchestrator.scheduler", fromlist=["wip_count"]).wip_count(tickets, "active")),
+        ("ui.render_board", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions)),
+        ("ui.render_board_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=ui_sessions)),
+        ("ui.GET_board", "UI", "GET /", lambda: http("/")),
+        ("ui.GET_fragment", "UI", "GET /fragment", lambda: http("/fragment?process=delivery")),
+        ("ui.GET_drawer", "UI", "GET /drawer", lambda: http(f"/drawer?ticket={ticket_id}")),
+        ("ui.GET_api_tickets", "UI", "GET /api/tickets", lambda: http("/api/tickets")),
+        ("ui.GET_api_sessions", "UI", "GET /api/sessions", lambda: http("/api/sessions")),
+        ("ui.GET_api_session", "UI", "GET /api/sessions/{id}", lambda: http(f"/api/sessions/{session_id}")),
+        ("ui.expected_4xx", "UI", "expected 4xx", lambda: http_error("/api/sessions/SESSION-MISSING")),
+        *[(f"ui.{name}", "UI", name, limited_mutation(name)) for name in ("POST_create", "POST_move", "POST_retry", "POST_release_retry", "POST_session_add_remove_activate_complete_cancel", "POST_workers", "PATCH_agent_ticket", "PATCH_agent_session")],
+    ])
     # Keep endpoint/transport cases in the registry even when binding a local
     # server is forbidden. Their samples then carry the limitation and error
     # accounting instead of silently shrinking the claimed case matrix.
-    for _, component, _, fn in cases:
+    specs = []
+    for case_id, component, operation, fn in cases:
         # BudgetLedger owns the instrumented connection. Ticket/session stores
         # deliberately retain their internal connection lifecycle and report a
         # typed unavailable reason instead of pretending the counters are zero.
         setattr(fn, "_sqlite_metrics", sqlite_metrics if component == "BudgetLedger" else None)
         setattr(fn, "_sqlite_plans", _explain_plans(ledger) if component == "BudgetLedger" else [])
-        setattr(fn, "_limitations", [http_limitation] if http_limitation and component == "HTTP" else [])
-    return cases
+        if http_limitation and component in {"HTTP", "UI"}:
+            setattr(fn, "_limitations", list(getattr(fn, "_limitations", [])) + [http_limitation])
+        mutation = any(token in case_id for token in (".create", ".save", ".record", ".add", ".remove", ".activate", ".complete", ".cancel", ".inherit", ".override", ".agent_", ".reserve", ".start", ".finalize", ".release", ".set_status", ".increase", ".allow", ".resolve", ".adjustment", "POST_", "PATCH_"))
+        expected = "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id or "expected_4xx" in case_id or "transport" in case_id else "success"
+        modes = ("sqlite",) if component in {"HTTP", "UI"} and not case_id.startswith("http.handler") else ("sqlite", "yaml")
+        specs.append(CaseSpec(case_id, component, operation, fn, "mutation" if mutation else "read_only", storage_modes=modes, expected_outcome=expected,
+                              limitations=list(getattr(fn, "_limitations", []))))
+    cleanup = (lambda: (server.shutdown(), server.server_close())) if server is not None else None
+    return CaseRegistry(iter(specs), cleanup)
 
 
-def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any], project: Path, warmup: int, iterations: int, noisy: bool, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
+def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy: bool, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    case_id, component, operation, fn = spec.case_id, spec.component, spec.operation, spec.run
     for _ in range(warmup):
         try: fn()
         except Exception: pass
-    samples = []; errors = []; fs_root = project / ".vibe"
+    samples = []; errors = []; cleanup_errors: list[dict[str, Any]] = []; fs_root = project / ".vibe"; before_snapshot = _logical_snapshot(project)
     metrics = getattr(fn, "_sqlite_metrics", None)
     for index in range(iterations):
         if metrics is not None:
             metrics.reset()
-        before = _fs_snapshot(fs_root); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
-        try: fn()
+        before = _fs_snapshot(fs_root); sample_snapshot = _logical_snapshot(project); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
+        try:
+            if spec.setup:
+                spec.setup()
+            fn()
         except Exception as exc:
             error = type(exc).__name__
             if metrics is not None:
                 metrics.errors += 1
             errors.append({"sample_index": index, "type": error})
-        wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root)
+        finally:
+            if spec.teardown:
+                try:
+                    spec.teardown()
+                except Exception as exc:
+                    cleanup_errors.append({"sample_index": index, "type": type(exc).__name__})
+        wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root); after_snapshot = _logical_snapshot(project)
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
                         "sqlite_transactions": metrics.transactions if metrics is not None else None,
                         "sqlite_lock_ms": metrics.lock_ms if metrics is not None else None,
                         "sqlite_errors": metrics.errors if metrics is not None else None,
                         "sqlite_metrics_unavailable_reason": None if metrics is not None else "case does not use SQLite",
-                        "error": error})
+                        "error": error, "isolation_clean": after_snapshot["hash"] == sample_snapshot["hash"]})
     walls = [item["wall_ms"] for item in samples]
-    return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
-            "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
+    after_run = _logical_snapshot(project)
+    isolation = {"before_hash": before_snapshot["hash"], "after_hash": after_run["hash"],
+                 "leaked_entities": [] if before_snapshot["hash"] == after_run["hash"] else ["logical_snapshot_changed"],
+                 "leaked_paths": sorted(set(after_run["paths"]) - set(before_snapshot["paths"])),
+                 "cleanup_errors": cleanup_errors, "clean": before_snapshot["hash"] == after_run["hash"] and not cleanup_errors}
+    return {"case_id": case_id, "component": component, "operation": operation, "kind": spec.kind, "storage_mode": storage_mode,
+            "expected_outcome": spec.expected_outcome, "storage_modes": list(spec.storage_modes),
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
-            "limitations": getattr(fn, "_limitations", []),
+            "limitations": sorted(set(spec.limitations + getattr(fn, "_limitations", []))),
             "workload": {"project": "isolated", "noisy_filesystem": noisy, "fixture_checksum": manifest["fixture_files_sha256"]},
-            "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples}
+            "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples,
+            "isolation": isolation}
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -379,7 +541,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
         manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
-        cases = _cases(isolated, storage=args.storage); iterations = args.iterations
+        cases = _cases(isolated, storage=args.storage); atexit.register(cases.cleanup); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
@@ -391,7 +553,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for item in cases:
             if effective_cold:
                 _prepare_cold(cold)
-            case_result = _run_case(*item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
+            case_result = _run_case(item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
             if args.cold and not effective_cold:
                 case_result["limitations"].append(cold["limitation"])
             case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
@@ -417,6 +579,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         result["source_checksum_after"] = _hash_tree(source)
         validate_result(result)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        cases.cleanup()
     return result
 
 

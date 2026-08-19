@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import pytest
 
-from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
+from benchmarks.performance.run_benchmark import CaseSpec, _cold_capability, _cases, percentile, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
@@ -91,6 +91,39 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
     }
     assert required <= ids
     assert {item[3] for item in cases}
+
+
+def test_case_registry_has_stable_kinds_and_required_matrix(tmp_path):
+    generate_fixture(tmp_path, seed=8, size="small", storage_mode="sqlite")
+    cases = _cases(tmp_path, storage="sqlite")
+    ids = [case.case_id for case in cases]
+    assert len(ids) == len(set(ids))
+    assert all(case.kind in {"read_only", "mutation"} for case in cases)
+    required = {
+        "ticketstore.save", "ticketstore.record_run_event", "sessionstore.inherit_ticket",
+        "sessionstore.agent_update_membership", "budgetledger.create_budget",
+        "budgetledger.increase_limit", "budgetledger.list_decisions", "scheduler.wip_count",
+        "ui.GET_drawer", "ui.POST_create", "ui.PATCH_agent_session",
+    }
+    assert required <= set(ids)
+    assert all("sqlite" in case.storage_modes for case in cases)
+
+
+def test_result_validation_requires_clean_isolation_for_mutation():
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [{"case_id": "mutation", "component": "x", "operation": "y", "kind": "mutation",
+                          "storage_mode": "sqlite", "dataset_dimensions": {}, "expected_outcome": "success",
+                          "errors": [], "statistics": {}, "sample_count": 0, "raw_samples": [],
+                          "isolation": {"before_hash": "a", "after_hash": "b", "leaked_entities": ["x"],
+                                        "leaked_paths": [], "cleanup_errors": [], "clean": False}}],
+              "source_checksum_before": "a", "source_checksum_after": "a"}
+    with pytest.raises(ValueError, match="unclean mutation"):
+        validate_result(result)
+
+
+def test_case_spec_teardown_is_a_first_class_callback():
+    spec = CaseSpec("x", "X", "operation", lambda: None, kind="mutation", teardown=lambda: None)
+    assert spec[0] == "x" and spec[3] is spec.run
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):
