@@ -11,8 +11,10 @@ timestamps. titles, descriptions, prompts, raw payloads и production identifier
 checksum не делают manifest с другой cardinality допустимым. Manifest содержит
 фактические status counts, session states, budget states, `runs_per_ticket` 0/1/10,
 session dimensions 1/10/100 и ledger dimensions 100/1000/10000. Для выбранного
-профиля `counts` и `*_counts` отражают реально записанные сущности; labels не
-считаются доказательством сами по себе.
+профиля `counts` и `*_counts` отражают реально записанные сущности; `budget_states`
+— read-back effective status всех ticket budgets из authoritative SQLite ledger,
+а сумма состояний равна `counts.tickets`. labels не считаются доказательством сами
+по себе.
 
 ## Форматы и determinism
 
@@ -37,7 +39,8 @@ portable identity SQLite.
 
 `load_dataset()` принимает JSON manifest-only dataset только после полной проверки
 схемы, точных profile counts (включая tickets), states, dimensions, synthetic IDs и checksum. При `--dataset`
-manifest является authoritative source для seed/profile/storage; несовпадение
+manifest является authoritative source для seed/profile/storage; отсутствие
+`--storage` означает выбор `storage_mode` из manifest, а несовпадение
 явно заданных `--size` или `--storage`, повреждение manifest и unsupported values
 останавливают benchmark до выполнения case и до записи результата. После проверки
 разрешена только документированная deterministic materialization в isolated project;

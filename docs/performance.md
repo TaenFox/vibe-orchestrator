@@ -82,13 +82,18 @@ unmaterialized dimensions, non-synthetic IDs and tampered hashes. Consistent der
 dimensions and checksums do not make a manifest valid when `counts.tickets` differs
 from the declared profile's `SIZES[size]`.
 
+`dimensions.budget_states` is read back from every materialized ticket budget using
+the effective status from the authoritative SQLite ledger. It contains every declared
+state, uses non-negative integer counts, and its sum must equal `counts.tickets`.
+
 `--dataset` is fail-closed. The supplied manifest is authoritative and is fully
 validated before benchmark cases run. A manifest-only dataset may be materialized
 deterministically into the isolated project using its validated seed/profile/storage;
 the generated manifest's canonical logical payload and SHA-256 must equal the
 supplied manifest before it can be used. `materialized_tree_sha256` is provenance
 only and is excluded from this portable comparison. The result records
-`dataset_materialization` and `dataset_manifest_hash` only after that proof. CLI
+`dataset_materialization` and `dataset_manifest_hash` only after that proof. An
+omitted `--storage` leaves the manifest's `storage_mode` authoritative; explicit
 `--size`/`--storage` mismatches, malformed or incompatible manifests fail before
 case construction and result output. No silent fallback to CLI defaults or
 regeneration of another dataset is allowed; a mismatch raises `ValueError` and
