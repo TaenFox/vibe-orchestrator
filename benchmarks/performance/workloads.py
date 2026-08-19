@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,25 @@ def _logical_manifest(seed: int, size: str, storage_mode: str, statuses: dict[st
         "budget_states": budget_counts,
     }
     return {"sha256": _logical_hash(logical), "logical": logical}
+
+
+def _canonical_manifest_payload(manifest: dict[str, Any]) -> dict[str, Any]:
+    logical = manifest.get("logical")
+    dimensions = manifest.get("dimensions", {})
+    counts = manifest.get("counts", {})
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "seed": manifest.get("seed"),
+        "size": dimensions.get("size"),
+        "storage_mode": manifest.get("storage_mode"),
+        "ticket_count": counts.get("tickets"),
+        "ticket_ids": logical.get("ticket_ids") if isinstance(logical, dict) else None,
+        "ticket_status": dimensions.get("ticket_status"),
+        "session_states": dimensions.get("session_states"),
+        "ledger_runs": counts.get("ledger_runs"),
+        "runs_per_ticket": dimensions.get("runs_per_ticket_counts"),
+        "budget_states": dimensions.get("budget_states"),
+    }
 
 
 def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
@@ -219,21 +239,26 @@ def load_dataset(path: Path) -> dict[str, Any]:
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    required = {"schema_version", "seed", "storage_mode", "counts", "dimensions", "hashes", "redaction_policy", "logical"}
+    required = {"schema_version", "source_kind", "seed", "storage_mode", "counts", "dimensions", "hashes",
+                "fixture_files_sha256", "logical_checksum", "materialized_tree_sha256", "redaction_policy", "logical"}
     missing = required - set(manifest)
     if missing:
         raise ValueError(f"manifest missing fields: {sorted(missing)}")
     counts = manifest["counts"]
     if any(not isinstance(counts.get(key), int) or counts[key] < 0 for key in ("tickets", "sessions", "ledger_runs")):
         raise ValueError("manifest counts must be non-negative integers")
-    if manifest["storage_mode"] not in {"sqlite", "yaml"} or manifest["redaction_policy"] != REDACTION_POLICY:
+    if manifest["schema_version"] != SCHEMA_VERSION or manifest["source_kind"] != "synthetic":
+        raise ValueError("invalid dataset source or schema")
+    if not isinstance(manifest["seed"], int) or manifest["storage_mode"] not in {"sqlite", "yaml"} or manifest["redaction_policy"] != REDACTION_POLICY:
         raise ValueError("invalid manifest storage or redaction policy")
     dimensions = manifest["dimensions"]
     if dimensions.get("runs_per_ticket") != list(RUNS_PER_TICKET) or dimensions.get("ledger_run_counts") != list(LEDGER_RUN_COUNTS):
         raise ValueError("required workload dimensions are incomplete")
     if dimensions.get("session_counts") != list(SESSION_COUNTS) or set(dimensions.get("budget_states", {})) != set(BUDGET_STATES):
         raise ValueError("required session/budget states are incomplete")
-    size = dimensions.get("size", manifest.get("logical", {}).get("size"))
+    size = dimensions.get("size")
+    if size not in PROFILE_DIMENSIONS:
+        raise ValueError("manifest must declare a supported profile size")
     if size in PROFILE_DIMENSIONS:
         expected = PROFILE_DIMENSIONS[size]
         if dimensions.get("profile_counts") != expected:
@@ -249,8 +274,26 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     budget_states = dimensions.get("budget_states", {})
     if any(budget_states[state] < 1 for state in BUDGET_STATES):
         raise ValueError("all budget states must be materialized")
-    if dimensions.get("ticket_status", {}).get("todo", 0) + sum(dimensions.get("ticket_status", {}).values()) == 0:
-        raise ValueError("ticket state distribution is empty")
+    statuses = dimensions.get("ticket_status", {})
+    if set(statuses) != set(STATUSES) or sum(statuses.values()) != counts["tickets"]:
+        raise ValueError("ticket status counts do not match materialized tickets")
+    if sum(session_states.values()) != counts["sessions"]:
+        raise ValueError("session state counts do not match materialized sessions")
+    ticket_ids = manifest["logical"].get("ticket_ids")
+    if (not isinstance(ticket_ids, list) or len(ticket_ids) != counts["tickets"] or
+            len(set(ticket_ids)) != len(ticket_ids) or
+            any(not isinstance(item, str) or not re.fullmatch(r"FIX-\d{5}-\d{5}", item) for item in ticket_ids)):
+        raise ValueError("manifest ticket ids are not synthetic and materialized")
+    expected_logical = _canonical_manifest_payload(manifest)
+    if manifest["logical"] != expected_logical:
+        raise ValueError("manifest logical payload does not match materialized fields")
+    logical_hash = _logical_hash(expected_logical)
+    if not isinstance(manifest["hashes"], dict) or manifest["hashes"].get("manifest_sha256") != logical_hash:
+        raise ValueError("manifest checksum mismatch")
+    if manifest["logical_checksum"] != logical_hash or manifest["fixture_files_sha256"] != logical_hash:
+        raise ValueError("logical fixture checksum mismatch")
+    if not isinstance(manifest["materialized_tree_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", manifest["materialized_tree_sha256"]):
+        raise ValueError("invalid materialized tree checksum")
 
 
 def manifest_for_dataset(path: Path, *, seed: int = 35527, size: str = "small", storage_mode: str = "sqlite") -> dict[str, Any]:

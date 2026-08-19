@@ -122,6 +122,10 @@ def validate_result(result: dict[str, Any]) -> None:
             raise ValueError(f"result missing {key}")
     if result["source_checksum_before"] != result["source_checksum_after"]:
         raise ValueError("benchmark mutated source project")
+    manifest = result["dataset_manifest"]
+    if (not isinstance(manifest, dict) or
+            result.get("dataset_manifest_hash") != manifest.get("hashes", {}).get("manifest_sha256")):
+        raise ValueError("result dataset identity is missing or inconsistent")
     for case in result["cases"]:
         for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
             if key not in case:
@@ -134,6 +138,8 @@ def validate_result(result: dict[str, Any]) -> None:
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
+        if case.get("dataset_manifest_hash") != result.get("dataset_manifest_hash"):
+            raise ValueError("case dataset identity mismatch")
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -370,12 +376,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     source = Path(args.project).resolve(); output = Path(args.output).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="vibe-performance-") as temp:
         isolated = Path(temp) / "project"; shutil.copytree(source, isolated, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
-        size = args.size or ("small" if args.profile == "smoke" else "medium")
         dataset = load_dataset(args.dataset) if args.dataset else None
+        size = args.size or ("small" if args.profile == "smoke" else "medium")
+        if dataset and args.size and dataset["dimensions"]["size"] != args.size:
+            raise ValueError("--size must match the dataset manifest profile")
         if dataset:
-            size = dataset.get("dimensions", {}).get("size", size)
+            size = dataset["dimensions"]["size"]
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
-        fixture_storage = dataset.get("storage_mode", args.storage) if dataset else args.storage
+        fixture_storage = dataset["storage_mode"] if dataset else args.storage
         if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
         manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
@@ -384,8 +392,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
-                                 "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
-                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
+                                 "dataset_source": str(args.dataset) if args.dataset else "synthetic",
+                                 "dataset_materialization": "manifest-only deterministic materialization" if dataset else "generated"},
+                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest,
+                  "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"], "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
         cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
         effective_cold = bool(args.cold and cold["available"])
         for item in cases:

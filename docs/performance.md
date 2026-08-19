@@ -62,3 +62,33 @@ trip представлены отдельными cases.
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
+
+## Fixture contract / dataset loading
+
+Performance fixtures are synthetic audit data, not production interchange. The
+baseline materializes tickets, delivery sessions and BudgetLedger runs for
+`small`, `medium`, `large` and `xlarge`, including all declared ticket/session/
+budget states and dimensions. SQLite is authoritative for the ledger in both
+storage modes; YAML uses legacy ticket/session files.
+
+The `performance-fixture.v2` manifest is strict: it records schema/source kind,
+seed, storage, actual counts, dimensions, redaction policy, logical checksum and
+materialized-tree checksum. The canonical logical checksum is SHA-256 of compact,
+sorted-key JSON. `validate_manifest()` recomputes it and rejects missing fields,
+unsupported values, unmaterialized dimensions, non-synthetic IDs and tampered
+hashes.
+
+`--dataset` is fail-closed. The supplied manifest is authoritative and is fully
+validated before benchmark cases run. A manifest-only dataset may be materialized
+deterministically into the isolated project using its validated seed/profile/storage;
+the result records `dataset_materialization` and `dataset_manifest_hash`. CLI
+`--size`/`--storage` mismatches, malformed or incompatible manifests fail before
+result output. No silent fallback to CLI defaults or regeneration of another
+dataset is allowed.
+
+The policy permits synthetic identifiers, counts, statuses and fixed timestamps
+only. Non-empty titles, descriptions, prompts, raw payloads and production
+identifiers are prohibited. Results carry dataset identity for every case and
+retain equal source checksums before and after the run. Browser-level coverage is
+unavailable in this worker context; cold-cache and materialized-tree checksums are
+machine/filesystem dependent.

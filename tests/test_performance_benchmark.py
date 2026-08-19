@@ -7,7 +7,7 @@ import json
 import pytest
 
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
-from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
+from benchmarks.performance.workloads import BUDGET_STATES, PROFILE_DIMENSIONS, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
 def test_percentile_is_deterministic_and_interpolated():
@@ -52,11 +52,30 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
         load_dataset(path)
 
 
+@pytest.mark.parametrize("size", ["small", "medium",
+                                   pytest.param("large", marks=pytest.mark.skip(reason="large materialization exceeds worker test timeout")),
+                                   pytest.param("xlarge", marks=pytest.mark.skip(reason="xlarge materialization exceeds worker test timeout"))])
+def test_fixture_profile_counts_match_materialized_entities(tmp_path, size):
+    manifest = generate_fixture(tmp_path / size, seed=21, size=size)
+    assert manifest["counts"] == {"tickets": {"small": 100, "medium": 1000, "large": 5000, "xlarge": 10000}[size],
+                                   "sessions": PROFILE_DIMENSIONS[size]["sessions"],
+                                   "ledger_runs": PROFILE_DIMENSIONS[size]["ledger_runs"]}
+    validate_manifest(manifest)
+
+
+def test_manifest_hash_fields_are_canonical(tmp_path):
+    manifest = generate_fixture(tmp_path / "fixture", seed=7)
+    manifest["hashes"]["manifest_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="checksum"):
+        validate_manifest(manifest)
+
+
 def test_result_validation_rejects_mutated_source_and_sample_mismatch():
-    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {"hashes": {"manifest_sha256": "h"}},
+              "dataset_manifest_hash": "h",
               "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
                           "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
-                          "sample_count": 0, "raw_samples": []}],
+                          "sample_count": 0, "dataset_manifest_hash": "h", "raw_samples": []}],
               "source_checksum_before": "a", "source_checksum_after": "a"}
     validate_result(result)
     result["cases"][0]["sample_count"] = 1
