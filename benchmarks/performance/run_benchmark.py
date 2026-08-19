@@ -41,9 +41,54 @@ from vibe_orchestrator.ui import start_server
 try:
     from .workloads import generate_fixture, load_dataset
 except ImportError:  # direct script execution
-    from workloads import generate_fixture, load_dataset
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from benchmarks.performance.workloads import generate_fixture, load_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
+
+
+class SQLiteMetrics:
+    """Per-case SQLite trace counters; production connections are untouched."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.queries = 0
+        self.transactions = 0
+        self.errors = 0
+        self.lock_ms = 0.0
+
+
+class InstrumentedLedger(BudgetLedger):
+    def __init__(self, project: Path, metrics: SQLiteMetrics) -> None:
+        self.metrics = metrics
+        super().__init__(project)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+
+        def trace(statement: str) -> None:
+            normalized = statement.strip().upper()
+            self.metrics.queries += 1
+            if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
+                self.metrics.transactions += 1
+
+        connection.set_trace_callback(trace)
+        return connection
+
+
+def _explain_plans(ledger: BudgetLedger) -> list[dict[str, Any]]:
+    """Capture plans for the two hot read queries without changing semantics."""
+    if not ledger.path.exists():
+        return []
+    plans = []
+    with sqlite3.connect(ledger.path) as db:
+        for label, query in (("budget", "SELECT * FROM budgets WHERE budget_id=?"),
+                             ("runs", "SELECT * FROM runs WHERE ticket_budget_id=? ORDER BY reserved_at")):
+            rows = db.execute("EXPLAIN QUERY PLAN " + query, ("ticket:missing",)).fetchall()
+            plans.append({"query": label, "detail": [row[3] for row in rows]})
+    return plans
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -85,9 +130,29 @@ def _fs_snapshot(root: Path) -> tuple[int, int]:
     return len(files), sum(p.stat().st_size for p in files)
 
 
+def _hash_tree(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        if ".git" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
+            continue
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _cold_capability() -> dict[str, Any]:
+    """Report OS cache capability; never claims cold evidence when unavailable."""
+    drop_caches = Path("/proc/sys/vm/drop_caches")
+    if drop_caches.exists() and os.access(drop_caches, os.W_OK):
+        return {"available": True, "strategy": "drop_caches", "limitation": None}
+    return {"available": False, "strategy": "isolated-filesystem-only",
+            "limitation": "OS filesystem cache eviction is unavailable; cold samples are descriptive only"}
+
+
 def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, str, Callable[[], Any]]]:
     use_database = storage == "sqlite"
-    store, sessions, workflow, ledger = TicketStore(project, use_database=use_database), None, load_workflow("delivery"), BudgetLedger(project)
+    sqlite_metrics = SQLiteMetrics()
+    store, sessions, workflow, ledger = TicketStore(project, use_database=use_database), None, load_workflow("delivery"), InstrumentedLedger(project, sqlite_metrics)
     sessions = SessionStore(project, store, use_database=use_database)
     store.init(); sessions.init(); tickets = store.list("delivery")
     ticket_id = tickets[0].id
@@ -95,9 +160,13 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     session_id = sessions.list()[0].id
     server = None
     base_url = ""
+    http_limitation = None
     if storage == "sqlite":
-        server, _thread = start_server(project, port=0, open_browser=False)
-        base_url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            server, _thread = start_server(project, port=0, open_browser=False)
+            base_url = f"http://127.0.0.1:{server.server_port}"
+        except OSError as exc:
+            http_limitation = f"HTTP loopback server unavailable: {type(exc).__name__}"
     def http(path: str) -> bytes:
         with urllib.request.urlopen(base_url + path, timeout=10) as response:
             return response.read()
@@ -124,6 +193,9 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("sessionstore.get", "SessionStore", "get", lambda: sessions.get(session_id)),
         ("sessionstore.load_path", "SessionStore", "load_path", lambda: sessions.load_path(sessions.session_path(session_id)) if not sessions.database_enabled else sessions.get(session_id)),
         ("sessionstore.membership_validation.error", "SessionStore", "invalid membership", lambda: sessions.create(["FIX-MISSING"])),
+        ("sessionstore.add_membership", "SessionStore", "add_ticket", lambda: sessions.add_ticket(sessions.get(session_id), ticket_id)),
+        ("sessionstore.remove_membership", "SessionStore", "remove_ticket", lambda: sessions.remove_ticket(sessions.get(session_id), ticket_id)),
+        ("sessionstore.validation.overlap.error", "SessionStore", "overlap validation", lambda: sessions.create([ticket_id])),
         ("budgetledger.read_budget", "BudgetLedger", "read_budget", lambda: ledger.read_budget(budget_id)),
         ("budgetledger.get_budget", "BudgetLedger", "get_budget", lambda: ledger.get_budget(budget_id)),
         ("budgetledger.get_run", "BudgetLedger", "get_run", lambda: ledger.get_run("RUN-FIX-00000")),
@@ -133,6 +205,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.finalize", "BudgetLedger", "finalize (isolated lifecycle)", lambda: ledger.finalize(prepared_run, "completed", {"tokens": 1, "points": 1, "runs": 1})),
         ("budgetledger.get_missing", "BudgetLedger", "get_run(missing)", lambda: ledger.get_run("RUN-MISSING")),
         ("budgetledger.reconcile", "BudgetLedger", "reconcile", lambda: ledger.reconcile()),
+        ("budgetledger.release", "BudgetLedger", "release (prepared lifecycle)", lambda: ledger.release(prepared_run)),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", sessions, mode="compact")),
         ("ui.render_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=sessions)),
@@ -152,6 +225,15 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
                 pass
     if storage != "sqlite":
         cases = [item for item in cases if not item[0].startswith("http.") or item[0].startswith("http.handler.")]
+    if http_limitation:
+        cases = [item for item in cases if not item[0].startswith("http.") or item[0].startswith("http.handler.")]
+    for _, component, _, fn in cases:
+        # BudgetLedger owns the instrumented connection. Ticket/session stores
+        # deliberately retain their internal connection lifecycle and report a
+        # typed unavailable reason instead of pretending the counters are zero.
+        setattr(fn, "_sqlite_metrics", sqlite_metrics if component == "BudgetLedger" else None)
+        setattr(fn, "_sqlite_plans", _explain_plans(ledger) if component == "BudgetLedger" else [])
+        setattr(fn, "_limitations", [http_limitation] if http_limitation and component == "HTTP" else [])
     return cases
 
 
@@ -160,19 +242,31 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
         try: fn()
         except Exception: pass
     samples = []; errors = []; fs_root = project / ".vibe"
+    metrics = getattr(fn, "_sqlite_metrics", None)
     for index in range(iterations):
+        if metrics is not None:
+            metrics.reset()
         before = _fs_snapshot(fs_root); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
         try: fn()
-        except Exception as exc: error = type(exc).__name__; errors.append({"sample_index": index, "type": error})
+        except Exception as exc:
+            error = type(exc).__name__
+            if metrics is not None:
+                metrics.errors += 1
+            errors.append({"sample_index": index, "type": error})
         wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root)
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
-                        "sqlite_queries": None, "sqlite_lock_ms": None,
-                        "sqlite_metrics_unavailable_reason": "store connections are created internally; production semantics prohibit monkey-patching",
+                        "sqlite_queries": metrics.queries if metrics is not None else None,
+                        "sqlite_transactions": metrics.transactions if metrics is not None else None,
+                        "sqlite_lock_ms": metrics.lock_ms if metrics is not None else None,
+                        "sqlite_errors": metrics.errors if metrics is not None else None,
+                        "sqlite_metrics_unavailable_reason": None if metrics is not None else "case does not use SQLite",
                         "error": error})
     walls = [item["wall_ms"] for item in samples]
     return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
             "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
             "dataset_dimensions": manifest["dimensions"],
+            "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
+            "limitations": getattr(fn, "_limitations", []),
             "workload": {"project": "isolated", "noisy_filesystem": noisy, "fixture_checksum": manifest["fixture_files_sha256"]},
             "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples}
 
@@ -185,11 +279,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         dataset = load_dataset(args.dataset) if args.dataset else None
         if dataset:
             size = dataset.get("dimensions", {}).get("size", size)
-        manifest = generate_fixture(isolated, seed=args.seed, size=size, storage_mode=args.storage)
+        fixture_seed = int(dataset["seed"]) if dataset else args.seed
+        fixture_storage = dataset.get("storage_mode", args.storage) if dataset else args.storage
+        if dataset and fixture_storage != args.storage:
+            raise ValueError("--storage must match the dataset manifest storage_mode")
+        manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
         cases = _cases(isolated, storage=args.storage); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
-                  "parameters": {"profile": args.profile, "seed": args.seed, "size": size, "storage": args.storage,
+                  "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
                                  "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
                   "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
@@ -209,8 +307,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
                 "artifacts": [str(profile_path), str(text_path)]}, indent=2), encoding="utf-8")
             result["profiling"]["artifacts"] = [str(profile_path), str(text_path), str(profile_manifest)]
-        result["integrity"] = {"warmup_excluded": True, "cold_available": False if args.cold else None,
-                               "cold_limitation": "OS filesystem cache eviction is unavailable in this harness" if args.cold else None}
+        cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
+        result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
+                               "cold_available": cold["available"], "cold_strategy": cold["strategy"],
+                               "cold_limitation": cold["limitation"]}
         result["source_checksum_after"] = _hash_tree(source)
         validate_result(result)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -223,7 +323,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); parser.add_argument("--cold", action="store_true"); parser.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args(); run(args); return 0
 
 if __name__ == "__main__": raise SystemExit(main())

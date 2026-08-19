@@ -13,7 +13,11 @@ from vibe_orchestrator.tickets import Ticket, TicketStore
 
 SCHEMA_VERSION = "performance-fixture.v2"
 SIZES = {"small": 100, "medium": 1000, "large": 5000, "xlarge": 10000}
-STATUSES = ("todo", "selected_for_session", "system_analysis", "development", "review", "blocked", "done")
+# Valid delivery workflow stage IDs.  The fixture must not invent a ``blocked``
+# stage because TicketStore/SessionStore validate status against the workflow.
+STATUSES = ("todo", "selected_for_session", "system_analysis", "ready_for_development",
+            "development", "ready_for_review", "review", "ready_for_acceptance",
+            "acceptance", "ready_for_release", "release", "done")
 SESSION_STATES = ("draft", "active", "completed", "cancelled")
 BUDGET_STATES = ("active", "exhausted", "blocked_unknown", "over_budget")
 RUNS_PER_TICKET = (0, 1, 10)
@@ -38,11 +42,11 @@ def _hash_tree(root: Path) -> str:
 
 def _logical_manifest(seed: int, size: str, storage_mode: str, statuses: dict[str, int],
                      ticket_ids: list[str], session_counts: dict[str, int], ledger_count: int,
-                     budget_counts: dict[str, int]) -> dict[str, Any]:
+                     budget_counts: dict[str, int], run_counts: dict[str, int]) -> dict[str, Any]:
     logical = {
         "schema_version": SCHEMA_VERSION, "seed": seed, "size": size, "storage_mode": storage_mode,
         "ticket_count": len(ticket_ids), "ticket_ids": ticket_ids, "ticket_status": statuses,
-        "session_states": session_counts, "ledger_runs": ledger_count, "runs_per_ticket": list(RUNS_PER_TICKET),
+        "session_states": session_counts, "ledger_runs": ledger_count, "runs_per_ticket": run_counts,
         "budget_states": budget_counts,
     }
     return {"sha256": _logical_hash(logical), "logical": logical}
@@ -66,29 +70,37 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
     rng.shuffle(order)
     ticket_ids: list[str] = []
     statuses = {status: 0 for status in STATUSES}
+    run_counts = {str(value): 0 for value in RUNS_PER_TICKET}
     for position, source_index in enumerate(order):
         status = STATUSES[rng.randrange(len(STATUSES))]
         ticket_id = f"FIX-{seed % 100000:05d}-{source_index:05d}"
         ticket_ids.append(ticket_id)
         statuses[status] += 1
+        run_count = RUNS_PER_TICKET[rng.randrange(len(RUNS_PER_TICKET))]
+        run_counts[str(run_count)] += 1
         store.save(Ticket(
             id=ticket_id, process="delivery", type="story", title="", description="", status=status,
             priority=1 + rng.randrange(100),
             parent=ticket_ids[position - 1] if position and rng.random() < .06 else None,
             blocked_by=[ticket_ids[position - 2]] if position > 1 and rng.random() < .04 else [],
-            run_history=[{"outcome": "completed", "attempt": n} for n in range(source_index % 11)],
+            run_history=[{"outcome": "completed", "attempt": n} for n in range(run_count)],
             created_at="2024-01-01T00:00:00+00:00", updated_at="2024-01-01T00:00:00+00:00"))
 
     sessions = SessionStore(project, store, use_database=use_database)
     sessions.init()
-    session_count = min(100, max(4, count // 10))
+    session_count = min(SESSION_COUNTS[-1], max(4, count // 10))
+    # Open sessions cannot contain workflow terminal tickets.
+    session_ticket_ids = [ticket_id for ticket_id in ticket_ids
+                          if statuses and store.get(ticket_id).status not in {"release", "done"}]
+    if not session_ticket_ids:
+        session_ticket_ids = ticket_ids
     session_counts = {state: 0 for state in SESSION_STATES}
     for index in range(session_count):
         state = SESSION_STATES[index % len(SESSION_STATES)]
         session_counts[state] += 1
         session = DeliverySession(
-            id=f"SESSION-{seed % 100000:05d}-{index:04d}", title="", status="draft",
-            ticket_ids=[ticket_ids[index % count]], created_at="2024-01-01T00:00:00+00:00",
+            id=f"SESSION-{seed % 100000:05d}{index:04d}", title="", status="draft",
+            ticket_ids=[session_ticket_ids[index % len(session_ticket_ids)]], created_at="2024-01-01T00:00:00+00:00",
             updated_at="2024-01-01T00:00:00+00:00")
         sessions.save(session)
         if state != "draft":
@@ -105,7 +117,13 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
     budget_counts = {state: 0 for state in BUDGET_STATES}
     for state_index, state in enumerate(BUDGET_STATES):
         owner = ticket_ids[state_index]
-        limits = {"tokens": 100000, "points": 1000, "runs": 100} if state == "active" else {"tokens": 0, "points": 0, "runs": 0}
+        limits = {"tokens": 100000, "points": 1000, "runs": 100}
+        if state == "exhausted":
+            limits = {"tokens": 1, "points": 1, "runs": 1}
+        elif state == "blocked_unknown":
+            limits = {"tokens": 100, "points": 100, "runs": 100}
+        elif state == "over_budget":
+            limits = {"tokens": 1, "points": 1, "runs": 1}
         budget_id = ledger.create_budget("ticket", owner, limits=limits)
         budget_counts[state] += 1
         if state == "blocked_unknown":
@@ -116,10 +134,27 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 ledger.finalize(run_id, "unknown", {"tokens": None, "points": None, "runs": 1})
             except Exception:
                 pass
-        elif state == "over_budget":
-            # Keep the zero-limit budget and a failed reservation as observable evidence.
+        elif state == "exhausted":
             try:
-                ledger.reserve(f"RUN-{seed % 100000:05d}-state-{state_index}", owner, None, {"tokens": 1, "points": 1, "runs": 1})
+                run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
+                ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
+                ledger.start(run_id)
+                ledger.finalize(run_id, "completed", {"tokens": 1, "points": 1, "runs": 1})
+            except Exception:
+                pass
+        elif state == "over_budget":
+            # Actual usage is intentionally above the limit; this is not a denied
+            # reservation and therefore leaves measurable over-budget evidence.
+            try:
+                run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
+                ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
+                ledger.start(run_id)
+                ledger.finalize(run_id, "completed", {"source": "runner_fallback", "run_id": run_id,
+                    "model": "synthetic", "reasoning_effort": "none", "usage_ref": run_id,
+                    "captured_at": "2024-01-01T00:00:00+00:00", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 2,
+                    "normalization_version": "synthetic.v1", "degraded_confidence": True,
+                    "fallback_policy_version": "synthetic.v1", "runs": 1})
             except Exception:
                 pass
         assert ledger.get_budget(budget_id) is not None
@@ -139,19 +174,25 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
         except Exception:
             pass
 
-    logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, ledger_count, budget_counts)
+    logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, ledger_count, budget_counts, run_counts)
+    materialized_checksum = _hash_tree(project)
     manifest = {
         "schema_version": SCHEMA_VERSION, "source_kind": "synthetic", "seed": seed,
         "storage_mode": storage_mode, "hashes": {"manifest_sha256": logical["sha256"]},
         "counts": {"tickets": count, "sessions": session_count, "ledger_runs": ledger_count},
         "dimensions": {"size": size, "sizes": SIZES, "ticket_status": statuses,
-                       "runs_per_ticket": list(RUNS_PER_TICKET), "session_counts": list(SESSION_COUNTS),
+                       "runs_per_ticket": list(RUNS_PER_TICKET), "runs_per_ticket_counts": run_counts,
+                       "session_counts": list(SESSION_COUNTS),
                        "ledger_run_counts": list(LEDGER_RUN_COUNTS), "session_states": session_counts,
                        "budget_states": budget_counts},
         # The logical checksum is stable across filesystem metadata and SQLite
         # page layout; the tree checksum is retained as provenance evidence.
+        # Lifecycle APIs stamp wall-clock audit fields.  The logical checksum is
+        # therefore the reproducible fixture identity; tree checksum remains
+        # provenance for the actual YAML/SQLite materialization.
         "fixture_files_sha256": logical["sha256"],
-        "materialized_tree_sha256": _hash_tree(project), "redaction_policy": REDACTION_POLICY,
+        "logical_checksum": logical["sha256"], "materialized_tree_sha256": materialized_checksum,
+        "redaction_policy": REDACTION_POLICY,
         "logical": logical["logical"],
     }
     validate_manifest(manifest)
@@ -184,6 +225,15 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("required workload dimensions are incomplete")
     if dimensions.get("session_counts") != list(SESSION_COUNTS) or set(dimensions.get("budget_states", {})) != set(BUDGET_STATES):
         raise ValueError("required session/budget states are incomplete")
+    run_counts = dimensions.get("runs_per_ticket_counts", {})
+    if set(run_counts) != {str(value) for value in RUNS_PER_TICKET} or sum(run_counts.values()) != counts["tickets"]:
+        raise ValueError("runs_per_ticket counts do not match materialized tickets")
+    session_states = dimensions.get("session_states", {})
+    if set(session_states) != set(SESSION_STATES) or any(session_states[state] < 1 for state in SESSION_STATES):
+        raise ValueError("all session states must be materialized")
+    budget_states = dimensions.get("budget_states", {})
+    if any(budget_states[state] < 1 for state in BUDGET_STATES):
+        raise ValueError("all budget states must be materialized")
     if dimensions.get("ticket_status", {}).get("todo", 0) + sum(dimensions.get("ticket_status", {}).values()) == 0:
         raise ValueError("ticket state distribution is empty")
 

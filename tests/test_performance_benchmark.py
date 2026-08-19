@@ -6,8 +6,8 @@ from pathlib import Path
 import json
 import pytest
 
-from benchmarks.performance.run_benchmark import percentile, statistics_for, validate_result
-from benchmarks.performance.workloads import generate_fixture, load_dataset, validate_manifest
+from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
+from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
 def test_percentile_is_deterministic_and_interpolated():
@@ -35,6 +35,9 @@ def test_fixture_is_seeded_redacted_and_materializes_dimensions(tmp_path):
     assert first["counts"]["tickets"] == 100
     assert set(first["dimensions"]["session_states"]) == {"draft", "active", "completed", "cancelled"}
     assert first["redaction_policy"].startswith("synthetic identifiers")
+    assert set(first["dimensions"]["runs_per_ticket_counts"]) == {str(item) for item in RUNS_PER_TICKET}
+    assert all(first["dimensions"]["session_states"][state] > 0 for state in ("draft", "active", "completed", "cancelled"))
+    assert all(first["dimensions"]["budget_states"][state] > 0 for state in BUDGET_STATES)
     ticket_text = list((tmp_path / "first" / ".vibe" / "tickets").rglob("*.yaml"))[0].read_text(encoding="utf-8")
     assert "title: ''" in ticket_text and "description: ''" in ticket_text
 
@@ -59,3 +62,17 @@ def test_result_validation_rejects_mutated_source_and_sample_mismatch():
     result["cases"][0]["sample_count"] = 1
     with pytest.raises(ValueError):
         validate_result(result)
+
+
+def test_manifest_rejects_claimed_but_unmaterialized_run_dimension(tmp_path):
+    manifest = generate_fixture(tmp_path / "fixture", seed=9)
+    manifest["dimensions"]["runs_per_ticket_counts"]["0"] -= 1
+    with pytest.raises(ValueError, match="runs_per_ticket"):
+        validate_manifest(manifest)
+
+
+def test_cold_capability_is_explicit():
+    capability = _cold_capability()
+    assert set(capability) == {"available", "strategy", "limitation"}
+    if not capability["available"]:
+        assert capability["limitation"]
