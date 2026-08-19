@@ -1,14 +1,15 @@
 import asyncio
 import json
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
-from vibe_orchestrator.orchestrator import Orchestrator, resume_rework
+from vibe_orchestrator.orchestrator import Orchestrator, recover_stale_run, resume_rework
+from vibe_orchestrator.run_store import RunStore
 from vibe_orchestrator.scheduler import Candidate, select_candidates
 from vibe_orchestrator.technical_debt import TechnicalDebtError, technical_debt_basis
 from vibe_orchestrator.tickets import TicketStore, TicketWriteService, next_status_for_ticket, reset_failed_retry
@@ -454,6 +455,57 @@ def test_manual_resume_rework_returns_to_development_queue(tmp_path: Path):
     assert resumed.blocked_reason is None
     assert resumed.last_outcome == "manual_rework_resumed"
     assert resumed.run_history[-1]["event"] == "manual_rework_resumed"
+
+
+def test_recover_stale_run_returns_ticket_to_source_queue(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Stale run", status="ready_for_review")
+    run_id = "stale-run"
+    RunStore(store.database).start(
+        {"run_id": run_id, "ticket_id": ticket.id, "process": "delivery", "stage": "review"},
+        prompt_contract="contract",
+        prompt_text="prompt",
+    )
+    ticket.status = "review"
+    ticket.active_run = run_id
+    store.record_run_event(ticket, run_id=run_id, stage_id="review", event="started", from_status="ready_for_review", to_status="review")
+    store.save(ticket)
+
+    recovered = recover_stale_run(
+        store,
+        ticket.id,
+        now=datetime.now(timezone.utc) + timedelta(minutes=31),
+    )
+
+    assert recovered.status == "ready_for_review"
+    assert recovered.active_run is None
+    assert recovered.last_outcome == "run_interrupted"
+    assert recovered.run_history[-1]["event"] == "stale_run_recovered"
+    assert RunStore(store.database).get(run_id)["state"] == "aborted"
+
+
+def test_recover_stale_run_rejects_fresh_run(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Fresh run", status="development")
+    run_id = "fresh-run"
+    RunStore(store.database).start(
+        {"run_id": run_id, "ticket_id": ticket.id, "process": "delivery", "stage": "development"},
+        prompt_contract="contract",
+        prompt_text="prompt",
+    )
+    ticket.status = "development"
+    ticket.active_run = run_id
+    store.record_run_event(ticket, run_id=run_id, stage_id="development", event="started", from_status="ready_for_development", to_status="development")
+    store.save(ticket)
+
+    with pytest.raises(ValueError, match="ещё не считается зависшим"):
+        recover_stale_run(store, ticket.id)
+
+    recovered = recover_stale_run(store, ticket.id, force=True)
+    assert recovered.active_run is None
+    assert recovered.status == "ready_for_development"
 
 
 @pytest.mark.parametrize(
