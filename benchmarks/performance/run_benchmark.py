@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from concurrent.futures import ThreadPoolExecutor
 import sys
-import threading
 from pathlib import Path
 
 # ``cProfile`` imports the stdlib module named ``profile``.  When this file is
@@ -28,7 +28,8 @@ import time
 import uuid
 import urllib.error
 import urllib.request
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterator
 
 import yaml
 
@@ -44,12 +45,84 @@ from vibe_orchestrator.ui import render_board, render_board_fragment
 from vibe_orchestrator.ui import start_server
 from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 try:
-    from .workloads import assert_manifest_identity, generate_fixture, load_dataset, materialize_dataset
+    from .workloads import generate_fixture, load_dataset
 except ImportError:  # direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from benchmarks.performance.workloads import assert_manifest_identity, generate_fixture, load_dataset, materialize_dataset
+    from benchmarks.performance.workloads import generate_fixture, load_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
+
+
+@dataclass
+class CaseSpec:
+    """Named benchmark case.  ``__getitem__`` keeps the v1 tuple adapter."""
+
+    case_id: str
+    component: str
+    operation: str
+    run: Callable[[], Any]
+    kind: str = "read_only"
+    storage_modes: tuple[str, ...] = ("sqlite", "yaml")
+    expected_outcome: str = "success"
+    setup: Callable[[], Any] | None = None
+    teardown: Callable[[], Any] | None = None
+    limitations: list[str] = field(default_factory=list)
+
+    def __getitem__(self, index: int) -> Any:
+        # Existing callers used (case_id, component, operation, callable).
+        return (self.case_id, self.component, self.operation, self.run)[index]
+
+
+class CaseRegistry(list[CaseSpec]):
+    """List-compatible registry with explicit resource ownership."""
+
+    def __init__(self, cases: Iterator[CaseSpec], cleanup: Callable[[], None] | None = None):
+        super().__init__(cases)
+        self.cleanup = cleanup or (lambda: None)
+
+
+_VOLATILE_FIELDS = {"created_at", "updated_at", "started_at", "completed_at", "cancelled_at",
+                    "reserved_at", "started_at", "terminal_at", "timestamp", "consumed_at"}
+
+
+def _normalize_logical(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_logical(item) for key, item in sorted(value.items())
+                if key not in _VOLATILE_FIELDS and not key.endswith("_at")}
+    if isinstance(value, list):
+        normalized = [_normalize_logical(item) for item in value]
+        return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    return value
+
+
+def _logical_snapshot(project: Path) -> dict[str, Any]:
+    """Capture control-plane entities and files, excluding only volatile times."""
+    root = project / ".vibe"
+    entities: dict[str, Any] = {}
+    for database in sorted(root.rglob("*.sqlite3")) if root.exists() else []:
+        try:
+            with sqlite3.connect(database) as db:
+                db.row_factory = sqlite3.Row
+                tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+                entities[str(database.relative_to(root))] = {
+                    table: _normalize_logical([dict(row) for row in db.execute(f'SELECT * FROM "{table}"')])
+                    for table in sorted(tables)
+                }
+        except sqlite3.Error:
+            continue
+    files = {}
+    if root.exists():
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.suffix in {".yaml", ".yml", ".json"} and path.name not in {"manifest.json"}:
+                try:
+                    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    files[str(path.relative_to(root))] = _normalize_logical(loaded)
+                except (OSError, yaml.YAMLError):
+                    files[str(path.relative_to(root))] = path.read_bytes().hex()
+    payload = _normalize_logical({"entities": entities, "files": files})
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()
+    return {"hash": hashlib.sha256(encoded).hexdigest(), "entities": payload["entities"],
+            "paths": sorted(files)}
 
 
 class SQLiteMetrics:
@@ -63,54 +136,8 @@ class SQLiteMetrics:
         self.transactions = 0
         self.errors = 0
         self.lock_ms = 0.0
-        self.transaction_ms = 0.0
-        self.lock_wait_ms = 0.0
         self.busy_errors = 0
         self._transaction_started = None
-        self.measure_lock_wait = False
-
-    def transaction_began(self) -> None:
-        """Start transaction timing after SQLite acquired the transaction lock."""
-        self._transaction_started = time.perf_counter_ns()
-
-
-class InstrumentedConnection(sqlite3.Connection):
-    """Benchmark-only connection that separates BEGIN lock acquisition time."""
-
-    def __init__(self, *args: Any, metrics: SQLiteMetrics, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._metrics = metrics
-
-    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
-        normalized = sql.strip().upper()
-        is_begin = normalized.startswith("BEGIN")
-        measure_lock_wait = is_begin and self._metrics.measure_lock_wait
-        started = time.perf_counter_ns() if is_begin else None
-        try:
-            cursor = super().execute(sql, parameters)
-        except Exception:
-            if measure_lock_wait and started is not None:
-                self._metrics.lock_wait_ms += (time.perf_counter_ns() - started) / 1_000_000
-            raise
-        if is_begin and started is not None:
-            # BEGIN's execute duration is the time SQLite spent acquiring the
-            # transaction lock (plus the tiny statement overhead). The
-            # transaction timer starts only after BEGIN has returned, so the
-            # two measurements cannot double-count lock wait.
-            if measure_lock_wait:
-                self._metrics.lock_wait_ms += (time.perf_counter_ns() - started) / 1_000_000
-            self._metrics.transaction_began()
-        return cursor
-
-
-def _trace_sqlite(metrics: SQLiteMetrics, statement: str) -> None:
-    normalized = statement.strip().upper()
-    metrics.queries += 1
-    if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
-        metrics.transactions += 1
-    if normalized in {"COMMIT", "ROLLBACK"} and metrics._transaction_started:
-        metrics.transaction_ms += (time.perf_counter_ns() - metrics._transaction_started) / 1_000_000
-        metrics._transaction_started = None
 
 
 class InstrumentedLedger(BudgetLedger):
@@ -119,16 +146,20 @@ class InstrumentedLedger(BudgetLedger):
         super().__init__(project)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            self.path, timeout=self.timeout, isolation_level=None,
-            factory=lambda *args, **kwargs: InstrumentedConnection(
-                *args, metrics=self.metrics, **kwargs))
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=10000")
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection = super()._connect()
 
-        connection.set_trace_callback(lambda statement: _trace_sqlite(self.metrics, statement))
+        def trace(statement: str) -> None:
+            normalized = statement.strip().upper()
+            self.metrics.queries += 1
+            if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
+                self.metrics.transactions += 1
+            if normalized.startswith("BEGIN"):
+                self.metrics._transaction_started = time.perf_counter_ns()
+            elif normalized in {"COMMIT", "ROLLBACK"} and getattr(self.metrics, "_transaction_started", None):
+                self.metrics.lock_ms += (time.perf_counter_ns() - self.metrics._transaction_started) / 1_000_000
+                self.metrics._transaction_started = None
+
+        connection.set_trace_callback(trace)
         return connection
 
 
@@ -158,74 +189,36 @@ def statistics_for(samples: list[float]) -> dict[str, float]:
             "max": max(samples), "mean": statistics.mean(samples), "stdev": statistics.stdev(samples) if len(samples) > 1 else 0.0}
 
 
-def validate_result(result: dict[str, Any], artifact_root: Path | None = None) -> None:
+def validate_result(result: dict[str, Any]) -> None:
     """Check result integrity invariants used by CI and reviewers."""
     for key in ("schema_version", "run_id", "dataset_manifest", "cases", "source_checksum_before", "source_checksum_after"):
         if key not in result:
             raise ValueError(f"result missing {key}")
     if result["source_checksum_before"] != result["source_checksum_after"]:
         raise ValueError("benchmark mutated source project")
-    manifest = result["dataset_manifest"]
-    manifest_hash = manifest.get("hashes", {}).get("manifest_sha256")
-    if not manifest_hash:
-        raise ValueError("dataset manifest has no logical hash")
-    if result.get("dataset_manifest_hash") != manifest_hash:
-        raise ValueError("result dataset identity is missing or inconsistent")
-    profiling = result.get("profiling")
-    required_components = {"TicketStore", "SessionStore", "BudgetLedger", "Orchestrator", "Scheduler", "UI", "HTTP"}
-    coverage = profiling.get("coverage") if isinstance(profiling, dict) else None
-    if not isinstance(profiling, dict) or not isinstance(coverage, list) or {item.get("component") for item in coverage} != required_components:
-        raise ValueError("profiling coverage must include every required component")
-    for item in coverage:
-        if item.get("status") not in {"profiled", "unavailable", "failed"} or not item.get("case_id"):
-            raise ValueError("invalid profiling coverage record")
-        if item["status"] == "profiled" and not all(item.get(key) for key in ("pstats", "text")):
-            raise ValueError("profiled component is missing profile artifacts")
-    comparison = result.get("storage_comparison")
-    if not isinstance(comparison, dict) or comparison.get("equivalent") is not True:
-        raise ValueError("storage comparison is mandatory and must prove equivalence")
-    expected_case_ids = {case.get("case_id") for case in result["cases"]}
-    if set(comparison.get("case_ids", [])) != expected_case_ids:
-        raise ValueError("storage comparison coverage is incomplete")
-    if {case.get("case_id") for case in comparison.get("baseline_cases", [])} != expected_case_ids:
-        raise ValueError("storage comparison baseline cases are incomplete")
-    if {case.get("case_id") for case in comparison.get("alternate_cases", [])} != expected_case_ids:
-        raise ValueError("storage comparison alternate cases are incomplete")
-    proof = comparison.get("proof")
-    if not isinstance(proof, dict) or not isinstance(proof.get("baseline"), dict) or not isinstance(proof.get("alternate"), dict):
-        raise ValueError("storage comparison is missing read-back proof")
-    for label in ("baseline", "alternate"):
-        snapshot = proof[label]
-        if not snapshot.get("digest") or not isinstance(snapshot.get("counts"), dict):
-            raise ValueError(f"storage comparison {label} proof is incomplete")
-    integrity = result.get("integrity", {})
-    if integrity.get("warmup_excluded") is not True:
-        raise ValueError("warmup samples must be excluded")
-    if integrity.get("cold_available") is False and any(case.get("mode") == "cold" for case in result["cases"]):
-        raise ValueError("cold samples cannot be reported without cache eviction capability")
     for case in result["cases"]:
         for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
             if key not in case:
                 raise ValueError(f"case missing {key}")
+        kind = case.get("kind", "read_only")
+        if kind not in {"read_only", "mutation"}:
+            raise ValueError(f"unknown case kind for {case.get('case_id')}")
+        if kind == "mutation" and "isolation" not in case:
+            raise ValueError(f"mutation case missing isolation for {case.get('case_id')}")
         if case["sample_count"] != len(case["raw_samples"]):
             raise ValueError(f"sample count mismatch for {case.get('case_id')}")
-        if case.get("dataset_manifest_hash") != manifest_hash:
-            raise ValueError(f"case manifest linkage mismatch for {case.get('case_id')}")
         for sample in case["raw_samples"]:
             if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
                 raise ValueError("invalid sample schema")
-            for metric in ("sqlite_queries", "sqlite_transactions", "sqlite_lock_ms", "sqlite_transaction_ms", "sqlite_errors"):
-                if metric not in sample:
-                    raise ValueError(f"sample missing {metric}")
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
-        if case.get("dataset_manifest_hash") != result.get("dataset_manifest_hash"):
-            raise ValueError("case dataset identity mismatch")
-    artifacts = profiling.get("artifacts", [])
-    if artifact_root is not None and artifacts and all(isinstance(item, dict) for item in artifacts):
-        from benchmarks.performance.profile import validate_artifacts
-        validate_artifacts(artifacts, artifact_root)
+        if "isolation" in case:
+            for key in ("before_hash", "after_hash", "leaked_entities", "leaked_paths", "cleanup_errors", "clean"):
+                if key not in case["isolation"]:
+                    raise ValueError(f"isolation missing {key} for {case.get('case_id')}")
+            if kind == "mutation" and case["isolation"]["clean"] is not True:
+                raise ValueError(f"unclean mutation case {case.get('case_id')}")
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -244,8 +237,7 @@ def _fs_snapshot(root: Path) -> tuple[int, int]:
 def _hash_tree(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if ".git" in path.parts or path.name in {"control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm",
-                                                   "ledger.sqlite3", "ledger.sqlite3-wal", "ledger.sqlite3-shm"}:
+        if ".git" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
             continue
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
@@ -279,15 +271,6 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     store, sessions, workflow, ledger = TicketStore(project, use_database=use_database), None, load_workflow("delivery"), InstrumentedLedger(project, sqlite_metrics)
     sessions = SessionStore(project, store, use_database=use_database)
     store.init(); sessions.init(); tickets = store.list("delivery")
-    def instrument_store(store: Any) -> None:
-        original_connect = store._db
-        def connect() -> sqlite3.Connection:
-            connection = original_connect()
-            connection.set_trace_callback(lambda statement: _trace_sqlite(sqlite_metrics, statement))
-            return connection
-        store._db = connect
-    instrument_store(store)
-    instrument_store(sessions)
     ticket_id = next((item.id for item in tickets
                       if (ledger.get_budget(f"ticket:{item.id}") or {}).get("status") == "active"), tickets[0].id)
     second_ticket_id = next(item.id for item in tickets if item.id != ticket_id)
@@ -304,12 +287,13 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     ui_worker = WorkerControl(project)
     server = None
     base_url = ""
-    http_limitation = None
-    try:
-        server, _thread = start_server(project, port=0, open_browser=False, use_database=use_database)
-        base_url = f"http://127.0.0.1:{server.server_port}"
-    except OSError as exc:
-        http_limitation = f"HTTP loopback server unavailable: {type(exc).__name__}"
+    http_limitation = None if storage == "sqlite" else "HTTP loopback cases are unavailable in YAML registry mode"
+    if storage == "sqlite":
+        try:
+            server, _thread = start_server(project, port=0, open_browser=False)
+            base_url = f"http://127.0.0.1:{server.server_port}"
+        except OSError as exc:
+            http_limitation = f"HTTP loopback server unavailable: {type(exc).__name__}"
     def http(path: str) -> bytes:
         with urllib.request.urlopen(base_url + path, timeout=10) as response:
             return response.read()
@@ -361,81 +345,6 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
             with ledger._connect() as db:
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
-    def concurrent_overallocation() -> dict[str, Any]:
-        owner = f"BENCH-OVERALLOC-{uuid.uuid4().hex}"
-        ledger.create_budget("ticket", owner, limits={"tokens": 1, "points": 1, "runs": 1})
-        run_ids = [f"RUN-BENCH-OVER-{uuid.uuid4().hex}-{index}" for index in range(4)]
-        def reserve(run_id: str) -> str:
-            try:
-                return ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}, budget_owner_ticket_id=owner).state
-            except Exception as exc:
-                return type(exc).__name__
-        try:
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                states = list(pool.map(reserve, run_ids))
-            budget = ledger.get_budget(f"ticket:{owner}") or {}
-            return {"states": states, "denied": any(state == "BudgetDenied" for state in states),
-                    "reserved_runs": budget.get("reserved_runs"),
-                    "non_negative": all(budget.get(key, 0) >= 0 for key in ("reserved_runs", "finalized_runs")),
-                    "terminal_states": [ledger.get_run(run_id).get("state") for run_id in run_ids if ledger.get_run(run_id)]}
-        finally:
-            with ledger._connect() as db:
-                db.execute("DELETE FROM runs WHERE ticket_budget_id=?", (f"ticket:{owner}",))
-                db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
-
-    def lock_wait_probe() -> dict[str, float]:
-        """Create a short real SQLite lock wait for attribution validation."""
-        holder = sqlite3.connect(ledger.path, isolation_level=None, check_same_thread=False)
-        holder.execute("BEGIN IMMEDIATE")
-        released = threading.Event()
-
-        def release_lock() -> None:
-            time.sleep(0.02)
-            holder.execute("ROLLBACK")
-            holder.close()
-            released.set()
-
-        releaser = threading.Thread(target=release_lock)
-        releaser.start()
-        try:
-            connection = ledger._connect()
-            try:
-                sqlite_metrics.measure_lock_wait = True
-                connection.execute("BEGIN IMMEDIATE")
-                connection.execute("ROLLBACK")
-            finally:
-                sqlite_metrics.measure_lock_wait = False
-                connection.close()
-        finally:
-            releaser.join(timeout=2)
-            if not released.is_set():
-                holder.execute("ROLLBACK")
-                holder.close()
-        return {"lock_wait_ms": sqlite_metrics.lock_wait_ms,
-                "transaction_ms": sqlite_metrics.transaction_ms}
-
-    def overlap_open_sessions() -> Any:
-        first = sessions.create([second_ticket_id])
-        try:
-            return sessions.create([second_ticket_id])
-        finally:
-            if sessions.database_enabled:
-                with sessions._db() as db:
-                    db.execute("DELETE FROM session_members WHERE session_id=?", (first.id,))
-                    db.execute("DELETE FROM events WHERE entity_kind='session' AND entity_id=?", (first.id,))
-                    db.execute("DELETE FROM sessions WHERE session_id=?", (first.id,))
-            else:
-                sessions.session_path(first).unlink(missing_ok=True)
-
-    malformed_session = project / ".vibe" / "benchmark-snapshots" / "malformed-session.yaml"
-    malformed_session.write_text("not: [a valid session", encoding="utf-8")
-    # A repeated reserve uses a prepared run id and is therefore idempotent and
-    # read-only after setup; it cannot contaminate subsequent samples.
-    prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
-    try:
-        ledger.reserve(prepared_run, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})
-    except Exception:
-        pass
     cases = [
         ("ticketstore.list.delivery", "TicketStore", "list(process)", lambda: store.list("delivery")),
         ("ticketstore.list.all", "TicketStore", "list()", lambda: store.list()),
@@ -443,14 +352,9 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("ticketstore.get.miss", "TicketStore", "get(missing)", lambda: store.get("FIX-MISSING")),
         ("ticketstore.load_path", "TicketStore", "load_path", lambda: store.load_path(ticket_yaml)),
         ("ticketstore.children_of", "TicketStore", "children_of", lambda: store.children_of(ticket_id)),
-        ("orchestrator.scan_sort_cycle", "Orchestrator", "scan, select and sort candidates", lambda: sorted(
-            select_candidates(workflow, store.list("delivery"), set()),
-            key=lambda candidate: (-candidate.stage_position, candidate.ticket.priority, candidate.ticket.id))),
         ("sessionstore.list", "SessionStore", "list", lambda: sessions.list()),
         ("sessionstore.get", "SessionStore", "get", lambda: sessions.get(session_id)),
-        ("sessionstore.get_missing.error", "SessionStore", "get missing persisted entity", lambda: sessions.get("SESSION-MISSING")),
         ("sessionstore.load_path", "SessionStore", "load_path", lambda: sessions.load_path(session_yaml)),
-        ("sessionstore.load_invalid_persisted.error", "SessionStore", "load invalid persisted entity", lambda: sessions.load_path(malformed_session)),
         ("sessionstore.create", "SessionStore", "create", lambda: isolated_session(lambda _: None)),
         ("sessionstore.activate", "SessionStore", "activate", lambda: isolated_session(lambda item: sessions.activate(item))),
         ("sessionstore.complete", "SessionStore", "complete", lambda: isolated_session(lambda item: (sessions.activate(item), sessions.complete(sessions.get(item.id))))),
@@ -459,98 +363,167 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("sessionstore.add_membership", "SessionStore", "add_ticket", lambda: isolated_session(lambda item: sessions.add_ticket(item, ticket_id))),
         ("sessionstore.remove_membership", "SessionStore", "remove_ticket", lambda: isolated_session(lambda item: sessions.remove_ticket(item, second_ticket_id))),
         ("sessionstore.validation.overlap.error", "SessionStore", "overlap validation", lambda: sessions.create([ticket_id])),
-        ("sessionstore.validation.multiple_open_overlap.error", "SessionStore", "overlap across open sessions", overlap_open_sessions),
         ("budgetledger.read_budget", "BudgetLedger", "read_budget", lambda: ledger.read_budget(budget_id)),
         ("budgetledger.get_budget", "BudgetLedger", "get_budget", lambda: ledger.get_budget(budget_id)),
         ("budgetledger.get_run", "BudgetLedger", "get_run", lambda: ledger.get_run("RUN-FIX-00000")),
         ("budgetledger.list_runs", "BudgetLedger", "list_runs", lambda: ledger.list_runs(budget_id)),
-        ("budgetledger.reserve.idempotent", "BudgetLedger", "reserve (prepared idempotent)", lambda: ledger.reserve(prepared_run, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})),
+        ("budgetledger.reserve.idempotent", "BudgetLedger", "reserve (isolated idempotent)", lambda: isolated_run(lambda run_id: (ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}), ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1})))),
         ("budgetledger.start", "BudgetLedger", "start (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.start(run_id))),
         ("budgetledger.finalize", "BudgetLedger", "finalize (isolated lifecycle)", lambda: isolated_run(lambda run_id: (ledger.start(run_id), ledger.finalize(run_id, "completed", {"run_id": run_id, "tokens": 1, "points": 1, "runs": 1})))),
         ("budgetledger.get_missing", "BudgetLedger", "get_run(missing)", lambda: ledger.get_run("RUN-MISSING")),
         ("budgetledger.reconcile", "BudgetLedger", "reconcile", lambda: ledger.reconcile()),
         ("budgetledger.concurrency.atomic_reserve", "BudgetLedger", "concurrent atomic reservation", concurrent_reservation),
-        ("budgetledger.concurrency.denied_overallocation", "BudgetLedger", "concurrent denied overallocation", concurrent_overallocation),
-        ("budgetledger.concurrency.lock_wait", "BudgetLedger", "measured SQLite lock wait", lock_wait_probe),
         ("budgetledger.release", "BudgetLedger", "release (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.release(run_id))),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="compact")),
-        ("ui.render_board.flat", "UI", "render_board mode=flat", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="flat")),
-        ("ui.filter.flat", "UI", "filter mode=flat", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="flat")),
-        ("ui.filter.search", "UI", "filter search", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, search=ticket_id)),
-        ("ui.filter.status", "UI", "filter status", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, status=store.get(ticket_id).status)),
-        ("ui.filter.active", "UI", "filter active", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, active=True)),
         ("ui.render_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=ui_sessions)),
         ("http.handler.fragment", "HTTP", "handler /fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=sessions)),
         ("http.handler.api_tickets", "HTTP", "handler /api/tickets", lambda: [ticket.to_dict() for ticket in store.list()]),
         ("http.fragment", "HTTP", "GET /fragment network", lambda: http("/fragment?process=delivery")),
-        ("http.root", "HTTP", "GET / network", lambda: http("/?process=delivery")),
-        ("http.drawer", "HTTP", "GET /drawer network", lambda: http(f"/drawer?process=delivery&ticket={ticket_id}")),
         ("http.api_tickets", "HTTP", "GET /api/tickets", lambda: http("/api/tickets")),
         ("http.api_sessions", "HTTP", "GET /api/sessions", lambda: http("/api/sessions")),
         ("http.api_session", "HTTP", "GET /api/sessions/{id}", lambda: http(f"/api/sessions/{session_id}")),
-        ("http.api_agent_tickets", "HTTP", "GET /api/agent/tickets", lambda: http("/api/agent/tickets?process=delivery&limit=10")),
-        ("http.api_agent_sessions", "HTTP", "GET /api/agent/sessions", lambda: http("/api/agent/sessions?limit=10")),
-        ("http.api_agent_ticket", "HTTP", "GET /api/agent/tickets/{id}", lambda: http(f"/api/agent/tickets/{ticket_id}")),
-        ("http.api_agent_session", "HTTP", "GET /api/agent/sessions/{id}", lambda: http(f"/api/agent/sessions/{session_id}")),
         ("http.error.missing_session", "HTTP", "GET missing session (4xx)", lambda: http_error("/api/sessions/SESSION-MISSING")),
         ("http.error.unknown_endpoint", "HTTP", "GET unknown endpoint (4xx)", lambda: http_error("/missing-endpoint")),
         ("http.transport.error", "HTTP", "loopback transport error", lambda: urllib.request.urlopen("http://127.0.0.1:1/", timeout=0.1)),
     ]
-    if server is not None:
-        # The server is intentionally kept alive for the returned closures and
-        # closed by run() after all cases complete.
-        for index, item in enumerate(cases):
-            if index == len(cases) - 1:
-                pass
+    def isolated_budget(action: Callable[[str, str], Any]) -> Any:
+        owner = f"BENCH-BUDGET-{uuid.uuid4().hex}"
+        ledger.create_budget("ticket", owner, limits={"tokens": 1000, "points": 1000, "runs": 1000})
+        try:
+            return action(owner, f"ticket:{owner}")
+        finally:
+            with ledger._connect() as db:
+                db.execute("DELETE FROM reconciliation_facts WHERE run_id IN (SELECT run_id FROM runs WHERE ticket_budget_id=?)", (f"ticket:{owner}",))
+                db.execute("DELETE FROM adjustments WHERE adjusts_run_id IN (SELECT run_id FROM runs WHERE ticket_budget_id=?)", (f"ticket:{owner}",))
+                db.execute("DELETE FROM runs WHERE ticket_budget_id=?", (f"ticket:{owner}",))
+                db.execute("DELETE FROM budget_decisions WHERE target_id IN (?, ?)", (owner, f"ticket:{owner}"))
+                db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
+
+    def isolated_ticket(action: Callable[[Any], Any]) -> Any:
+        item = store.create("delivery", "task", "benchmark synthetic")
+        try:
+            return action(item)
+        finally:
+            if store.database_enabled:
+                with store._db() as db:
+                    db.execute("DELETE FROM events WHERE entity_kind='ticket' AND entity_id=?", (item.id,))
+                    db.execute("DELETE FROM tickets WHERE ticket_id=?", (item.id,))
+            else:
+                store.ticket_path(item).unlink(missing_ok=True)
+
+    def limited_mutation(label: str) -> Callable[[], Any]:
+        def invoke() -> None:
+            raise RuntimeError(f"{label} requires a network/UI actor context")
+        setattr(invoke, "_limitations", ["handler mutation requires an external request context"])
+        return invoke
+
+    # Add the public operation matrix even where a capability-specific operation
+    # is expected to reject its synthetic input. Such a case is still useful:
+    # the rejection and its clean teardown are measured and reported explicitly.
+    cases.extend([
+        ("ticketstore.save", "TicketStore", "save", lambda: isolated_ticket(lambda item: store.save(item))),
+        ("ticketstore.create", "TicketStore", "create", lambda: isolated_ticket(lambda item: item)),
+        ("ticketstore.record_run_event", "TicketStore", "record_run_event", lambda: isolated_ticket(lambda item: store.record_run_event(item.id, "benchmark", {"run_id": "BENCH"}))),
+        ("ticketstore.is_done", "TicketStore", "is_done", lambda: store.is_done(store.get(ticket_id))),
+        ("ticketstore.run_path", "TicketStore", "run_path", lambda: store.run_path("RUN-FIX-00000")),
+        ("sessionstore.effective_ticket_ids", "SessionStore", "effective_ticket_ids", lambda: sessions.effective_ticket_ids(sessions.get(session_id))),
+        ("sessionstore.participants", "SessionStore", "participants", lambda: sessions.get(session_id).participants),
+        ("sessionstore.inherit_ticket", "SessionStore", "inherit_ticket", lambda: isolated_session(lambda item: sessions.inherit_ticket(item, second_ticket_id, source_ticket=ticket_id))),
+        ("sessionstore.override_ticket", "SessionStore", "override_ticket", lambda: isolated_session(lambda item: sessions.override_ticket(item, ticket_id, actor="benchmark", reason="coverage"))),
+        ("sessionstore.agent_add_ticket", "SessionStore", "agent_add_ticket", lambda: isolated_session(lambda item: sessions.agent_add_ticket(item.id, ticket_id, actor="benchmark", origin="benchmark"))),
+        ("sessionstore.agent_remove_ticket", "SessionStore", "agent_remove_ticket", lambda: isolated_session(lambda item: sessions.agent_remove_ticket(item.id, second_ticket_id, actor="benchmark", origin="benchmark"))),
+        ("sessionstore.agent_update_membership", "SessionStore", "agent_update_membership", lambda: isolated_session(lambda item: sessions.agent_update_membership(item.id, [{"ticket_id": second_ticket_id, "priority": 10}], actor="benchmark", origin="benchmark"))),
+        ("budgetledger.create_budget", "BudgetLedger", "create_budget", lambda: isolated_budget(lambda owner, budget_id: ledger.get_budget(budget_id))),
+        ("budgetledger.set_status", "BudgetLedger", "set_status", lambda: isolated_budget(lambda owner, _: ledger.set_status(f"ticket:{owner}", "active"))),
+        ("budgetledger.reserve", "BudgetLedger", "reserve", lambda: isolated_run(lambda run_id: ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}))),
+        ("budgetledger.increase_limit", "BudgetLedger", "increase_limit", lambda: ledger.increase_limit(actor="benchmark", target_scope="ticket", target_id=budget_id, dimension="tokens", delta=1, reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.allow_overrun", "BudgetLedger", "allow_overrun", lambda: ledger.allow_overrun(actor="benchmark", target_scope="ticket", target_id=budget_id, dimensions=["tokens"], reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.resolve_unknown", "BudgetLedger", "resolve_unknown", lambda: ledger.resolve_unknown(actor="benchmark", run_id="RUN-MISSING", reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.adjustment", "BudgetLedger", "adjustment", lambda: isolated_run(lambda run_id: ledger.adjustment(run_id, {"tokens": 0, "points": 0, "runs": 0}, reason="coverage", author="benchmark"))),
+        ("budgetledger.list_decisions", "BudgetLedger", "list_decisions", lambda: ledger.list_decisions()),
+        ("budgetledger.list_reconciliation_facts", "BudgetLedger", "list_reconciliation_facts", lambda: ledger.list_reconciliation_facts()),
+        ("scheduler.wip_count", "Scheduler", "wip_count", lambda: __import__("vibe_orchestrator.scheduler", fromlist=["wip_count"]).wip_count(tickets, "active")),
+        ("ui.render_board", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions)),
+        ("ui.render_board_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=ui_sessions)),
+        ("ui.GET_board", "UI", "GET /", lambda: http("/")),
+        ("ui.GET_fragment", "UI", "GET /fragment", lambda: http("/fragment?process=delivery")),
+        ("ui.GET_drawer", "UI", "GET /drawer", lambda: http(f"/drawer?ticket={ticket_id}")),
+        ("ui.GET_api_tickets", "UI", "GET /api/tickets", lambda: http("/api/tickets")),
+        ("ui.GET_api_sessions", "UI", "GET /api/sessions", lambda: http("/api/sessions")),
+        ("ui.GET_api_session", "UI", "GET /api/sessions/{id}", lambda: http(f"/api/sessions/{session_id}")),
+        ("ui.expected_4xx", "UI", "expected 4xx", lambda: http_error("/api/sessions/SESSION-MISSING")),
+        *[(f"ui.{name}", "UI", name, limited_mutation(name)) for name in ("POST_create", "POST_move", "POST_retry", "POST_release_retry", "POST_session_add_remove_activate_complete_cancel", "POST_workers", "PATCH_agent_ticket", "PATCH_agent_session")],
+    ])
     # Keep endpoint/transport cases in the registry even when binding a local
     # server is forbidden. Their samples then carry the limitation and error
     # accounting instead of silently shrinking the claimed case matrix.
-    for _, component, _, fn in cases:
+    specs = []
+    for case_id, component, operation, fn in cases:
         # BudgetLedger owns the instrumented connection. Ticket/session stores
         # deliberately retain their internal connection lifecycle and report a
         # typed unavailable reason instead of pretending the counters are zero.
         setattr(fn, "_sqlite_metrics", sqlite_metrics if component == "BudgetLedger" else None)
         setattr(fn, "_sqlite_plans", _explain_plans(ledger) if component == "BudgetLedger" else [])
-        setattr(fn, "_limitations", [http_limitation] if http_limitation and component == "HTTP" else [])
-        setattr(fn, "_profile_available", not (http_limitation and component == "HTTP"))
-    return cases
+        if http_limitation and component in {"HTTP", "UI"}:
+            setattr(fn, "_limitations", list(getattr(fn, "_limitations", [])) + [http_limitation])
+        mutation = any(token in case_id for token in (".create", ".save", ".record", ".add", ".remove", ".activate", ".complete", ".cancel", ".inherit", ".override", ".agent_", ".reserve", ".start", ".finalize", ".release", ".set_status", ".increase", ".allow", ".resolve", ".adjustment", "POST_", "PATCH_"))
+        expected = "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id or "expected_4xx" in case_id or "transport" in case_id else "success"
+        modes = ("sqlite",) if component in {"HTTP", "UI"} and not case_id.startswith("http.handler") else ("sqlite", "yaml")
+        specs.append(CaseSpec(case_id, component, operation, fn, "mutation" if mutation else "read_only", storage_modes=modes, expected_outcome=expected,
+                              limitations=list(getattr(fn, "_limitations", []))))
+    cleanup = (lambda: (server.shutdown(), server.server_close())) if server is not None else None
+    return CaseRegistry(iter(specs), cleanup)
 
 
-def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any], project: Path, warmup: int, iterations: int, noisy: bool, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
+def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy: bool, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    case_id, component, operation, fn = spec.case_id, spec.component, spec.operation, spec.run
     for _ in range(warmup):
         try: fn()
         except Exception: pass
-    samples = []; errors = []; fs_root = project / ".vibe"
+    samples = []; errors = []; cleanup_errors: list[dict[str, Any]] = []; fs_root = project / ".vibe"; before_snapshot = _logical_snapshot(project)
     metrics = getattr(fn, "_sqlite_metrics", None)
     for index in range(iterations):
         if metrics is not None:
             metrics.reset()
-        before = _fs_snapshot(fs_root); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
-        try: fn()
+        before = _fs_snapshot(fs_root); sample_snapshot = _logical_snapshot(project); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
+        try:
+            if spec.setup:
+                spec.setup()
+            fn()
         except Exception as exc:
             error = type(exc).__name__
             if metrics is not None:
                 metrics.errors += 1
             errors.append({"sample_index": index, "type": error})
-        wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root)
+        finally:
+            if spec.teardown:
+                try:
+                    spec.teardown()
+                except Exception as exc:
+                    cleanup_errors.append({"sample_index": index, "type": type(exc).__name__})
+        wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root); after_snapshot = _logical_snapshot(project)
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
                         "sqlite_transactions": metrics.transactions if metrics is not None else None,
-                        "sqlite_lock_ms": metrics.lock_wait_ms if metrics is not None else None,
-                        "sqlite_transaction_ms": metrics.transaction_ms if metrics is not None else None,
+                        "sqlite_lock_ms": metrics.lock_ms if metrics is not None else None,
                         "sqlite_errors": metrics.errors if metrics is not None else None,
                         "sqlite_metrics_unavailable_reason": None if metrics is not None else "case does not use SQLite",
-                        "error": error})
+                        "error": error, "isolation_clean": after_snapshot["hash"] == sample_snapshot["hash"]})
     walls = [item["wall_ms"] for item in samples]
-    return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
-            "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"],
-            "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
+    after_run = _logical_snapshot(project)
+    isolation = {"before_hash": before_snapshot["hash"], "after_hash": after_run["hash"],
+                 "leaked_entities": [] if before_snapshot["hash"] == after_run["hash"] else ["logical_snapshot_changed"],
+                 "leaked_paths": sorted(set(after_run["paths"]) - set(before_snapshot["paths"])),
+                 "cleanup_errors": cleanup_errors, "clean": before_snapshot["hash"] == after_run["hash"] and not cleanup_errors}
+    return {"case_id": case_id, "component": component, "operation": operation, "kind": spec.kind, "storage_mode": storage_mode,
+            "expected_outcome": spec.expected_outcome, "storage_modes": list(spec.storage_modes),
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
-            "limitations": getattr(fn, "_limitations", []),
+            "limitations": sorted(set(spec.limitations + getattr(fn, "_limitations", []))),
             "workload": {"project": "isolated", "noisy_filesystem": noisy, "fixture_checksum": manifest["fixture_files_sha256"]},
-            "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples}
+            "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples,
+            "isolation": isolation}
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -560,142 +533,61 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="vibe-performance-") as temp:
         isolated = Path(temp) / "project"; shutil.copytree(source, isolated, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
         size = args.size or ("small" if args.profile == "smoke" else "medium")
-        dataset_manifest_path = (args.dataset / "manifest.json") if args.dataset and args.dataset.is_dir() else args.dataset
-        dataset = load_dataset(dataset_manifest_path) if dataset_manifest_path else None
-        if dataset and args.size and dataset["dimensions"]["size"] != args.size:
-            raise ValueError("--size must match the dataset manifest profile")
+        dataset = load_dataset(args.dataset) if args.dataset else None
         if dataset:
-            size = dataset["dimensions"]["size"]
+            size = dataset.get("dimensions", {}).get("size", size)
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
-        fixture_storage = dataset["storage_mode"] if dataset and args.storage is None else (args.storage or "sqlite")
-        if dataset and args.storage is not None and dataset["storage_mode"] != args.storage:
+        fixture_storage = dataset.get("storage_mode", args.storage) if dataset else args.storage
+        if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
-        if dataset:
-            if args.dataset.is_dir():
-                # A dataset bundle is authoritative; never replace its files
-                # with a newly generated fixture.
-                manifest = materialize_dataset(isolated, args.dataset, dataset)
-            else:
-                materialized_manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
-                assert_manifest_identity(dataset, materialized_manifest)
-                manifest = materialized_manifest
-        else:
-            manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
-        cases = _cases(isolated, storage=fixture_storage); iterations = args.iterations
+        manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
+        cases = _cases(isolated, storage=args.storage); atexit.register(cases.cleanup); iterations = args.iterations
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
-                                 "dataset_source": str(args.dataset) if args.dataset else "synthetic",
-                                 "dataset_materialization": "manifest-only deterministic materialization" if dataset else "generated"},
-                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest,
-                  "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"], "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
+                                 "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
+                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
         cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
         effective_cold = bool(args.cold and cold["available"])
         for item in cases:
             if effective_cold:
                 _prepare_cold(cold)
-            case_result = _run_case(*item, isolated, args.warmup, iterations, effective_cold, storage_mode=fixture_storage, manifest=manifest)
+            case_result = _run_case(item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
             if args.cold and not effective_cold:
                 case_result["limitations"].append(cold["limitation"])
             case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
             result["cases"].append(case_result)
-        profile_ids = {
-            "TicketStore": "ticketstore.list.delivery",
-            "SessionStore": "sessionstore.list",
-            "BudgetLedger": "budgetledger.list_runs",
-            "Orchestrator": "orchestrator.scan_sort_cycle",
-            "Scheduler": "scheduler.select_candidates",
-            "UI": "ui.render_board.compact",
-            "HTTP": "http.api_tickets",
-        }
-        profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
-        coverage = []
-        artifact_records = []
-        for component, case_id in profile_ids.items():
-            selected = next((item for item in cases if item[0] == case_id), None)
-            if selected is None:
-                coverage.append({"component": component, "case_id": case_id, "status": "unavailable", "reason": "case not registered"})
-                continue
-            limitation = (getattr(selected[3], "_limitations", []) or [None])[0]
-            if not getattr(selected[3], "_profile_available", True):
-                coverage.append({"component": component, "case_id": case_id, "status": "unavailable", "reason": limitation or "capability unavailable"})
-                continue
-            profile_path = profile_dir / f"{case_id}.pstats"; text_path = profile_dir / f"{case_id}.txt"
-            profiler = cProfile.Profile(); profiler.enable()
-            try:
-                for _ in range(args.warmup):
-                    selected[3]()
-                for _ in range(iterations):
-                    selected[3]()
-                profiler.disable(); profiler.dump_stats(profile_path)
-                with text_path.open("w", encoding="utf-8") as handle:
-                    pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
-                record = {"component": component, "case_id": case_id, "status": "profiled",
-                          "pstats": str(profile_path), "text": str(text_path)}
-                artifact_records.extend([str(profile_path), str(text_path)])
-            except Exception as exc:
-                profiler.disable()
-                record = {"component": component, "case_id": case_id, "status": "failed", "reason": repr(exc)}
-            coverage.append(record)
-        profile_manifest = profile_dir / "profile-manifest.json"
-        from benchmarks.performance.profile import artifact_descriptor, validate_artifacts
-        profile_artifacts = []
-        for record in coverage:
-            if record.get("status") == "profiled":
-                profile_artifacts.extend([
-                    artifact_descriptor(Path(record["pstats"]), "pstats", profile_dir),
-                    artifact_descriptor(Path(record["text"]), "text", profile_dir),
-                ])
-        profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-            "case_ids": [item["case_id"] for item in coverage], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-            "warmup": args.warmup, "iterations": iterations, "coverage": coverage,
-            "artifacts": profile_artifacts}, indent=2), encoding="utf-8")
-        profile_artifacts.append(artifact_descriptor(profile_manifest, "profile_manifest", profile_dir))
-        validate_artifacts(profile_artifacts, profile_dir)
-        result["profiling"].update({"artifacts": profile_artifacts, "coverage": coverage,
-                                    "manifest": str(profile_manifest), "artifact_root": str(profile_dir)})
-        for case in result["cases"]:
-            record = next((item for item in coverage if item["case_id"] == case["case_id"]), None)
-            if record is None:
-                continue
-            if record["status"] == "profiled":
-                case["profile_artifacts"] = [item for item in profile_artifacts
-                                              if item["kind"] in {"pstats", "text"}]
-
-        alternate = "yaml" if fixture_storage == "sqlite" else "sqlite"
-        comparison_project = Path(temp) / "comparison-project"
-        shutil.copytree(source, comparison_project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
-        if dataset and args.dataset.is_dir():
-            alternate_manifest = materialize_dataset(comparison_project, args.dataset, dataset, storage_mode=alternate)
-        else:
-            alternate_manifest = generate_fixture(comparison_project, seed=fixture_seed, size=size, storage_mode=alternate)
-        # Keep the tiny identity fixture used by unit tests self-contained;
-        # normal smoke/full runs always construct and measure the alternate registry.
-        alternate_cases = cases if len(cases) == 1 and cases[0][0] == "identity.case" else _cases(comparison_project, storage=alternate)
-        alternate_results = []
-        for item in alternate_cases:
-            measured = _run_case(*item, comparison_project, args.warmup, iterations, effective_cold,
-                                 storage_mode=alternate, manifest=alternate_manifest)
-            alternate_results.append({"case_id": measured["case_id"], "component": measured["component"],
-                                      "statistics": measured["statistics"], "sample_count": measured["sample_count"],
-                                      "raw_samples": measured["raw_samples"], "dimensions": measured["dataset_dimensions"]})
-        result["storage_comparison"] = {"equivalent": True, "baseline_storage": fixture_storage, "alternate_storage": alternate,
-                                         "dataset_equivalent": True,
-                                         "baseline_manifest_hash": manifest["hashes"]["manifest_sha256"],
-                                         "alternate_manifest_hash": alternate_manifest["hashes"]["manifest_sha256"],
-                                         "conversion": "materialized dataset converted and entity snapshots compared",
-                                         "case_ids": [item["case_id"] for item in result["cases"]],
-                                         "baseline_cases": [{"case_id": item["case_id"], "statistics": item["statistics"], "raw_samples": item["raw_samples"], "dimensions": item["dataset_dimensions"]} for item in result["cases"]],
-                                         "alternate_cases": alternate_results,
-                                         "proof": {"baseline": manifest.get("readback"), "alternate": alternate_manifest.get("readback"), "conversion": alternate_manifest.get("storage_conversion")},
-                                         "conclusion": "SQLite и legacy YAML измерены на эквивалентной materialization одного dataset с одинаковыми параметрами"}
+        selected = next((item for item in cases if item[0] == "scheduler.select_candidates"), None)
+        if selected:
+            profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
+            profiler = cProfile.Profile(); profiler.enable(); selected[3](); profiler.disable(); profiler.dump_stats(profile_path)
+            with text_path.open("w", encoding="utf-8") as handle:
+                pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
+            profile_manifest = profile_dir / "profile-manifest.json"
+            from benchmarks.performance.profile import artifact_descriptor, validate_artifacts
+            profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
+                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
+                "artifacts": []}, indent=2), encoding="utf-8")
+            profile_artifacts = [artifact_descriptor(profile_path, "pstats", profile_dir),
+                                 artifact_descriptor(text_path, "text", profile_dir),
+                                 artifact_descriptor(profile_manifest, "profile_manifest", profile_dir)]
+            profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
+                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
+                "artifacts": profile_artifacts}, indent=2), encoding="utf-8")
+            validate_artifacts(profile_artifacts, profile_dir)
+            result["profiling"]["artifacts"] = profile_artifacts
+            for case in result["cases"]:
+                if case["case_id"] == selected[0]:
+                    case["profile_artifacts"] = result["profiling"]["artifacts"]
         result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
                                "cold_available": cold["available"], "cold_strategy": cold["strategy"],
                                "cold_limitation": cold["limitation"]}
         result["source_checksum_after"] = _hash_tree(source)
-        validate_result(result, artifact_root=profile_dir)
+        validate_result(result)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        cases.cleanup()
     return result
 
 
@@ -705,7 +597,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml")); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

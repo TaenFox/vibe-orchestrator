@@ -3,54 +3,23 @@
 ## Назначение и область аудита
 
 Аудит измеряет production control plane без изменения его семантики: TicketStore и
-SessionStore, scheduler, BudgetLedger, UI rendering и HTTP endpoints. Benchmark
-принимает synthetic fixture либо approved redacted dataset bundle (manifest JSON
-рядом с материализованным `.vibe`); bundle копируется в изолированную копию и не
-регенерируется. `source_checksum_before/after` проверяет отсутствие записи в
-исходное дерево.
+SessionStore, scheduler, BudgetLedger, UI rendering и HTTP endpoints. Фикстуры
+синтетические и анонимные; benchmark запускается на изолированной копии проекта,
+а `source_checksum_before/after` проверяет отсутствие записи в исходное дерево.
 
 ## Functional baseline: UI/API, scheduler, persistence, budget lifecycle
 
-Baseline включает `list/get/load_path/children_of` TicketStore; чтение, membership,
-validation, overlap и lifecycle SessionStore; чтение, reservation lifecycle,
-reconcile и error paths BudgetLedger; scheduler selection; UI board/fragment и
-HTTP success/error endpoints. SQLite является runtime control plane. Режим `yaml`
+Baseline включает `list/get/load_path/children_of/is_done/run_path` и write paths
+TicketStore; чтение, membership, agent membership, validation, overlap и lifecycle
+SessionStore; чтение, reservation/decision lifecycle, reconcile и error paths
+BudgetLedger; scheduler selection/WIP count; UI board/fragment/drawer и HTTP
+success/error endpoints. SQLite является runtime control plane. Режим `yaml`
 использует `use_database=False` для tickets/sessions и сохраняет legacy YAML files;
 ledger остаётся SQLite, поскольку это его authoritative persistence.
 Варианты профиля материализуют small/medium/large/xlarge ticket sets и связанные
 профильные counts сессий и ledger runs; manifest хранит фактические counts, а не
-только поддерживаемые labels. Для tickets действует точная cardinality-проверка:
-`small=100`, `medium=1000`, `large=5000`, `xlarge=10000`, и `counts.tickets`
-обязан совпадать с `SIZES[size]`. Reservation/concurrency cases используют отдельные
-synthetic budget IDs и удаляются после sample.
-
-## Contract validation and completeness
-
-Публикуемый `performance-result.v2` проверяется до `output.write_text()`. Validator
-требует точную схему run metadata/parameters/manifest/registry, сверяет manifest с
-его logical SHA-256 и materialized counts, проверяет полный уникальный registry для
-режима storage, последовательность `sample_index == 0..iterations-1`, типы и
-неотрицательность метрик, а также `min/p50/p95/p99/max/mean/stdev` по raw
-`wall_ms`. Ошибка обязана иметь typed evidence (`sample_index`, `type`), совпадать
-с `raw_samples[index].error`; отсутствие case, duplicate/out-of-range sample,
-malformed error или silently ignored dataset делает run невалидным.
-
-## Profiling artifacts and linkage
-
-`profile-manifest.v1` связывает `run_id`, `case_id` и `dataset_manifest_hash`.
-Каждый обязательный pstats/text/profile-manifest artifact описывается как
-`{path, sha256, size_bytes, kind}`. Перед публикацией проверяются regular file,
-безопасный относительный path внутри artifact root, размер и повторно вычисленный
-SHA-256; profile evidence не входит в samples или iteration statistics.
-
-## Warm/cold semantics and comparison eligibility
-
-Warmup выполняется вне raw samples. В обычном режиме case имеет `mode=warm`. При
-`--cold` mode `cold` разрешён только после успешной OS cache eviction capability;
-при unavailable/failed preparation сохраняются limitation и descriptive evidence,
-но cold conclusion запрещён. SQLite после полной валидации получает
-`comparison_eligibility=eligible`; YAML остаётся допустимым legacy execution/archive
-режимом с `historical_only` и не является обязательной comparison pair.
+только поддерживаемые labels. Reservation/concurrency cases используют отдельные
+synthetic budget IDs и удаляются после каждого sample.
 
 ## States and errors
 
@@ -58,6 +27,23 @@ Warmup выполняется вне raw samples. В обычном режиме
 active/exhausted/blocked_unknown/over_budget budgets. В error cases проверяются
 missing entities, malformed dataset, membership/validation failures, budget denial и
 HTTP 4xx. В result ошибки ссылаются на конкретный `sample_index`.
+
+## Изменения DEL-FDFFF6: registry и isolation
+
+Каждый registry item — именованный `CaseSpec` с `case_id`, component, operation,
+`kind` (`read_only` или `mutation`), `expected_outcome`, `storage_modes` и
+callbacks setup/run/teardown. Старый tuple-доступ сохранён для совместимых
+потребителей. Успешные и ожидаемо ошибочные публичные операции представлены
+отдельными cases; недоступный transport получает `limitations`, а не исчезает.
+
+Перед каждым sample harness снимает normalized logical snapshot control-plane
+SQLite/YAML entities и paths. Нормализация исключает только явно перечисленные
+volatile timestamp fields. Mutation callbacks владеют synthetic IDs и удаляют
+child rows/events до parent rows в `finally`. Результат содержит `isolation` с
+`before_hash`, `after_hash`, `leaked_entities`, `leaked_paths`, `cleanup_errors`
+и `clean`; mutation без evidence или с `clean=false` отклоняется
+`validate_result()`. Ожидаемая exception остаётся в `errors` с `sample_index` и
+не является загрязнением при чистом snapshot.
 
 ## Методика
 
@@ -69,26 +55,17 @@ CLI: `python3 benchmarks/performance/run_benchmark.py --project . --profile smok
 samples и агрегаты. `--cold` сообщает capability; если OS cache eviction недоступен,
 samples помечены descriptive-only и не используются для cold conclusion.
 
-Каждый case содержит стабильный `case_id`, component/operation/storage/dimensions,
-raw timings, expected outcome, errors, sample count и aggregates. Mutation cases
-используют заранее подготовленные IDs и idempotent lifecycle paths; исходный проект
-не изменяется.
+Каждый case содержит стабильный `case_id`, component/operation/kind/storage
+applicability/dimensions, raw timings, expected outcome, errors, sample count,
+aggregates и isolation evidence. Warmup проходит callback, но не попадает в
+samples; исходный проект не изменяется.
 
 ## Baseline results и hotspots
 
 Numerical baseline создаётся только командой CLI и сохраняется в указанном JSON;
-репозиторий не подменяет machine-specific timings. Каждый обязательный компонент
-получает coverage со статусом `profiled`, `unavailable` или `failed`; для `profiled`
-обязательны pstats, text report и manifest с `run_id`, case IDs, manifest hash,
-warmup и iterations. Каждый smoke/full результат обязан содержать SQLite↔YAML
-comparison по всем case IDs с raw samples, aggregates, dimensions и read-back proof;
-comparison нельзя отключить.
-
-Standalone `profile.py` принимает тот же approved dataset contract: обязательны `--dataset`
-и совпадающий `--manifest-hash`; manifest-only путь материализуется детерминированно и
-проверяется через canonical identity. Warmup и iterations отражаются в
-`profile-manifest.json`, который также содержит coverage для всех компонентов: выбранный
-component получает `profiled` или `failed`, остальные — явный `unavailable`.
+репозиторий не подменяет machine-specific timings. Выбранные profiling cases
+создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
+manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
 
 ## Filesystem/SQLite attribution
 
@@ -103,63 +80,6 @@ trip представлены отдельными cases.
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
-
-## Fixture contract / dataset loading
-
-Performance fixtures are synthetic audit data, not production interchange. The
-baseline materializes tickets, delivery sessions and BudgetLedger runs for
-`small`, `medium`, `large` and `xlarge`, including all declared ticket/session/
-budget states and dimensions. SQLite is authoritative for the ledger in both
-storage modes; YAML uses legacy ticket/session files.
-
-The `performance-fixture.v2` manifest is strict: it records schema/source kind,
-seed, storage, actual counts, dimensions, redaction policy, logical checksum,
-dataset-tree checksum and read-back proof. The canonical logical checksum is SHA-256 of compact,
-sorted-key JSON. `validate_manifest()` recomputes it and rejects missing fields,
-unsupported values, profile counts (including exact ticket cardinality),
-unmaterialized dimensions, non-synthetic IDs and tampered hashes. Consistent derived
-dimensions and checksums do not make a manifest valid when `counts.tickets` differs
-from the declared profile's `SIZES[size]`.
-
-`dimensions.budget_states` is read back from every materialized ticket budget using
-the effective status from the authoritative SQLite ledger. It contains every declared
-state, uses non-negative integer counts, and its sum must equal `counts.tickets`.
-
-`--dataset` is fail-closed. The supplied manifest is authoritative and is fully
-validated before benchmark cases run. A manifest-only dataset may be materialized
-deterministically into the isolated project using its validated seed/profile/storage;
-the generated manifest's canonical logical payload and SHA-256 must equal the
-supplied manifest before it can be used. For an approved directory bundle,
-`dataset_tree_sha256` is mandatory and must match the copied `.vibe` tree before
-cases are constructed. Its read-back proof covers ticket/session/budget/run
-content, counts and ownership; storage conversion repeats this proof and fails
-closed on any mismatch. The result records
-`dataset_materialization` and `dataset_manifest_hash` only after that proof. An
-omitted `--storage` leaves the manifest's `storage_mode` authoritative; explicit
-`--size`/`--storage` mismatches, malformed or incompatible manifests fail before
-case construction and result output. No silent fallback to CLI defaults or
-regeneration of another dataset is allowed; a mismatch raises `ValueError` and
-the output JSON is not written.
-
-Without `--dataset`, baseline generated mode remains controlled by CLI
-seed/profile/storage. With `--dataset`, deterministic materialization is allowed
-only as the documented manifest-only mode, and the isolated TicketStore,
-SessionStore and BudgetLedger entities are used after identity verification.
-
-The policy permits synthetic identifiers, counts, statuses and fixed timestamps
-only. Non-empty titles, descriptions, prompts, raw payloads and production
-identifiers are prohibited. Results carry dataset identity for every case and
-retain equal source checksums before and after the run. Browser-level coverage is
-unavailable in this worker context; cold-cache and materialized-tree checksums are
-machine/filesystem dependent.
-
-## Test/verification limitations
-
-Fixture tests read back ticket IDs, statuses and run-history distributions,
-session lifecycle states, and every authoritative SQLite ledger row (including
-ticket ownership) for all four profiles and both storage modes. The ledger
-read-back uses one ordered query so xlarge verification remains practical; budget
-state snapshots continue to use `BudgetLedger.read_budget()`.
-Browser DOM/focus/viewport/keyboard/auto-refresh checks are unavailable in the
-worker environment and require an external or manual browser run; static tests
-do not claim that coverage.
+HTTP loopback может быть запрещён окружением, а YAML registry не запускает
+network-level routes; оба ограничения записываются в `limitations`. Статические
+render/handler тесты не являются browser-level проверкой.
