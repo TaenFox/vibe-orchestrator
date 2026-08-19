@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import pytest
 
-from benchmarks.performance.run_benchmark import CaseSpec, _cold_capability, _cases, percentile, statistics_for, validate_result
+from benchmarks.performance.run_benchmark import CaseSpec, _cold_capability, _cases, _run_case, percentile, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
@@ -107,6 +107,7 @@ def test_case_registry_has_stable_kinds_and_required_matrix(tmp_path):
     }
     assert required <= set(ids)
     assert all("sqlite" in case.storage_modes for case in cases)
+    assert next(case for case in cases if case.case_id == "budgetledger.reconcile").kind == "mutation"
 
 
 def test_result_validation_requires_clean_isolation_for_mutation():
@@ -124,6 +125,56 @@ def test_result_validation_requires_clean_isolation_for_mutation():
 def test_case_spec_teardown_is_a_first_class_callback():
     spec = CaseSpec("x", "X", "operation", lambda: None, kind="mutation", teardown=lambda: None)
     assert spec[0] == "x" and spec[3] is spec.run
+
+
+def test_run_case_callback_exception_still_cleans_mutation(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    synthetic = root / "benchmark-exception.yaml"
+    teardown_calls = []
+
+    def run():
+        synthetic.write_text("state: leaked\n", encoding="utf-8")
+        raise RuntimeError("callback failed")
+
+    def teardown():
+        teardown_calls.append(True)
+        synthetic.unlink(missing_ok=True)
+
+    spec = CaseSpec("test.mutation_exception", "test", "mutation", run,
+                    kind="mutation", teardown=teardown)
+    result = _run_case(spec, tmp_path, warmup=0, iterations=1, noisy=False,
+                       storage_mode="sqlite", manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+
+    assert teardown_calls == [True]
+    assert result["errors"] == [{"sample_index": 0, "type": "RuntimeError"}]
+    assert result["isolation"]["before_hash"] == result["isolation"]["after_hash"]
+    assert result["isolation"]["leaked_entities"] == []
+    assert result["isolation"]["leaked_paths"] == []
+    assert result["isolation"]["cleanup_errors"] == []
+    assert result["isolation"]["clean"] is True
+
+
+def test_run_case_reports_only_real_teardown_failure(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    synthetic = root / "benchmark-cleanup-failure.yaml"
+
+    def run():
+        synthetic.write_text("state: leaked\n", encoding="utf-8")
+        raise RuntimeError("callback failed")
+
+    def teardown():
+        raise OSError("cleanup failed")
+
+    spec = CaseSpec("test.mutation_cleanup_failure", "test", "mutation", run,
+                    kind="mutation", teardown=teardown)
+    result = _run_case(spec, tmp_path, warmup=0, iterations=1, noisy=False,
+                       storage_mode="sqlite", manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+
+    assert result["errors"] == [{"sample_index": 0, "type": "RuntimeError"}]
+    assert result["isolation"]["cleanup_errors"] == [{"sample_index": 0, "type": "OSError"}]
+    assert result["isolation"]["clean"] is False
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):

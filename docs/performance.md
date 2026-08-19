@@ -31,9 +31,11 @@ HTTP 4xx. В result ошибки ссылаются на конкретный `s
 ## Изменения DEL-FDFFF6: registry и isolation
 
 Каждый registry item — именованный `CaseSpec` с `case_id`, component, operation,
-`kind` (`read_only` или `mutation`), `expected_outcome`, `storage_modes` и
-callbacks setup/run/teardown. Старый tuple-доступ сохранён для совместимых
-потребителей. Успешные и ожидаемо ошибочные публичные операции представлены
+явно объявленным `kind` (`read_only` или `mutation`), `expected_outcome`,
+`storage_modes` и callbacks setup/run/teardown. Классификация не выводится из
+подстрок `case_id`; `budgetledger.reconcile` явно относится к `mutation`,
+поскольку обновляет reconciliation state. Старый tuple-доступ сохранён для
+совместимых потребителей. Успешные и ожидаемо ошибочные публичные операции представлены
 отдельными cases; недоступный transport получает `limitations`, а не исчезает.
 
 Перед каждым sample harness снимает normalized logical snapshot control-plane
@@ -42,8 +44,10 @@ volatile timestamp fields. Mutation callbacks владеют synthetic IDs и у
 child rows/events до parent rows в `finally`. Результат содержит `isolation` с
 `before_hash`, `after_hash`, `leaked_entities`, `leaked_paths`, `cleanup_errors`
 и `clean`; mutation без evidence или с `clean=false` отклоняется
-`validate_result()`. Ожидаемая exception остаётся в `errors` с `sample_index` и
-не является загрязнением при чистом snapshot.
+`validate_result()`. Ожидаемая exception остаётся в `errors` с `sample_index`, а
+teardown выполняется в `finally` даже при ошибке callback. `cleanup_errors`
+заполняется только при фактической ошибке teardown: при успешной очистке
+snapshot/hash восстанавливается, утечки отсутствуют и mutation остаётся `clean=true`.
 
 ## Методика
 
