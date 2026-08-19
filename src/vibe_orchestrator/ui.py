@@ -115,8 +115,8 @@ AUTO_REFRESH_SCRIPT = f"""<script>
 </script>"""
 
 
-def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project); agent_tools = AgentTicketTools(project, actor="http-agent")
+def _build_server(project: Path, host: str, port: int, *, use_database: bool = True) -> ThreadingHTTPServer:
+    store = TicketStore(project, use_database=use_database); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project, use_database=use_database); ledger = BudgetLedger(project); agent_tools = AgentTicketTools(project, actor="http-agent", use_database=use_database)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -320,8 +320,8 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> tuple[ThreadingHTTPServer, Thread]:
-    server = _build_server(project, host, port)
+def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, *, use_database: bool = True) -> tuple[ThreadingHTTPServer, Thread]:
+    server = _build_server(project, host, port, use_database=use_database)
     url = f"http://{host}:{port}"
     print(f"Интерфейс: {url}")
     if open_browser: webbrowser.open(url)
@@ -330,8 +330,8 @@ def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_
     return server, thread
 
 
-def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
-    server = _build_server(project, host, port)
+def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, *, use_database: bool = True) -> None:
+    server = _build_server(project, host, port, use_database=use_database)
     url = f"http://{host}:{port}"
     print(f"Интерфейс: {url}")
     if open_browser: webbrowser.open(url)

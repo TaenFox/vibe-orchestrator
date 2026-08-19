@@ -7,7 +7,7 @@ import json
 import pytest
 
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
-from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
+from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, materialize_dataset, validate_manifest
 
 
 def test_percentile_is_deterministic_and_interpolated():
@@ -55,6 +55,30 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
         load_dataset(path)
 
 
+def test_dataset_bundle_can_convert_storage_without_changing_entities(tmp_path):
+    source = tmp_path / "approved"
+    manifest = generate_fixture(source, seed=22, size="small", storage_mode="sqlite")
+    target = tmp_path / "alternate"
+    target.mkdir()
+    converted = materialize_dataset(target, source, manifest, storage_mode="yaml")
+    assert converted["storage_mode"] == "yaml"
+    assert converted["hashes"]["manifest_sha256"] != manifest["hashes"]["manifest_sha256"]
+    assert len(list((target / ".vibe" / "tickets" / "delivery").glob("*.yaml"))) == manifest["counts"]["tickets"]
+    assert len(list((target / ".vibe" / "sessions").glob("*.yaml"))) == manifest["counts"]["sessions"]
+
+
+def test_dataset_bundle_materializes_existing_vibe_tree(tmp_path):
+    source = tmp_path / "approved"
+    manifest = generate_fixture(source, seed=21, size="small", storage_mode="yaml")
+    (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    target = tmp_path / "isolated"
+    target.mkdir()
+    materialized = materialize_dataset(target, source / "manifest.json", load_dataset(source / "manifest.json"))
+    assert materialized["source_kind"] == "approved_dataset"
+    assert (target / ".vibe" / "tickets").exists()
+    assert len(list((target / ".vibe" / "tickets").rglob("*.yaml"))) == manifest["counts"]["tickets"]
+
+
 def test_result_validation_rejects_mutated_source_and_sample_mismatch():
     manifest = {"hashes": {"manifest_sha256": "m"}}
     result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": manifest,
@@ -95,9 +119,28 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
         "budgetledger.concurrency.denied_overallocation",
         "budgetledger.concurrency.lock_wait",
         "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
+        "orchestrator.scan_sort_cycle", "ui.filter.flat", "ui.filter.search", "ui.filter.status", "ui.filter.active",
+        "sessionstore.get_missing.error", "sessionstore.load_invalid_persisted.error",
+        "sessionstore.validation.multiple_open_overlap.error", "http.api_agent_tickets", "http.api_agent_sessions",
     }
     assert required <= ids
     assert {item[3] for item in cases}
+
+
+def test_yaml_case_registry_exercises_http_server_with_yaml_stores(tmp_path):
+    generate_fixture(tmp_path, seed=7, size="small", storage_mode="yaml")
+    cases = _cases(tmp_path, storage="yaml")
+    http_cases = [item for item in cases if item[1] == "HTTP"]
+
+    assert http_cases
+    api_tickets = next(item for item in http_cases if item[0] == "http.api_tickets")
+    limitations = getattr(api_tickets[3], "_limitations", [])
+    if limitations:
+        assert limitations[0].startswith("HTTP loopback server unavailable:")
+        assert getattr(api_tickets[3], "_profile_available") is False
+    else:
+        assert api_tickets[3]()
+        assert getattr(api_tickets[3], "_profile_available") is True
 
 
 def test_lock_wait_is_measured_separately_from_transaction_time(tmp_path):

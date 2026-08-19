@@ -3,9 +3,11 @@
 ## Назначение и область аудита
 
 Аудит измеряет production control plane без изменения его семантики: TicketStore и
-SessionStore, scheduler, BudgetLedger, UI rendering и HTTP endpoints. Фикстуры
-синтетические и анонимные; benchmark запускается на изолированной копии проекта,
-а `source_checksum_before/after` проверяет отсутствие записи в исходное дерево.
+SessionStore, scheduler, BudgetLedger, UI rendering и HTTP endpoints. Benchmark
+принимает synthetic fixture либо approved redacted dataset bundle (manifest JSON
+рядом с материализованным `.vibe`); bundle копируется в изолированную копию и не
+регенерируется. `source_checksum_before/after` проверяет отсутствие записи в
+исходное дерево.
 
 ## Functional baseline: UI/API, scheduler, persistence, budget lifecycle
 
@@ -45,9 +47,10 @@ raw timings, expected outcome, errors, sample count и aggregates. Mutation case
 ## Baseline results и hotspots
 
 Numerical baseline создаётся только командой CLI и сохраняется в указанном JSON;
-репозиторий не подменяет machine-specific timings. Выбранные profiling cases
-создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
-manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
+репозиторий не подменяет machine-specific timings. Top-сценарий каждого компонента
+создаёт pstats, text report и единый profile manifest, связанные по `run_id`, case IDs
+и manifest hash. Hotspot считается подтверждённым только при наличии такого artifact;
+`--compare-storage` сохраняет измеренные aggregates для SQLite и legacy YAML.
 
 ## Filesystem/SQLite attribution
 

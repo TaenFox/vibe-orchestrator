@@ -4,8 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import shutil
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from vibe_orchestrator.budget_ledger import BudgetLedger
 from vibe_orchestrator.sessions import DeliverySession, SessionStore
@@ -29,7 +32,7 @@ BUDGET_STATES = ("active", "exhausted", "blocked_unknown", "over_budget")
 RUNS_PER_TICKET = (0, 1, 10)
 SESSION_COUNTS = (1, 10, 100)
 LEDGER_RUN_COUNTS = (100, 1000, 10000)
-REDACTION_POLICY = "synthetic identifiers and counts only; no non-empty titles, descriptions, prompts or raw payloads"
+REDACTION_POLICY = "synthetic identifiers and redacted placeholder text only; no production titles, prompts or raw payloads"
 
 
 def _logical_hash(value: Any) -> str:
@@ -39,7 +42,8 @@ def _logical_hash(value: Any) -> str:
 def _hash_tree(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        if ".git" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
+        if ".git" in path.parts or path.name in {"control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm",
+                                                   "ledger.sqlite3", "ledger.sqlite3-wal", "ledger.sqlite3-shm"}:
             continue
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
@@ -84,12 +88,17 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
         statuses[status] += 1
         run_count = RUNS_PER_TICKET[rng.randrange(len(RUNS_PER_TICKET))]
         run_counts[str(run_count)] += 1
+        rich_payload = source_index != 0 and source_index % 25 == 0
         store.save(Ticket(
-            id=ticket_id, process="delivery", type="story", title="", description="", status=status,
+            id=ticket_id, process="delivery", type="story", title="", status=status,
             priority=1 + rng.randrange(100),
             parent=ticket_ids[position - 1] if position and rng.random() < .06 else None,
             blocked_by=[ticket_ids[position - 2]] if position > 1 and rng.random() < .04 else [],
-            run_history=[{"outcome": "completed", "attempt": n} for n in range(run_count)],
+            description=("[redacted synthetic description] " * 96).strip() if rich_payload else "",
+            context={"redacted_context": [f"field-{n}" for n in range(32)]} if rich_payload else {},
+            run_history=[{"outcome": "completed", "attempt": n,
+                          "summary": "[redacted synthetic run summary]" if rich_payload else ""}
+                         for n in range(run_count)],
             created_at="2024-01-01T00:00:00+00:00", updated_at="2024-01-01T00:00:00+00:00"))
 
     sessions = SessionStore(project, store, use_database=use_database)
@@ -217,6 +226,99 @@ def load_dataset(path: Path) -> dict[str, Any]:
         raise ValueError("unsupported dataset manifest schema")
     validate_manifest(data)
     return data
+
+
+def _logical_manifest_hash(logical: dict[str, Any]) -> str:
+    return _logical_hash(logical)
+
+
+def _storage_snapshot(project: Path, storage_mode: str) -> dict[str, Any]:
+    store = TicketStore(project, use_database=storage_mode == "sqlite")
+    sessions = SessionStore(project, store, use_database=storage_mode == "sqlite")
+    return {
+        "tickets": {ticket.id: ticket.to_dict() for ticket in store.list()},
+        "sessions": {session.id: session.to_dict() for session in sessions.list()},
+    }
+
+
+def _convert_storage(project: Path, source_storage: str, target_storage: str) -> dict[str, Any]:
+    """Convert control-plane materialization without regenerating the dataset."""
+    if source_storage == target_storage:
+        return {"equivalent": True, "source_counts": {"tickets": 0, "sessions": 0},
+                "target_counts": {"tickets": 0, "sessions": 0}}
+    snapshot = _storage_snapshot(project, source_storage)
+    vibe = Path(project) / ".vibe"
+    database = vibe / "control.sqlite3"
+    for sidecar in (database, database.with_name(database.name + "-wal"), database.with_name(database.name + "-shm")):
+        sidecar.unlink(missing_ok=True)
+    if target_storage == "yaml":
+        shutil.rmtree(vibe / "tickets", ignore_errors=True)
+        shutil.rmtree(vibe / "sessions", ignore_errors=True)
+        tickets = TicketStore(project, use_database=False)
+        tickets.init()
+        for payload in snapshot["tickets"].values():
+            ticket = Ticket.from_dict(payload)
+            tickets.ticket_path(ticket).parent.mkdir(parents=True, exist_ok=True)
+            tickets.ticket_path(ticket).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        sessions = SessionStore(project, tickets, use_database=False)
+        sessions.init()
+        for payload in snapshot["sessions"].values():
+            session = DeliverySession.from_dict(payload)
+            sessions.session_path(session).parent.mkdir(parents=True, exist_ok=True)
+            sessions.session_path(session).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    else:
+        from vibe_orchestrator.control_db_migration import migrate_control_plane
+        migrate_control_plane(project, database)
+    converted = _storage_snapshot(project, target_storage)
+    equivalent = snapshot == converted
+    if not equivalent:
+        raise ValueError("alternate storage conversion changed dataset contents")
+    return {"equivalent": True,
+            "source_counts": {key: len(value) for key, value in snapshot.items()},
+            "target_counts": {key: len(value) for key, value in converted.items()}}
+
+
+def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, Any], *,
+                        storage_mode: str | None = None) -> dict[str, Any]:
+    """Copy an approved dataset bundle into the isolated benchmark project.
+
+    A dataset is a directory (or a manifest JSON next to one) containing the
+    materialized ``.vibe`` tree.  The manifest describes that tree; it is not a
+    recipe for generating a replacement fixture.
+    """
+    source = Path(dataset_path).resolve()
+    root = source if source.is_dir() else source.parent
+    source_vibe = root / ".vibe"
+    if not source_vibe.is_dir():
+        raise ValueError("dataset must contain a materialized .vibe directory")
+    target_vibe = Path(project) / ".vibe"
+    if target_vibe.exists():
+        shutil.rmtree(target_vibe)
+    shutil.copytree(source_vibe, target_vibe)
+    materialized = dict(manifest)
+    materialized["source_kind"] = "approved_dataset"
+    materialized["dataset_root"] = str(root)
+    materialized["materialized_tree_sha256"] = _hash_tree(target_vibe)
+    # ``materialized_tree_sha256`` in legacy manifests covers the whole bundle
+    # and may include the manifest file itself.  A bundle may opt into the
+    # unambiguous `.vibe`-only checksum through `dataset_tree_sha256`.
+    expected = manifest.get("dataset_tree_sha256")
+    if expected and expected != materialized["materialized_tree_sha256"]:
+        raise ValueError("dataset materialized tree checksum does not match manifest")
+    materialized["dataset_tree_sha256"] = materialized["materialized_tree_sha256"]
+    if storage_mode is not None and storage_mode != manifest["storage_mode"]:
+        _convert_storage(project, manifest["storage_mode"], storage_mode)
+        materialized["storage_mode"] = storage_mode
+        logical = dict(materialized["logical"])
+        logical["storage_mode"] = storage_mode
+        materialized["logical"] = logical
+        materialized["hashes"] = {"manifest_sha256": _logical_manifest_hash(logical)}
+        materialized["logical_checksum"] = materialized["hashes"]["manifest_sha256"]
+        materialized["fixture_files_sha256"] = materialized["hashes"]["manifest_sha256"]
+        materialized["materialized_tree_sha256"] = _hash_tree(target_vibe)
+        materialized["dataset_tree_sha256"] = materialized["materialized_tree_sha256"]
+        validate_manifest(materialized)
+    return materialized
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
