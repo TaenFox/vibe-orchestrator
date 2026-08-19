@@ -206,3 +206,20 @@ def test_completed_rework_is_integrated_before_parent_is_unblocked(tmp_path: Pat
     assert orchestrator.store.get(parent.id).blocked_by == []
     assert (parent_workspace / "app.txt").read_text(encoding="utf-8") == "reworked\n"
     assert not child_workspace.exists()
+
+
+def test_deactivated_delivery_child_is_integrated_before_marking_done(tmp_path: Path):
+    project = git_project(tmp_path)
+    orchestrator = Orchestrator(project, max_agents=0)
+    parent = orchestrator.store.create("delivery", "task", "Parent", status="review")
+    parent_workspace = orchestrator.tree_manager.workspace_for(parent)
+    child = orchestrator.store.create("delivery", "task", "Obsolete child", parent=parent.id, status="development")
+    workspace = orchestrator.tree_manager.workspace_for(child)
+    (workspace / "app.txt").write_text("preserved\n", encoding="utf-8")
+
+    orchestrator._deactivate_delivery_child(child)
+
+    assert orchestrator.store.get(child.id).status == "done"
+    assert orchestrator.store.get(child.id).parent is None
+    assert (parent_workspace / "app.txt").read_text(encoding="utf-8") == "preserved\n"
+    assert not workspace.exists()
