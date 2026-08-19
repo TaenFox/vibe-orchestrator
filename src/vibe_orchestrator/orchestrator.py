@@ -385,8 +385,10 @@ class Orchestrator:
             ticket.context_revision += 1
         target_status = (stage.outcomes or {})[result.outcome]
         if ticket.type == "rework" and workflow.id == "delivery" and result.outcome == "needs_rework":
-            # Rework must restart from session selection so it can pass analysis and development again.
+            # A rework is already the corrective pass. A second rejection must
+            # stop automatic execution instead of restarting the same loop.
             target_status = "selected_for_session"
+            ticket.blocked_reason = "rework_cycle_stopped"
         if ticket.type == "correction" and workflow.id == "discovery" and result.outcome == "completed":
             target_status = "done"
         if ticket.type == "rework" and workflow.id == "delivery" and stage.id == ticket.rework_stage and result.outcome == "completed":
