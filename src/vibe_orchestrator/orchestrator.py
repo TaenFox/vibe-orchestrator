@@ -704,9 +704,32 @@ class Orchestrator:
             self.store.save(parent)
 
     def _reconcile_tickets(self) -> None:
+        self._reconcile_rework_sessions()
         self._reconcile_blockers()
         self._reconcile_discovery_implementation()
         self._reconcile_releases()
+
+    def _reconcile_rework_sessions(self) -> None:
+        """Repair session membership missed by an older or interrupted process."""
+        for session in self.session_store.list():
+            if session.status != "active":
+                continue
+            members = self.session_store.effective_ticket_ids(session)
+            for parent_id in list(members):
+                try:
+                    parent = self.store.get(parent_id)
+                except KeyError:
+                    continue
+                if parent.process != "delivery":
+                    continue
+                for rework in self.store.children_of(parent.id, process="delivery"):
+                    if rework.type != "rework" or self.store.is_done(rework):
+                        continue
+                    if rework.id not in self.session_store.effective_ticket_ids(session):
+                        try:
+                            self.session_store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            log.error("не удалось восстановить membership %s для %s: %s", rework.id, session.id, exc)
 
     def _reconcile_releases(self) -> None:
         if not self.tree_manager.enabled():
