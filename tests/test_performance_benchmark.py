@@ -87,6 +87,24 @@ def test_dataset_bundle_materializes_existing_vibe_tree(tmp_path):
     assert len(list((target / ".vibe" / "tickets").rglob("*.yaml"))) == manifest["counts"]["tickets"]
 
 
+def test_approved_bundle_requires_tree_checksum_before_materialization(tmp_path):
+    source = tmp_path / "approved"
+    manifest = generate_fixture(source, seed=210)
+    incomplete = json.loads(json.dumps(manifest))
+    incomplete.pop("dataset_tree_sha256")
+    with pytest.raises(ValueError, match="dataset_tree_sha256"):
+        materialize_dataset(tmp_path / "target", source, incomplete)
+
+
+def test_approved_bundle_rejects_tampered_content_before_cases(tmp_path):
+    source = tmp_path / "approved"
+    manifest = generate_fixture(source, seed=211, storage_mode="yaml")
+    ticket = next((source / ".vibe" / "tickets").rglob("*.yaml"))
+    ticket.write_text(ticket.read_text(encoding="utf-8") + "\n# tampered\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum"):
+        materialize_dataset(tmp_path / "target", source, manifest)
+
+
 def test_manifest_rejects_internally_consistent_wrong_profile_ticket_count(tmp_path):
     manifest = generate_fixture(tmp_path / "fixture", seed=23, size="small")
     altered = json.loads(json.dumps(manifest))

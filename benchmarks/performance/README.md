@@ -25,9 +25,11 @@ Concurrency registry включает отдельные idempotent и denied-ov
 результат фиксирует non-negative counters и terminal states. `sqlite_transaction_ms`
 отделён от `sqlite_lock_ms` (lock wait; при отсутствии наблюдаемого wait значение
 остаётся нулевым, а не подменяется длительностью transaction).
-Profiling создаёт pstats/text для top-сценария каждого компонента и связывает их с
-`run_id`, case IDs и manifest hash. `--compare-storage` дополнительно измеряет тот же
-workload в alternate storage и сохраняет aggregate comparison. Смотрите
+Profiling обязательно создаёт coverage record для каждого компонента: `profiled`,
+`unavailable` или `failed`; для `profiled` сохраняются pstats/text и manifest с
+`run_id`, case IDs, warmup/iterations и manifest hash. Каждый smoke/full запуск
+обязательно измеряет тот же workload в alternate storage и сохраняет raw samples,
+aggregates и полный read-back proof; отдельного opt-in флага нет. Смотрите
 [каноническую методику](../../docs/performance.md).
 
 Для `--storage yaml` tickets и sessions materialize legacy YAML documents через
