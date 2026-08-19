@@ -265,7 +265,7 @@ def _prepare_cold(capability: dict[str, Any]) -> None:
         capability.update(available=False, limitation="cache eviction failed during sampling")
 
 
-def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, str, Callable[[], Any]]]:
+def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
     use_database = storage == "sqlite"
     sqlite_metrics = SQLiteMetrics()
     store, sessions, workflow, ledger = TicketStore(project, use_database=use_database), None, load_workflow("delivery"), InstrumentedLedger(project, sqlite_metrics)
@@ -458,6 +458,40 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     # Keep endpoint/transport cases in the registry even when binding a local
     # server is forbidden. Their samples then carry the limitation and error
     # accounting instead of silently shrinking the claimed case matrix.
+    # Classification is a registry declaration, not an inference from case_id.
+    # reconcile mutates ledger state even though its name has no mutation verb.
+    mutation_case_ids = {
+        "ticketstore.save", "ticketstore.create", "ticketstore.record_run_event",
+        "sessionstore.create", "sessionstore.activate", "sessionstore.complete", "sessionstore.cancel",
+        "sessionstore.add_membership", "sessionstore.remove_membership", "sessionstore.inherit_ticket",
+        "sessionstore.override_ticket", "sessionstore.agent_add_ticket", "sessionstore.agent_remove_ticket",
+        "sessionstore.agent_update_membership", "budgetledger.reconcile", "budgetledger.reserve.idempotent",
+        "budgetledger.start", "budgetledger.finalize", "budgetledger.release", "budgetledger.reserve",
+        "budgetledger.create_budget", "budgetledger.set_status", "budgetledger.increase_limit",
+        "budgetledger.allow_overrun", "budgetledger.resolve_unknown", "budgetledger.adjustment",
+        "ui.POST_create", "ui.POST_move", "ui.POST_retry", "ui.POST_release_retry",
+        "ui.POST_session_add_remove_activate_complete_cancel", "ui.POST_workers", "ui.PATCH_agent_ticket",
+        "ui.PATCH_agent_session",
+    }
+    read_only_case_ids = {
+        "ticketstore.list.delivery", "ticketstore.list.all", "ticketstore.get.hit", "ticketstore.get.miss",
+        "ticketstore.load_path", "ticketstore.children_of", "ticketstore.is_done", "ticketstore.run_path",
+        "sessionstore.list", "sessionstore.get", "sessionstore.load_path", "sessionstore.membership_validation.error",
+        "sessionstore.validation.overlap.error", "sessionstore.effective_ticket_ids", "sessionstore.participants",
+        "budgetledger.read_budget", "budgetledger.get_budget", "budgetledger.get_run", "budgetledger.list_runs",
+        "budgetledger.get_missing", "budgetledger.list_decisions", "budgetledger.list_reconciliation_facts",
+        "budgetledger.concurrency.atomic_reserve",
+        "scheduler.select_candidates", "scheduler.wip_count", "ui.render_board.compact", "ui.render_fragment",
+        "http.handler.fragment", "http.handler.api_tickets", "http.fragment", "http.api_tickets",
+        "http.api_sessions", "http.api_session", "http.error.missing_session", "http.error.unknown_endpoint",
+        "http.transport.error", "ui.render_board", "ui.render_board_fragment", "ui.GET_board",
+        "ui.GET_fragment", "ui.GET_drawer", "ui.GET_api_tickets", "ui.GET_api_sessions", "ui.GET_api_session",
+        "ui.expected_4xx",
+    }
+    case_kinds = {case_id: "mutation" for case_id in mutation_case_ids}
+    case_kinds.update({case_id: "read_only" for case_id in read_only_case_ids})
+    if len(case_kinds) != len(cases) or {case[0] for case in cases} != set(case_kinds):
+        raise AssertionError("benchmark registry kind declaration is incomplete or duplicated")
     specs = []
     for case_id, component, operation, fn in cases:
         # BudgetLedger owns the instrumented connection. Ticket/session stores
@@ -467,10 +501,9 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         setattr(fn, "_sqlite_plans", _explain_plans(ledger) if component == "BudgetLedger" else [])
         if http_limitation and component in {"HTTP", "UI"}:
             setattr(fn, "_limitations", list(getattr(fn, "_limitations", [])) + [http_limitation])
-        mutation = any(token in case_id for token in (".create", ".save", ".record", ".add", ".remove", ".activate", ".complete", ".cancel", ".inherit", ".override", ".agent_", ".reserve", ".start", ".finalize", ".release", ".set_status", ".increase", ".allow", ".resolve", ".adjustment", "POST_", "PATCH_"))
         expected = "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id or "expected_4xx" in case_id or "transport" in case_id else "success"
         modes = ("sqlite",) if component in {"HTTP", "UI"} and not case_id.startswith("http.handler") else ("sqlite", "yaml")
-        specs.append(CaseSpec(case_id, component, operation, fn, "mutation" if mutation else "read_only", storage_modes=modes, expected_outcome=expected,
+        specs.append(CaseSpec(case_id, component, operation, fn, case_kinds[case_id], storage_modes=modes, expected_outcome=expected,
                               limitations=list(getattr(fn, "_limitations", []))))
     cleanup = (lambda: (server.shutdown(), server.server_close())) if server is not None else None
     return CaseRegistry(iter(specs), cleanup)
