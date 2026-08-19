@@ -76,3 +76,26 @@ def test_cold_capability_is_explicit():
     assert set(capability) == {"available", "strategy", "limitation"}
     if not capability["available"]:
         assert capability["limitation"]
+
+
+def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = _cases(tmp_path, storage="sqlite")
+    ids = {item[0] for item in cases}
+    required = {
+        "ticketstore.load_path", "ticketstore.children_of",
+        "sessionstore.create", "sessionstore.activate", "sessionstore.complete", "sessionstore.cancel",
+        "budgetledger.reserve.idempotent", "budgetledger.start", "budgetledger.finalize",
+        "budgetledger.release", "budgetledger.reconcile", "budgetledger.concurrency.atomic_reserve",
+        "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
+    }
+    assert required <= ids
+    assert {item[3] for item in cases}
+
+
+def test_fixture_profile_counts_are_materialized(tmp_path):
+    manifest = generate_fixture(tmp_path, seed=5, size="small", storage_mode="sqlite")
+    assert manifest["counts"]["tickets"] == 100
+    assert manifest["counts"]["sessions"] == manifest["dimensions"]["profile_counts"]["sessions"]
+    assert manifest["counts"]["ledger_runs"] == manifest["dimensions"]["profile_counts"]["ledger_runs"]
+    validate_manifest(manifest)

@@ -19,3 +19,5 @@ YAML tickets/sessions and records their tree checksum. одинаковые seed
 дают одинаковый logical manifest/checksum, разные seed меняют generated order and
 records. `--dataset` принимает только `performance-fixture.v2` manifest с полной
 schema validation и возвращает typed `ValueError` для malformed/unsupported input.
+Профильный `counts` в manifest равен реально записанным ticket/session/ledger
+records; поддерживаемые dimensions вынесены отдельно и не выдаются за samples.

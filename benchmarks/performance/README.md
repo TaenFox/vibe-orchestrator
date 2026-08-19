@@ -22,3 +22,8 @@ profile links. `sample_count == len(raw_samples)`, warmup samples отсутст
 SQLite cases сохраняют query/transaction/error counters, lock timing и explain plans.
 Профилирование выбранного scheduler case связывает pstats/text/profile manifest с
 `run_id`, `case_id` и manifest hash. Смотрите [каноническую методику](../../docs/performance.md).
+
+Для `--storage yaml` tickets и sessions materialize legacy YAML documents через
+`use_database=False`; BudgetLedger остаётся SQLite authoritative backend и явно
+помечается в manifest. Если loopback bind запрещён окружением, HTTP cases всё равно
+остаются в registry и получают limitation/error вместо исчезновения из результата.

@@ -15,6 +15,10 @@ reconcile и error paths BudgetLedger; scheduler selection; UI board/fragment и
 HTTP success/error endpoints. SQLite является runtime control plane. Режим `yaml`
 использует `use_database=False` для tickets/sessions и сохраняет legacy YAML files;
 ledger остаётся SQLite, поскольку это его authoritative persistence.
+Варианты профиля материализуют small/medium/large/xlarge ticket sets и связанные
+профильные counts сессий и ledger runs; manifest хранит фактические counts, а не
+только поддерживаемые labels. Reservation/concurrency cases используют отдельные
+synthetic budget IDs и удаляются после sample.
 
 ## States and errors
 

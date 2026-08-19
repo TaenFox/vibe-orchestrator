@@ -13,6 +13,12 @@ from vibe_orchestrator.tickets import Ticket, TicketStore
 
 SCHEMA_VERSION = "performance-fixture.v2"
 SIZES = {"small": 100, "medium": 1000, "large": 5000, "xlarge": 10000}
+PROFILE_DIMENSIONS = {
+    "small": {"sessions": 4, "ledger_runs": 100},
+    "medium": {"sessions": 10, "ledger_runs": 1000},
+    "large": {"sessions": 100, "ledger_runs": 10000},
+    "xlarge": {"sessions": 100, "ledger_runs": 10000},
+}
 # Valid delivery workflow stage IDs.  The fixture must not invent a ``blocked``
 # stage because TicketStore/SessionStore validate status against the workflow.
 STATUSES = ("todo", "selected_for_session", "system_analysis", "ready_for_development",
@@ -88,7 +94,7 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
 
     sessions = SessionStore(project, store, use_database=use_database)
     sessions.init()
-    session_count = min(SESSION_COUNTS[-1], max(4, count // 10))
+    session_count = PROFILE_DIMENSIONS[size]["sessions"]
     # Open sessions cannot contain workflow terminal tickets.
     session_ticket_ids = [ticket_id for ticket_id in ticket_ids
                           if statuses and store.get(ticket_id).status not in {"release", "done"}]
@@ -112,7 +118,7 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 sessions.cancel(sessions.get(session.id))
 
     ledger = BudgetLedger(project)
-    ledger_count = min(LEDGER_RUN_COUNTS[-1], max(LEDGER_RUN_COUNTS[0], count))
+    ledger_count = PROFILE_DIMENSIONS[size]["ledger_runs"]
     # Four explicit budgets make the state dimension material, even for smoke fixtures.
     budget_counts = {state: 0 for state in BUDGET_STATES}
     for state_index, state in enumerate(BUDGET_STATES):
@@ -134,6 +140,9 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 ledger.finalize(run_id, "unknown", {"tokens": None, "points": None, "runs": 1})
             except Exception:
                 pass
+        elif state == "active":
+            run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
+            ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
         elif state == "exhausted":
             try:
                 run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
@@ -149,17 +158,14 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
                 ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"source": "runner_fallback", "run_id": run_id,
-                    "model": "synthetic", "reasoning_effort": "none", "usage_ref": run_id,
-                    "captured_at": "2024-01-01T00:00:00+00:00", "input_tokens": 1,
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "input_tokens": 1,
                     "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 2,
-                    "normalization_version": "synthetic.v1", "degraded_confidence": True,
-                    "fallback_policy_version": "synthetic.v1", "runs": 1})
+                    "normalization_version": "synthetic.v1", "runs": 1})
             except Exception:
                 pass
         assert ledger.get_budget(budget_id) is not None
-    for index in range(ledger_count):
-        owner = ticket_ids[index % count]
+    for index in range(max(0, ledger_count - 4)):
+        owner = ticket_ids[4 + (index % max(1, count - 4))]
         budget_id = f"ticket:{owner}"
         if ledger.get_budget(budget_id) is None:
             ledger.create_budget("ticket", owner, limits={"tokens": 100000, "points": 1000, "runs": 100})
@@ -174,16 +180,18 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
         except Exception:
             pass
 
-    logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, ledger_count, budget_counts, run_counts)
+    actual_ledger_count = sum(len(ledger.list_runs(f"ticket:{ticket_id}")) for ticket_id in ticket_ids)
+    logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, actual_ledger_count, budget_counts, run_counts)
     materialized_checksum = _hash_tree(project)
     manifest = {
         "schema_version": SCHEMA_VERSION, "source_kind": "synthetic", "seed": seed,
         "storage_mode": storage_mode, "hashes": {"manifest_sha256": logical["sha256"]},
-        "counts": {"tickets": count, "sessions": session_count, "ledger_runs": ledger_count},
+        "counts": {"tickets": count, "sessions": session_count, "ledger_runs": actual_ledger_count},
         "dimensions": {"size": size, "sizes": SIZES, "ticket_status": statuses,
                        "runs_per_ticket": list(RUNS_PER_TICKET), "runs_per_ticket_counts": run_counts,
                        "session_counts": list(SESSION_COUNTS),
                        "ledger_run_counts": list(LEDGER_RUN_COUNTS), "session_states": session_counts,
+                       "profile_counts": PROFILE_DIMENSIONS[size],
                        "budget_states": budget_counts},
         # The logical checksum is stable across filesystem metadata and SQLite
         # page layout; the tree checksum is retained as provenance evidence.
@@ -225,6 +233,13 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("required workload dimensions are incomplete")
     if dimensions.get("session_counts") != list(SESSION_COUNTS) or set(dimensions.get("budget_states", {})) != set(BUDGET_STATES):
         raise ValueError("required session/budget states are incomplete")
+    size = dimensions.get("size", manifest.get("logical", {}).get("size"))
+    if size in PROFILE_DIMENSIONS:
+        expected = PROFILE_DIMENSIONS[size]
+        if dimensions.get("profile_counts") != expected:
+            raise ValueError("profile dimensions do not match materialized fixture")
+        if counts["sessions"] != expected["sessions"] or counts["ledger_runs"] != expected["ledger_runs"]:
+            raise ValueError("manifest counts do not match materialized profile")
     run_counts = dimensions.get("runs_per_ticket_counts", {})
     if set(run_counts) != {str(value) for value in RUNS_PER_TICKET} or sum(run_counts.values()) != counts["tickets"]:
         raise ValueError("runs_per_ticket counts do not match materialized tickets")
