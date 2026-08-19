@@ -16,15 +16,15 @@ TicketStore и SessionStore в runtime используют `.vibe/control.sqlit
 
 ## 4. Методика
 
-Команда: `python benchmarks/performance/run_benchmark.py --project . --profile smoke --warmup 5 --iterations 30 --seed 35527 --output results/DEL-355F27-smoke.json`; full использует medium fixture. Harness копирует project во временное isolated дерево, передаёт стабильный seed и пишет только output. `perf_counter_ns` даёт wall milliseconds, `process_time_ns` — CPU milliseconds. Warmup исключён; cold filesystem cases используют 100 samples. Manifest содержит counts, dimensions, redaction policy и SHA-256. Raw sample schema: `sample_index`, `wall_ms`, `cpu_ms`, `fs_ops`, `fs_bytes`, `sqlite_queries`, `sqlite_lock_ms`, `error`. Aggregates: min/p50/p95/p99/max/mean/stdev.
+Команда: `python benchmarks/performance/run_benchmark.py --project . --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output results/DEL-355F27-smoke.json`; доступны размеры 100/1000/5000/10000 tickets и legacy YAML через `--storage yaml`. `--dataset` загружает и валидирует JSON manifest. Harness копирует project во временное isolated дерево и пишет только output. Warmup исключён; OS cache eviction в текущем worker недоступна, поэтому cold result содержит limitation и не используется для cold conclusion. Manifest содержит фактические counts, states, storage mode, redaction policy и SHA-256. Unavailable attribution остаётся `null` с причиной, а не zero.
 
 ## 5. Baseline results и hotspots
 
-Числовой baseline генерируется командой и не подменяется неподтверждёнными цифрами в документации. Каждый result связан с `case_id`, `run_id`, git commit, source checksums и manifest hash. CPU evidence: `python benchmarks/performance/profile.py --project <isolated-copy> --scenario scheduler.select_candidates --output results/profile`; артефакты `.pstats` и text report указываются в `profiling.artifacts` при внешнем запуске.
+Числовой baseline генерируется командой и не подменяется неподтверждёнными цифрами в документации. Каждый result связан с `case_id`, `run_id`, git commit, source checksums и manifest hash. CPU evidence: `python benchmarks/performance/profile.py --project <isolated-copy> --scenario scheduler.select_candidates --run-id <run_id> --manifest-hash <sha256> --output results/profile`; profile manifest связывает `.pstats` и text report с запуском.
 
 ## 6. Filesystem/SQLite attribution
 
-Результат отдельно фиксирует CPU/wall и instrumented file-count/byte deltas; это не syscall trace. SQLite query/lock counters требуют доступного wrapper/profiler и иначе помечаются `null` с limitation. Runtime baseline SQLite-first; legacy YAML должен запускаться отдельным dataset/storage mode. Без второй согласованной filesystem машины comparison остаётся limitation, а не выводом о переносимой производительности.
+Результат отдельно фиксирует CPU/wall и instrumented file-count/byte deltas; это не syscall trace. SQLite-first и legacy YAML запускаются отдельными storage modes с одинаковыми logical dimensions и case IDs. Query/lock и alternate-filesystem attribution при недоступности capability помечаются причиной; portable conclusion не формулируется.
 
 ## 7. Optimization criteria
 
