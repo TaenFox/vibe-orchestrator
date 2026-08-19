@@ -23,8 +23,11 @@ from .sessions import SessionStore
 from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_technical_debt, preflight_technical_debt, technical_debt_basis
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
+from .run_store import RunStore
 
 log = logging.getLogger("vibe")
+MAX_REWORK_REVIEW_ATTEMPTS = 3
+STALE_RUN_TIMEOUT = timedelta(minutes=30)
 
 
 def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
@@ -46,6 +49,37 @@ def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
         reason="rework_cycle_stopped",
         to_status=ticket.status,
     )
+    store.save(ticket)
+    return ticket
+
+
+def recover_stale_run(store: TicketStore, ticket_id: str, *, now: datetime | None = None,
+                      timeout: timedelta = STALE_RUN_TIMEOUT, force: bool = False) -> Ticket:
+    """Recover a started run; stale runs are automatic, fresh runs require force."""
+    ticket = store.get(ticket_id)
+    run_id = ticket.active_run
+    if not run_id:
+        raise ValueError("У тикета нет активного запуска")
+    run = RunStore(store.database).get(run_id)
+    if not run or run.get("state") != "started":
+        raise ValueError("Активный запуск уже завершён или не найден")
+    started_at = datetime.fromisoformat(run["started_at"])
+    current = now or datetime.now(timezone.utc)
+    age = current - started_at
+    if age < timeout and not force:
+        raise ValueError(f"Запуск ещё не считается зависшим: {int(age.total_seconds())} секунд")
+    started_events = [event for event in ticket.run_history if event.get("run_id") == run_id and event.get("event") == "started"]
+    source_status = started_events[-1].get("from_status") if started_events else None
+    if not source_status:
+        raise ValueError("Не найден исходный статус зависшего запуска")
+    if not RunStore(store.database).abort(run_id, reason="stale_run_recovered"):
+        raise ValueError("Запуск уже изменён другим процессом")
+    ticket.active_run = None
+    ticket.status = source_status
+    ticket.last_outcome = "run_interrupted"
+    ticket.last_summary = f"Зависший запуск восстановлен после {int(age.total_seconds() // 60)} мин.; тикет возвращён в очередь"
+    store.record_run_event(ticket, run_id=run_id, stage_id=source_status, event="stale_run_recovered",
+                           reason="stale_run_recovered", age_seconds=int(age.total_seconds()), to_status=source_status)
     store.save(ticket)
     return ticket
 
@@ -418,10 +452,18 @@ class Orchestrator:
             ticket.context_revision += 1
         target_status = (stage.outcomes or {})[result.outcome]
         if ticket.type == "rework" and workflow.id == "delivery" and result.outcome == "needs_rework":
-            # A rework is already the corrective pass. A second rejection must
-            # stop automatic execution instead of restarting the same loop.
-            target_status = "selected_for_session"
-            ticket.blocked_reason = "rework_cycle_stopped"
+            attempts = sum(
+                1
+                for event in ticket.run_history
+                if event.get("stage") == stage.id
+                and event.get("event") == "completed"
+                and event.get("outcome") == "needs_rework"
+            ) + 1
+            if attempts < MAX_REWORK_REVIEW_ATTEMPTS:
+                target_status = "ready_for_development"
+            else:
+                target_status = "selected_for_session"
+                ticket.blocked_reason = "rework_cycle_stopped"
         if ticket.type == "correction" and workflow.id == "discovery" and result.outcome == "completed":
             target_status = "done"
         if ticket.type == "rework" and workflow.id == "delivery" and stage.id == ticket.rework_stage and result.outcome == "completed":

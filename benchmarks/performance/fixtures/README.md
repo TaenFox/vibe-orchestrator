@@ -39,8 +39,16 @@ manifest является authoritative source для seed/profile/storage; не
 явно заданных `--size` или `--storage`, повреждение manifest и unsupported values
 останавливают benchmark до выполнения case и до записи результата. После проверки
 разрешена только документированная deterministic materialization в isolated project;
-это явно отмечается как `manifest-only deterministic materialization`, а fallback к
-CLI/default synthetic dataset запрещён.
+каноническая logical payload и `manifest_sha256` materialization должны совпасть с
+входным manifest. Только после этого результат и cases получают подтверждённую
+identity входного dataset; при mismatch выбрасывается `ValueError` до `_cases()` и
+`output.write_text()`, а fallback к CLI/default synthetic dataset запрещён.
+
+Baseline без `--dataset` сохраняет генерацию по CLI seed/profile/storage. Read-back
+проверки fixture перечитывают реальные tickets, sessions и все строки authoritative
+SQLite ledger для каждого профиля small/medium/large/xlarge и обоих storage modes,
+а не только manifest counts; ownership каждой ledger row сверяется с её ticket
+budget.
 
 ## Ограничения
 

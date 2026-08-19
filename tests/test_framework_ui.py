@@ -22,12 +22,14 @@ def test_framework_ui_builds_board_and_ticket_detail(tmp_path: Path):
     assert 'name=delta' in board
     assert 'WIP' in board and 'Done' in board
     assert 'progress-step' in board
+    assert 'Действия' in board
+    assert f'/ticket/{ticket.id}/move' in board
 
 
 def test_framework_ui_exposes_expected_routes(tmp_path: Path):
     paths = {route.path for route in create_app(tmp_path).routes}
 
-    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/workers"}
+    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/ticket/{ticket_id}/recover-stale-run", "/workers"}
 
 
 def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path):
@@ -74,6 +76,9 @@ def test_framework_ui_offers_explicit_rework_resume(tmp_path: Path):
 
     assert f'/ticket/{ticket.id}/resume-rework' in detail
     assert "Разрешить ещё один проход реворка" in detail
+
+    board = _board_html(store, load_all_workflows(), "delivery")
+    assert f'/ticket/{ticket.id}/resume-rework' in board
 
 
 def test_framework_ui_renders_session_list_and_membership(tmp_path: Path):

@@ -78,6 +78,31 @@ def _canonical_manifest_payload(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def manifest_identity(manifest: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Return the portable logical identity used for dataset equivalence."""
+    payload = _canonical_manifest_payload(manifest)
+    return payload, _logical_hash(payload)
+
+
+def assert_manifest_identity(expected: dict[str, Any], actual: dict[str, Any]) -> None:
+    """Reject materialization that does not reproduce the supplied manifest."""
+    expected_payload, expected_hash = manifest_identity(expected)
+    actual_payload, actual_hash = manifest_identity(actual)
+    supplied_hash = expected.get("hashes", {}).get("manifest_sha256")
+    generated_hash = actual.get("hashes", {}).get("manifest_sha256")
+    if (supplied_hash != expected_hash or generated_hash != actual_hash or
+            expected_hash != actual_hash or expected_payload != actual_payload):
+        differing_fields = sorted(
+            key for key in set(expected_payload) | set(actual_payload)
+            if expected_payload.get(key) != actual_payload.get(key)
+        )
+        suffix = f"; differing canonical fields={differing_fields}" if differing_fields else ""
+        raise ValueError(
+            "dataset identity mismatch: supplied="
+            f"{supplied_hash or expected_hash}, materialized={generated_hash or actual_hash}{suffix}"
+        )
+
+
 def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                      storage_mode: str = "sqlite", include_legacy: bool = True) -> dict[str, Any]:
     """Materialise a complete synthetic profile; no production text is persisted."""
@@ -145,7 +170,7 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
         owner = ticket_ids[state_index]
         limits = {"tokens": 100000, "points": 1000, "runs": 100}
         if state == "exhausted":
-            limits = {"tokens": 1, "points": 1, "runs": 1}
+            limits = {"tokens": 2, "points": 1, "runs": 1}
         elif state == "blocked_unknown":
             limits = {"tokens": 100, "points": 100, "runs": 100}
         elif state == "over_budget":
@@ -168,7 +193,10 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
                 ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"tokens": 1, "points": 1, "runs": 1})
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "model": "fixture",
+                    "reasoning_effort": "minimal", "usage_ref": run_id, "captured_at": "2024-01-01T00:00:00+00:00",
+                    "source": "provider", "normalization_version": "synthetic.v1", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 1, "runs": 1})
             except Exception:
                 pass
         elif state == "over_budget":
@@ -178,9 +206,10 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
                 run_id = f"RUN-{seed % 100000:05d}-state-{state_index}"
                 ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"run_id": run_id, "input_tokens": 1,
-                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 2,
-                    "normalization_version": "synthetic.v1", "runs": 1})
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "model": "fixture",
+                    "reasoning_effort": "minimal", "usage_ref": run_id, "captured_at": "2024-01-01T00:00:00+00:00",
+                    "source": "provider", "normalization_version": "synthetic.v1", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 2, "runs": 1})
             except Exception:
                 pass
         assert ledger.get_budget(budget_id) is not None
@@ -194,7 +223,10 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
             ledger.reserve(run_id, owner, None, {"tokens": 1, "points": 1, "runs": 1})
             if index % 4 == 0:
                 ledger.start(run_id)
-                ledger.finalize(run_id, "completed", {"tokens": 1, "points": 1, "runs": 1})
+                ledger.finalize(run_id, "completed", {"run_id": run_id, "model": "fixture",
+                    "reasoning_effort": "minimal", "usage_ref": run_id, "captured_at": "2024-01-01T00:00:00+00:00",
+                    "source": "provider", "normalization_version": "synthetic.v1", "input_tokens": 1,
+                    "output_tokens": 1, "total_tokens": 2, "tokens": 2, "points": 1, "runs": 1})
             elif index % 4 == 1:
                 ledger.release(run_id)
         except Exception:
