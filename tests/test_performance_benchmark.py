@@ -55,6 +55,18 @@ def test_dataset_manifest_is_not_silently_ignored(tmp_path):
         load_dataset(path)
 
 
+def test_dataset_bundle_can_convert_storage_without_changing_entities(tmp_path):
+    source = tmp_path / "approved"
+    manifest = generate_fixture(source, seed=22, size="small", storage_mode="sqlite")
+    target = tmp_path / "alternate"
+    target.mkdir()
+    converted = materialize_dataset(target, source, manifest, storage_mode="yaml")
+    assert converted["storage_mode"] == "yaml"
+    assert converted["hashes"]["manifest_sha256"] != manifest["hashes"]["manifest_sha256"]
+    assert len(list((target / ".vibe" / "tickets" / "delivery").glob("*.yaml"))) == manifest["counts"]["tickets"]
+    assert len(list((target / ".vibe" / "sessions").glob("*.yaml"))) == manifest["counts"]["sessions"]
+
+
 def test_dataset_bundle_materializes_existing_vibe_tree(tmp_path):
     source = tmp_path / "approved"
     manifest = generate_fixture(source, seed=21, size="small", storage_mode="yaml")

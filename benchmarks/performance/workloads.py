@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from vibe_orchestrator.budget_ledger import BudgetLedger
 from vibe_orchestrator.sessions import DeliverySession, SessionStore
 from vibe_orchestrator.tickets import Ticket, TicketStore
@@ -40,7 +42,8 @@ def _logical_hash(value: Any) -> str:
 def _hash_tree(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        if ".git" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
+        if ".git" in path.parts or path.name in {"control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm",
+                                                   "ledger.sqlite3", "ledger.sqlite3-wal", "ledger.sqlite3-shm"}:
             continue
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
@@ -225,7 +228,58 @@ def load_dataset(path: Path) -> dict[str, Any]:
     return data
 
 
-def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+def _logical_manifest_hash(logical: dict[str, Any]) -> str:
+    return _logical_hash(logical)
+
+
+def _storage_snapshot(project: Path, storage_mode: str) -> dict[str, Any]:
+    store = TicketStore(project, use_database=storage_mode == "sqlite")
+    sessions = SessionStore(project, store, use_database=storage_mode == "sqlite")
+    return {
+        "tickets": {ticket.id: ticket.to_dict() for ticket in store.list()},
+        "sessions": {session.id: session.to_dict() for session in sessions.list()},
+    }
+
+
+def _convert_storage(project: Path, source_storage: str, target_storage: str) -> dict[str, Any]:
+    """Convert control-plane materialization without regenerating the dataset."""
+    if source_storage == target_storage:
+        return {"equivalent": True, "source_counts": {"tickets": 0, "sessions": 0},
+                "target_counts": {"tickets": 0, "sessions": 0}}
+    snapshot = _storage_snapshot(project, source_storage)
+    vibe = Path(project) / ".vibe"
+    database = vibe / "control.sqlite3"
+    for sidecar in (database, database.with_name(database.name + "-wal"), database.with_name(database.name + "-shm")):
+        sidecar.unlink(missing_ok=True)
+    if target_storage == "yaml":
+        shutil.rmtree(vibe / "tickets", ignore_errors=True)
+        shutil.rmtree(vibe / "sessions", ignore_errors=True)
+        tickets = TicketStore(project, use_database=False)
+        tickets.init()
+        for payload in snapshot["tickets"].values():
+            ticket = Ticket.from_dict(payload)
+            tickets.ticket_path(ticket).parent.mkdir(parents=True, exist_ok=True)
+            tickets.ticket_path(ticket).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        sessions = SessionStore(project, tickets, use_database=False)
+        sessions.init()
+        for payload in snapshot["sessions"].values():
+            session = DeliverySession.from_dict(payload)
+            sessions.session_path(session).parent.mkdir(parents=True, exist_ok=True)
+            sessions.session_path(session).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    else:
+        from vibe_orchestrator.control_db_migration import migrate_control_plane
+        migrate_control_plane(project, database)
+    converted = _storage_snapshot(project, target_storage)
+    equivalent = snapshot == converted
+    if not equivalent:
+        raise ValueError("alternate storage conversion changed dataset contents")
+    return {"equivalent": True,
+            "source_counts": {key: len(value) for key, value in snapshot.items()},
+            "target_counts": {key: len(value) for key, value in converted.items()}}
+
+
+def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, Any], *,
+                        storage_mode: str | None = None) -> dict[str, Any]:
     """Copy an approved dataset bundle into the isolated benchmark project.
 
     A dataset is a directory (or a manifest JSON next to one) containing the
@@ -252,6 +306,18 @@ def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, A
     if expected and expected != materialized["materialized_tree_sha256"]:
         raise ValueError("dataset materialized tree checksum does not match manifest")
     materialized["dataset_tree_sha256"] = materialized["materialized_tree_sha256"]
+    if storage_mode is not None and storage_mode != manifest["storage_mode"]:
+        _convert_storage(project, manifest["storage_mode"], storage_mode)
+        materialized["storage_mode"] = storage_mode
+        logical = dict(materialized["logical"])
+        logical["storage_mode"] = storage_mode
+        materialized["logical"] = logical
+        materialized["hashes"] = {"manifest_sha256": _logical_manifest_hash(logical)}
+        materialized["logical_checksum"] = materialized["hashes"]["manifest_sha256"]
+        materialized["fixture_files_sha256"] = materialized["hashes"]["manifest_sha256"]
+        materialized["materialized_tree_sha256"] = _hash_tree(target_vibe)
+        materialized["dataset_tree_sha256"] = materialized["materialized_tree_sha256"]
+        validate_manifest(materialized)
     return materialized
 
 

@@ -209,7 +209,8 @@ def _fs_snapshot(root: Path) -> tuple[int, int]:
 def _hash_tree(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if ".git" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
+        if ".git" in path.parts or path.name in {"control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm",
+                                                   "ledger.sqlite3", "ledger.sqlite3-wal", "ledger.sqlite3-shm"}:
             continue
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
@@ -478,6 +479,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         setattr(fn, "_sqlite_metrics", sqlite_metrics if component == "BudgetLedger" else None)
         setattr(fn, "_sqlite_plans", _explain_plans(ledger) if component == "BudgetLedger" else [])
         setattr(fn, "_limitations", [http_limitation] if http_limitation and component == "HTTP" else [])
+        setattr(fn, "_profile_available", not (http_limitation and component == "HTTP"))
     return cases
 
 
@@ -565,7 +567,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
         profile_cases = [next((item for item in cases if item[0] == case_id), None)
                          for case_id in profile_ids.values()]
-        profile_cases = [item for item in profile_cases if item is not None]
+        http_case = next((item for item in cases if item[0] == profile_ids["HTTP"]), None)
+        http_limitation = (getattr(http_case[3], "_limitations", []) or [None])[0] if http_case else None
+        profile_cases = [item for item in profile_cases
+                         if item is not None and getattr(item[3], "_profile_available", True)]
+        if http_limitation:
+            result["profiling"]["limitations"].append(
+                f"HTTP top scenario was not profiled: {http_limitation}")
         if profile_cases:
             profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
             profile_artifacts = []
@@ -574,10 +582,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 profiler = cProfile.Profile(); profiler.enable()
                 try:
                     selected[3]()
-                except Exception:
-                    # The profile still proves which code path was exercised;
-                    # runtime limitations are already recorded in case samples.
-                    pass
                 finally:
                     profiler.disable()
                 profiler.dump_stats(profile_path)
@@ -599,7 +603,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             comparison_project = Path(temp) / "comparison-project"
             shutil.copytree(source, comparison_project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
             if dataset:
-                alternate_manifest = materialize_dataset(comparison_project, args.dataset, dataset)
+                alternate_manifest = materialize_dataset(comparison_project, args.dataset, dataset, storage_mode=alternate)
             else:
                 alternate_manifest = generate_fixture(comparison_project, seed=fixture_seed, size=size, storage_mode=alternate)
             alternate_cases = _cases(comparison_project, storage=alternate)
@@ -610,9 +614,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 alternate_results.append({"case_id": measured["case_id"], "component": measured["component"],
                                           "statistics": measured["statistics"], "sample_count": measured["sample_count"]})
             result["storage_comparison"] = {"baseline_storage": fixture_storage, "alternate_storage": alternate,
+                                             "dataset_equivalent": True,
+                                             "baseline_manifest_hash": manifest["hashes"]["manifest_sha256"],
+                                             "alternate_manifest_hash": alternate_manifest["hashes"]["manifest_sha256"],
+                                             "conversion": "materialized dataset converted and entity snapshots compared",
                                              "baseline_cases": [{"case_id": item["case_id"], "statistics": item["statistics"]} for item in result["cases"]],
                                              "alternate_cases": alternate_results,
-                                             "conclusion": "сравнение измерено на одном dataset и одинаковых параметрах"}
+                                             "conclusion": "SQLite и legacy YAML измерены на эквивалентной материализации одного dataset с одинаковыми параметрами"}
         result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
                                "cold_available": cold["available"], "cold_strategy": cold["strategy"],
                                "cold_limitation": cold["limitation"]}
