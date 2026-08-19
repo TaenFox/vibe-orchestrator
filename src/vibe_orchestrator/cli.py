@@ -15,7 +15,7 @@ from .control import DeliverySessionStore, SessionError, WorkerControl
 from .git_trees import GitTreeManager
 from .orchestrator import Orchestrator
 from .tickets import TicketStore
-from .ui import serve, start_server
+from .framework_ui import serve, start_server
 
 
 def default_cli_authorizer(**_: Any) -> tuple[bool, str | None]:

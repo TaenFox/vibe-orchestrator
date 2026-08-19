@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import tempfile
 import threading
 import unicodedata
@@ -121,13 +122,32 @@ class Ticket:
 
 
 class TicketStore:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, *, use_database: bool = True):
         self.project = project.resolve()
         self.root = self.project / ".vibe"
         self.tickets_root = self.root / "tickets"
         self.runs_root = self.root / "runs"
+        self.database = self.root / "control.sqlite3"
+        self.use_database = use_database
+
+    @property
+    def database_enabled(self) -> bool:
+        return self.use_database and self.database.exists()
+
+    def _db(self) -> sqlite3.Connection:
+        from .control_db_migration import ensure_control_schema
+        ensure_control_schema(self.database)
+        db = sqlite3.connect(self.database, timeout=10)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=10000")
+        return db
 
     def init(self) -> None:
+        if self.database_enabled:
+            self.runs_root.mkdir(parents=True, exist_ok=True)
+            self._db().close()
+            return
         self.tickets_root.mkdir(parents=True, exist_ok=True)
         self.runs_root.mkdir(parents=True, exist_ok=True)
         for process in ("discovery", "delivery", "process_management"):
@@ -153,6 +173,22 @@ class TicketStore:
 
     def save(self, ticket: Ticket) -> None:
         ticket.updated_at = now_iso()
+        if self.database_enabled:
+            payload = ticket.to_dict()
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            with self._db() as db:
+                db.execute(
+                    """INSERT INTO tickets(ticket_id,process,ticket_type,status,priority,parent_id,created_at,updated_at,source_path,payload_json,payload_hash)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(ticket_id) DO UPDATE SET process=excluded.process,ticket_type=excluded.ticket_type,status=excluded.status,
+                    priority=excluded.priority,parent_id=excluded.parent_id,created_at=excluded.created_at,updated_at=excluded.updated_at,
+                    payload_json=excluded.payload_json,payload_hash=excluded.payload_hash""",
+                    (ticket.id, ticket.process, ticket.type, ticket.status, ticket.priority, ticket.parent, ticket.created_at,
+                     ticket.updated_at, f".vibe/tickets/{ticket.process}/{ticket.id}.yaml", encoded,
+                     hashlib.sha256(encoded.encode("utf-8")).hexdigest()),
+                )
+                db.commit()
+            return
         path = self.ticket_path(ticket)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = yaml.safe_dump(ticket.to_dict(), sort_keys=False, allow_unicode=True)
@@ -194,12 +230,25 @@ class TicketStore:
         ticket.run_history.append(entry)
 
     def get(self, ticket_id: str) -> Ticket:
+        if self.database_enabled:
+            with self._db() as db:
+                row = db.execute("SELECT payload_json FROM tickets WHERE ticket_id = ?", (ticket_id,)).fetchone()
+            if row is None:
+                raise KeyError(ticket_id)
+            return Ticket.from_dict(json.loads(row["payload_json"]))
         matches = list(self.tickets_root.glob(f"*/{ticket_id}.yaml"))
         if not matches:
             raise KeyError(ticket_id)
         return self.load_path(matches[0])
 
     def list(self, process: str | None = None) -> list[Ticket]:
+        if self.database_enabled:
+            with self._db() as db:
+                if process:
+                    rows = db.execute("SELECT payload_json FROM tickets WHERE process = ? ORDER BY ticket_id", (process,)).fetchall()
+                else:
+                    rows = db.execute("SELECT payload_json FROM tickets ORDER BY ticket_id").fetchall()
+            return [Ticket.from_dict(json.loads(row["payload_json"])) for row in rows]
         base = self.tickets_root / process if process else self.tickets_root
         pattern = "*.yaml" if process else "*/*.yaml"
         return [self.load_path(path) for path in sorted(base.glob(pattern))]

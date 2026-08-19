@@ -60,6 +60,8 @@ class DeliverySessionControl:
             active = next((session for session in self.store.list() if session.status == "active"), None)
             if active is not None:
                 return self.store.effective_ticket_ids(active)
+            if self.store.database_enabled:
+                return None
         except (OSError, UnicodeError, ValueError, yaml.YAMLError):
             return set()
         # Keep reading the marker for projects that have not yet got a
@@ -199,16 +201,14 @@ class DeliverySessionStore:
             if message == "Cannot activate an empty session":
                 message = "Нельзя активировать пустую сессию"
             raise SessionError(message) from exc
-        self.active_path.parent.mkdir(parents=True, exist_ok=True)
-        marker = {"active": True, "session_id": session.id, "participants": session.ticket_ids}
-        if session.budget_policy != "legacy" or session.membership_policy != "legacy" or any(
-                value is not None for value in session.budget_limits.values()):
-            marker.update({"budget_policy": session.budget_policy, "budget_limits": session.budget_limits,
-                           "membership_policy": session.membership_policy})
-        self.active_path.write_text(
-            yaml.safe_dump(marker, sort_keys=False, allow_unicode=True),
-            encoding="utf-8",
-        )
+        if not self.store.database_enabled:
+            self.active_path.parent.mkdir(parents=True, exist_ok=True)
+            marker = {"active": True, "session_id": session.id, "participants": session.ticket_ids}
+            if session.budget_policy != "legacy" or session.membership_policy != "legacy" or any(
+                    value is not None for value in session.budget_limits.values()):
+                marker.update({"budget_policy": session.budget_policy, "budget_limits": session.budget_limits,
+                               "membership_policy": session.membership_policy})
+            self.active_path.write_text(yaml.safe_dump(marker, sort_keys=False, allow_unicode=True), encoding="utf-8")
         return session
 
     def _finish(self, session_id: str, status: str, ticket_store: Any, reason: str | None):
@@ -229,7 +229,8 @@ class DeliverySessionStore:
             (self.store.complete if status == "completed" else self.store.cancel)(session)
         except (KeyError, TypeError, ValueError) as exc:
             raise SessionError(str(exc)) from exc
-        self.active_path.unlink(missing_ok=True)
+        if not self.store.database_enabled:
+            self.active_path.unlink(missing_ok=True)
         return session
 
     def complete(self, session_id: str, ticket_store: Any, reason: str | None = None):

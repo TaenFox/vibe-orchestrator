@@ -162,10 +162,7 @@ class ReadOnlyAgentTools:
         self.sessions = SessionStore(self.project, self._store)
 
     def _sessions(self) -> list[DeliverySession]:
-        root = self.sessions.sessions_root
-        if not root.is_dir():
-            return []
-        return [self.sessions.load_path(path) for path in sorted(root.glob("*.yaml"))]
+        return self.sessions.list()
 
     def list_tickets(self, *, process: str | None = None, status: str | None = None,
                      parent: str | None = None, session: str | None = None,

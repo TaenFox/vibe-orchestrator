@@ -5,3 +5,5 @@ tickets/
 sessions/
 sessions.lock
 budgets/
+control.sqlite3
+control.sqlite3-*
