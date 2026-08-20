@@ -239,6 +239,43 @@ def test_review_rework_inherits_parent_active_session(tmp_path: Path):
     )
 
 
+def test_reconcile_rework_sessions_repairs_missing_membership(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("delivery", "task", "Session parent", status="review")
+    session = orchestrator.session_store.create([parent.id])
+    orchestrator.session_store.activate(session)
+    rework = orchestrator.store.create(
+        "delivery", "rework", "Existing rework", parent=parent.id,
+        status="selected_for_session", rework_stage="review",
+    )
+
+    orchestrator._reconcile_rework_sessions()
+
+    loaded_session = orchestrator.session_store.get(session.id)
+    assert rework.id in orchestrator.session_store.effective_ticket_ids(loaded_session)
+
+
+def test_delivery_parent_waits_for_unfinished_descendants(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("delivery", "rework", "Integration parent", status="review")
+    completed_child = orchestrator.store.create(
+        "delivery", "task", "Completed component", parent=parent.id, status="done", mandatory=True,
+    )
+    pending_child = orchestrator.store.create(
+        "delivery", "task", "Pending component", parent=completed_child.id, status="review", mandatory=True,
+    )
+
+    orchestrator._reconcile_tickets()
+
+    assert orchestrator.store.get(parent.id).blocked_by == [pending_child.id]
+
+    pending_child.status = "done"
+    orchestrator.store.save(pending_child)
+    orchestrator._reconcile_tickets()
+
+    assert orchestrator.store.get(parent.id).blocked_by == []
+
+
 def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
     async def scenario() -> None:
         orchestrator = Orchestrator(tmp_path, max_agents=1)

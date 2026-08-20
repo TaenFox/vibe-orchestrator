@@ -199,12 +199,17 @@ class GitTreeManager:
         return True
 
     def _integration_target(self, ticket: Ticket) -> tuple[str, Path]:
-        if ticket.parent:
-            parent = self.store.get(ticket.parent)
-            if parent.process == "delivery":
-                parent_record = self.trees.get(parent.id)
-                if parent_record:
-                    return parent_record.branch, Path(parent_record.worktree)
+        current = ticket.parent
+        visited: set[str] = set()
+        while current and current not in visited:
+            visited.add(current)
+            parent = self.store.get(current)
+            if parent.process != "delivery":
+                break
+            parent_record = self.trees.get(parent.id)
+            if parent_record and parent_record.integration_status != "merged" and Path(parent_record.worktree).exists():
+                return parent_record.branch, Path(parent_record.worktree)
+            current = parent.parent
         return self.main_branch, self._ensure_main_worktree()
 
     def _ensure_main_worktree(self) -> Path:
@@ -241,7 +246,10 @@ class GitTreeManager:
         return records
 
     def _run(self, args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        except OSError as exc:
+            raise GitTreeError(f"git {' '.join(args)}: {exc}") from exc
         if result.returncode:
             detail = (result.stderr or result.stdout).strip()
             raise GitTreeError(f"git {' '.join(args)}: {detail}")

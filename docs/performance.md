@@ -20,6 +20,12 @@ ledger остаётся SQLite, поскольку это его authoritative p
 только поддерживаемые labels. Reservation/concurrency cases используют отдельные
 synthetic budget IDs и удаляются после sample.
 
+`validate_manifest(manifest, materialized_root=...)` — явная read-back граница для
+изолированного проекта. Она перечитывает tickets, sessions и ledger, пересчитывает
+counts, ticket status/run-history, session states и budget states и сравнивает их с
+manifest. `generate_fixture` выполняет эту проверку перед возвратом; standalone
+`load_dataset` без root сохраняет structural/logical-only проверку.
+
 ## Contract validation and completeness
 
 Публикуемый `performance-result.v2` проверяется до `output.write_text()`. Validator
@@ -38,6 +44,12 @@ malformed error или silently ignored dataset делает run невалид�
 `{path, sha256, size_bytes, kind}`. Перед публикацией проверяются regular file,
 безопасный относительный path внутри artifact root, размер и повторно вычисленный
 SHA-256; profile evidence не входит в samples или iteration statistics.
+
+`materialized_tree_sha256` хэширует authoritative stores: для SQLite —
+`.vibe/control.sqlite3` и `.vibe/budgets/ledger.sqlite3`, для YAML — ticket/session
+YAML и ledger SQLite. `-wal`/`-shm`, runtime и unrelated files исключаются.
+Изменение статуса, удаление/добавление записи или mutation ledger приводит к
+`ValueError` до принятия manifest.
 
 ## Warm/cold semantics and comparison eligibility
 
@@ -90,3 +102,5 @@ trip представлены отдельными cases.
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
+SQLite checksum — provenance текущей materialization и не обещает
+кросс-машинную детерминированность binary layout.
