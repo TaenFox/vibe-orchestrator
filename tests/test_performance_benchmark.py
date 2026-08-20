@@ -10,6 +10,8 @@ from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold
                                                    parse_seed, statistics_for, validate_result)
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
+PROVENANCE = {"source_kind": "synthetic", "synthetic_only": True, "seed": 35527, "manifest_hash": "a"}
+
 
 def test_percentile_is_deterministic_and_interpolated():
     assert percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.5
@@ -19,6 +21,21 @@ def test_percentile_is_deterministic_and_interpolated():
 def test_seed_accepts_decimal_and_ticket_style_hex_suffix():
     assert parse_seed("35527") == 35527
     assert parse_seed("355F27") == int("355F27", 16)
+
+
+def test_benchmark_docs_use_required_decimal_seed():
+    for path in (Path("benchmarks/performance/README.md"), Path("docs/performance.md")):
+        text = path.read_text(encoding="utf-8")
+        assert "--seed 35527" in text
+        assert "--seed 355F27" not in text
+
+
+def test_provenance_contract_requires_synthetic_marker_and_manifest_hash():
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [], "source_checksum_before": "a", "source_checksum_after": "a",
+              "provenance": {"source_kind": "synthetic", "synthetic_only": True,
+                             "seed": 35527, "manifest_hash": "a"}}
+    validate_result(result)
 
 
 def test_manifest_privacy_contract_is_explicit():
@@ -55,7 +72,7 @@ def test_sqlite_result_validation_requires_new_fields_when_present():
               "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
                           "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
                           "sample_count": 1, "raw_samples": [{"sample_index": 0, "wall_ms": 1, "error": None,
-                            "sqlite_queries": 1}]}], "source_checksum_before": "a", "source_checksum_after": "a"}
+                            "sqlite_queries": 1}]}], "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     with pytest.raises(ValueError, match="attribution"):
         validate_result(result)
 
@@ -68,7 +85,7 @@ def test_sqlite_result_validation_requires_transaction_duration():
                             "sqlite_queries": 1, "sqlite_transactions": 1, "sqlite_errors": 0,
                             "sqlite_busy_errors": 0, "sqlite_lock_wait_ms": None, "sqlite_lock_wait_count": None,
                             "sqlite_attribution": {"source": "test"}}]}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+              "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     with pytest.raises(ValueError, match="attribution field"):
         validate_result(result)
 
@@ -104,7 +121,7 @@ def test_result_validation_rejects_mutated_source_and_sample_mismatch():
               "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
                           "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
                           "sample_count": 0, "raw_samples": []}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+              "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     validate_result(result)
     result["cases"][0]["sample_count"] = 1
     with pytest.raises(ValueError):
@@ -163,7 +180,7 @@ def test_result_validation_requires_clean_isolation_for_mutation():
                           "errors": [], "statistics": {}, "sample_count": 0, "raw_samples": [],
                           "isolation": {"before_hash": "a", "after_hash": "b", "leaked_entities": ["x"],
                                         "leaked_paths": [], "cleanup_errors": [], "clean": False}}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+              "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     with pytest.raises(ValueError, match="unclean mutation"):
         validate_result(result)
 

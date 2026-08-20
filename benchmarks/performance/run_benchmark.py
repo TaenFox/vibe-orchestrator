@@ -52,6 +52,7 @@ except ImportError:  # direct script execution
     from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
+DEFAULT_SEED = 35527
 
 
 def parse_seed(value: str) -> int:
@@ -280,6 +281,18 @@ def validate_result(result: dict[str, Any]) -> None:
     for key in ("schema_version", "run_id", "dataset_manifest", "cases", "source_checksum_before", "source_checksum_after"):
         if key not in result:
             raise ValueError(f"result missing {key}")
+    provenance = result.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("result missing provenance")
+    for key in ("source_kind", "synthetic_only", "seed", "manifest_hash"):
+        if key not in provenance:
+            raise ValueError(f"provenance missing {key}")
+    if provenance["source_kind"] not in {"synthetic", "approved_dataset"}:
+        raise ValueError("invalid provenance source_kind")
+    if provenance["synthetic_only"] is not (provenance["source_kind"] == "synthetic"):
+        raise ValueError("provenance synthetic_only marker is inconsistent")
+    if not isinstance(provenance["seed"], int) or not isinstance(provenance["manifest_hash"], str):
+        raise ValueError("invalid provenance seed or manifest hash")
     if result["source_checksum_before"] != result["source_checksum_after"]:
         raise ValueError("benchmark mutated source project")
     for case in result["cases"]:
@@ -708,12 +721,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "alternate": other["storage_mode"] if other else None,
                 "alternate_available": other is not None,
                 "limitation": None if other else "case is not registered for alternate storage"}
+        manifest_hash = manifest["hashes"]["manifest_sha256"]
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
                                  "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
                   "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": primary_cases,
+                  "provenance": {"source_kind": manifest["source_kind"],
+                                 "synthetic_only": manifest["source_kind"] == "synthetic",
+                                 "seed": fixture_seed, "manifest_hash": manifest_hash,
+                                 "dataset_manifest_hash": manifest_hash,
+                                 "dataset_tree_sha256": manifest["dataset_tree_sha256"],
+                                 "readback_digest": manifest["readback"]["digest"],
+                                 "command": list(sys.argv)},
                   "storage_comparison": comparison, "alternate_run": {"storage_mode": alternate_storage,
                       "manifest": alternate_manifest, "cases": alternate_cases, "available": alternate_state["available"]},
                   "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
@@ -733,7 +754,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

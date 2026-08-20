@@ -20,7 +20,7 @@ sys.path.insert(1, str(_repo_root))
 import cProfile
 
 from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
-from benchmarks.performance.run_benchmark import REQUIRED_PROFILE_CASES, _cases, parse_seed
+from benchmarks.performance.run_benchmark import DEFAULT_SEED, REQUIRED_PROFILE_CASES, _cases, parse_seed
 
 PROFILE_SCHEMA_VERSION = "performance-profile.v1"
 
@@ -75,7 +75,7 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--size", choices=("small", "medium", "large", "xlarge"))
-    parser.add_argument("--seed", type=parse_seed, default=35527)
+    parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED)
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations <= 0:
         parser.error("warmup must be non-negative and iterations must be positive")
@@ -138,10 +138,16 @@ def main() -> int:
                              "errors": errors, "sample_parameters": {"warmup": args.warmup, "iterations": args.iterations}})
         registry_cases.cleanup()
     profile_manifest = args.output / "profile-manifest.json"
+    provenance = {"source_kind": manifest["source_kind"],
+                  "synthetic_only": manifest["source_kind"] == "synthetic",
+                  "seed": manifest["seed"], "manifest_hash": manifest_hash,
+                  "dataset_tree_sha256": manifest["dataset_tree_sha256"],
+                  "command": list(sys.argv)}
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,
         "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "provenance": provenance,
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
@@ -150,6 +156,7 @@ def main() -> int:
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,
         "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "provenance": provenance,
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")

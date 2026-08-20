@@ -1,0 +1,47 @@
+         98 function calls in 0.000 seconds
+
+   Ordered by: cumulative time
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:470(<lambda>)
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/budget_ledger.py:533(list_runs)
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:234(_connect)
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/budget_ledger.py:116(_connect)
+        4    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:198(execute)
+        4    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:191(_execute)
+        4    0.000    0.000    0.000    0.000 {function InstrumentedConnection.execute at 0x1089f9bc0}
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:221(factory)
+        1    0.000    0.000    0.000    0.000 {built-in method _sqlite3.connect}
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:222(<lambda>)
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:187(__init__)
+        2    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/__init__.py:299(loads)
+        3    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:209(trace)
+        2    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/decoder.py:332(decode)
+        1    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/functools.py:518(decorating_function)
+        1    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/functools.py:35(update_wrapper)
+        1    0.000    0.000    0.000    0.000 {method 'fetchall' of 'sqlite3.Cursor' objects}
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:237(trace)
+       11    0.000    0.000    0.000    0.000 {built-in method builtins.getattr}
+        2    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/decoder.py:343(raw_decode)
+       10    0.000    0.000    0.000    0.000 {method 'startswith' of 'str' objects}
+        1    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/functools.py:479(lru_cache)
+        4    0.000    0.000    0.000    0.000 {method 'match' of 're.Pattern' objects}
+        1    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:546(__fspath__)
+        4    0.000    0.000    0.000    0.000 {built-in method time.perf_counter_ns}
+        2    0.000    0.000    0.000    0.000 {method 'set_trace_callback' of 'sqlite3.Connection' objects}
+        4    0.000    0.000    0.000    0.000 {method 'upper' of 'str' objects}
+        4    0.000    0.000    0.000    0.000 {method '__exit__' of '_thread.lock' objects}
+        1    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:99(__getitem__)
+        4    0.000    0.000    0.000    0.000 {method 'end' of 're.Match' objects}
+        4    0.000    0.000    0.000    0.000 {method 'strip' of 'str' objects}
+        3    0.000    0.000    0.000    0.000 {built-in method builtins.isinstance}
+        3    0.000    0.000    0.000    0.000 {method 'removesuffix' of 'str' objects}
+        2    0.000    0.000    0.000    0.000 {built-in method builtins.len}
+        1    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:536(__str__)
+        1    0.000    0.000    0.000    0.000 {method 'update' of 'dict' objects}
+        2    0.000    0.000    0.000    0.000 {built-in method builtins.setattr}
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 {method '__exit__' of 'sqlite3.Connection' objects}
+        1    0.000    0.000    0.000    0.000 {method 'append' of 'list' objects}
+
+

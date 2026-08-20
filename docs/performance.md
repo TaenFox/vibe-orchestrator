@@ -48,7 +48,7 @@ child rows/events до parent rows в `finally`. Результат содерж
 ## Методика
 
 CLI: `python3 benchmarks/performance/run_benchmark.py --project . --profile smoke
---size small --storage sqlite --warmup 5 --iterations 30 --seed 355F27
+--size small --storage sqlite --warmup 5 --iterations 30 --seed 35527
 --output /tmp/performance.json`. Доступны размеры `small=100`, `medium=1000`,
 `large=5000`, `xlarge=10000`, а также `--dataset manifest.json`. Seed влияет на
 порядок, статусы, parent/blocked связи и run histories. Warmup не попадает в raw
@@ -63,10 +63,13 @@ samples; исходный проект не изменяется.
 ## Baseline results и hotspots
 
 Numerical baseline сохраняется в committed artifact
-`benchmarks/performance/artifacts/baseline-small-seed-355F27.json`, а CLI остаётся
+`benchmarks/performance/artifacts/baseline-small-seed-35527.json`, а CLI остаётся
 источником machine-specific повторных измерений. Выбранные profiling cases
 создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
 manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
+Committed baseline использует synthetic-only fixture (`seed=35527`, `warmup=0`,
+`iterations=1`); result и profile manifest содержат provenance, manifest hash,
+raw samples/aggregates и checksum descriptors фактически сохранённых artifacts.
 
 ## Approved dataset и storage comparison
 
@@ -149,7 +152,7 @@ backward-compatible: старые artifacts без новых optional fields п
 python -m pytest --collect-only -q
 python -m pytest tests/test_budget_ledger.py tests/test_performance_benchmark.py -q
 python -m pytest tests/test_control_db.py tests/test_db_primary_store.py tests/test_run_store_runtime.py -q
-python benchmarks/performance/run_benchmark.py --project <isolated-project> --profile smoke --size small --storage sqlite --warmup 1 --iterations 3 --seed 355F27 --output /tmp/performance.json
+python benchmarks/performance/run_benchmark.py --project <isolated-project> --profile smoke --size small --storage sqlite --warmup 1 --iterations 3 --seed 35527 --output /tmp/performance.json
 ```
 
 ## Limitations and open decisions
