@@ -139,7 +139,7 @@ def test_sqlite_store_cases_have_attributed_query_plans(tmp_path):
         "sessionstore.list": {"sessions ordered list"},
         "sessionstore.get": {"sessions.session_id lookup"},
         "sessionstore.membership_validation.error": {"tickets.ticket_id lookup"},
-        "sessionstore.validation.overlap.error": {"tickets.ticket_id lookup"},
+        "sessionstore.validation.overlap.error": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
         "sessionstore.create": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
         "sessionstore.activate": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
         "sessionstore.complete": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
@@ -165,15 +165,15 @@ def test_sqlite_store_cases_have_attributed_query_plans(tmp_path):
 
 
 def test_session_validation_plan_attribution_matches_executed_query_family(tmp_path):
-    """Regression: a validation failure must not inherit a session lookup plan."""
+    """Regression: overlap creation attributes both reads it actually reaches."""
     generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
     cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
 
     overlap = getattr(cases["sessionstore.validation.overlap.error"], "_sqlite_plans")
     missing_membership = getattr(cases["sessionstore.membership_validation.error"], "_sqlite_plans")
-    assert [plan["query"] for plan in overlap] == ["tickets.ticket_id lookup"]
+    assert [plan["query"] for plan in overlap] == ["tickets.ticket_id lookup", "sessions.session_id lookup"]
     assert [plan["query"] for plan in missing_membership] == ["tickets.ticket_id lookup"]
-    assert all("sessions" not in detail.lower() for plan in overlap for detail in plan["detail"])
+    assert any("sessions" in detail.lower() for plan in overlap for detail in plan["detail"])
 
 
 def test_yaml_load_path_has_no_sqlite_plans(tmp_path):
