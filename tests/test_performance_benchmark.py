@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import pytest
 
-from benchmarks.performance.run_benchmark import (SQLiteMetrics, _cold_capability, _cases,
+from benchmarks.performance.run_benchmark import (SQLiteMetrics, _cold_capability, _cases, _run_case,
                                                    instrumented_connection_factory, percentile,
                                                    statistics_for, validate_result)
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
@@ -143,6 +143,26 @@ def test_yaml_load_path_has_no_sqlite_plans(tmp_path):
     cases = {item[0]: item[3] for item in _cases(tmp_path, storage="yaml")}
     assert getattr(cases["ticketstore.load_path"], "_sqlite_plans") == []
     assert getattr(cases["sessionstore.load_path"], "_sqlite_plans") == []
+
+
+def test_sqlite_load_path_is_explicitly_non_sqlite(tmp_path):
+    manifest = generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
+    for case_id in ("ticketstore.load_path", "sessionstore.load_path"):
+        fn = cases[case_id]
+        assert getattr(fn, "_sqlite_metrics") is None
+        assert getattr(fn, "_sqlite_plans") == []
+        result = _run_case(case_id, "TicketStore" if case_id.startswith("ticket") else "SessionStore",
+                           "load_path", fn, tmp_path, 0, 1, False,
+                           storage_mode="sqlite", manifest=manifest)
+        assert result["sqlite_explain_query_plan"] == []
+        assert any("case does not use SQLite" in item for item in result["limitations"])
+        sample = result["raw_samples"][0]
+        assert sample["sqlite_queries"] is None
+        assert sample["sqlite_attribution"]["source"] is None
+        validate_result({"schema_version": "performance-result.v2", "run_id": "r",
+                         "dataset_manifest": {}, "cases": [result],
+                         "source_checksum_before": "a", "source_checksum_after": "a"})
 
 
 def test_contention_case_observes_a_released_writer_lock(tmp_path):

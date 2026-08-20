@@ -62,8 +62,10 @@ families (`sessions`, `session_members`, `events`, а также ticket lookup).
 Это статическое audit evidence формы запроса, а не trace фактически выполненных
 statements. TicketStore, SessionStore и BudgetLedger используют один factory,
 поэтому counters не смешиваются между компонентами или итерациями. Для
-YAML/non-SQLite cases SQLite fields равны `null`, а `sqlite_attribution` содержит
-limitation; `load_path` читает YAML и корректно имеет пустой plan.
+YAML/non-SQLite cases и SQLite-backed `load_path` SQLite fields равны `null`, а
+`sqlite_attribution` содержит limitation; `load_path` читает YAML и корректно имеет
+пустой plan. Остальные SQLite cases получают attribution и планы только для
+фактически используемых SQL query families.
 
 ## Lock/busy wait methodology
 

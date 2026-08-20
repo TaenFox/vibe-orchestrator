@@ -186,6 +186,13 @@ def _store_explain_specs(case_id: str) -> list[tuple[str, str, tuple[Any, ...]]]
     return []
 
 
+def _case_uses_sqlite(case_id: str, component: str, storage: str) -> bool:
+    """Keep SQLite attribution limited to operations that actually use SQLite."""
+    return (storage == "sqlite"
+            and component in {"TicketStore", "SessionStore", "BudgetLedger"}
+            and case_id not in {"ticketstore.load_path", "sessionstore.load_path"})
+
+
 def percentile(values: list[float], p: float) -> float:
     if not values:
         raise ValueError("percentile requires samples")
@@ -481,7 +488,8 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         # BudgetLedger owns the instrumented connection. Ticket/session stores
         # deliberately retain their internal connection lifecycle and report a
         # typed unavailable reason instead of pretending the counters are zero.
-        setattr(fn, "_sqlite_metrics", sqlite_metrics if use_database and component in {"TicketStore", "SessionStore", "BudgetLedger"} else None)
+        uses_sqlite = _case_uses_sqlite(case_id, component, storage)
+        setattr(fn, "_sqlite_metrics", sqlite_metrics if uses_sqlite else None)
         if use_database and component == "BudgetLedger":
             plans = _explain_plans(ledger)
         elif use_database and component in {"TicketStore", "SessionStore"}:
@@ -489,7 +497,10 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         else:
             plans = []
         setattr(fn, "_sqlite_plans", plans)
-        setattr(fn, "_limitations", [http_limitation] if http_limitation and component == "HTTP" else [])
+        limitations = [http_limitation] if http_limitation and component == "HTTP" else []
+        if component in {"TicketStore", "SessionStore"} and case_id.endswith(".load_path"):
+            limitations.append("case does not use SQLite; load_path reads YAML snapshot")
+        setattr(fn, "_limitations", limitations)
     return cases
 
 
