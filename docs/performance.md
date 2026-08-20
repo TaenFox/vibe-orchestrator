@@ -49,16 +49,68 @@ Numerical baseline создаётся только командой CLI и со�
 создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
 manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
 
-## Filesystem/SQLite attribution
+## SQLite attribution schema
 
 `fs_ops`/`fs_bytes` — наблюдаемые deltas файлового дерева, не syscall trace. Для
-SQLite instrumented benchmark connections собирают query/transaction/error counts,
-lock wait time и `EXPLAIN QUERY PLAN`; для non-SQLite cases поля имеют `null` и
-причину недоступности, а не zero. HTTP handler invocation и urllib network round
-trip представлены отдельными cases.
+SQLite cases connection factory устанавливается только harness-ом и собирает
+`sqlite_queries`, `sqlite_transactions`, `sqlite_errors` и
+`sqlite_busy_errors` per sample. `sqlite_attribution` содержит источник
+instrumentation и версию контракта; `sqlite_explain_query_plan` остаётся
+привязанным к case. TicketStore, SessionStore и BudgetLedger используют один
+factory, поэтому counters не смешиваются между компонентами или итерациями.
+Для YAML/non-SQLite cases SQLite fields равны `null`, а
+`sqlite_attribution` содержит limitation, а не ложные нули.
 
-## Ограничения и открытые решения
+## Lock/busy wait methodology
+
+`sqlite_lock_wait_ms` и `sqlite_lock_wait_count` — отдельные поля для
+подтверждённого ожидания writer lock. Обычная длительность `BEGIN`–`COMMIT`
+туда не попадает. Текущая реализация сохраняет стандартные `timeout` и
+`busy_timeout` и классифицирует текстовые `SQLITE_BUSY`/`SQLITE_LOCKED`
+ошибки в `sqlite_busy_errors`, но stdlib `sqlite3` не предоставляет portable
+busy-handler callback для измерения скрытого ожидания успешного запроса.
+Поэтому lock-wait fields сериализуются как `null` с явной limitation; это не
+означает нулевое ожидание и не меняет production retry/timeout semantics.
+
+## Concurrency and invariants matrix
+
+Regression tests используют отдельные SQLite databases и ThreadPoolExecutor:
+
+| Сценарий | Проверяемый инвариант |
+| --- | --- |
+| identical `reserve(run_id)` | одна run row и один aggregate increment |
+| distinct reservations | tokens/points/runs не превышают limits |
+| ticket + session admission | denial не оставляет partial run или aggregate |
+| concurrent terminal transition | state, terminal metadata и usage изменяются один раз |
+| unknown/adjustment | unknown сохраняет существующее blocking rule; adjustment append-only и atomic |
+
+Операционные ошибки, ожидаемые case-сценарием, остаются в raw sample `error`
+и одновременно учитываются как SQLite errors, если это `sqlite3.Error`.
+
+## Expected errors and result validation
+
+`validate_result` требует ссылки ошибок на существующие sample indices и при
+наличии SQLite counters проверяет полный attribution набор, согласованность
+lock-wait fields и непустой source. Схема `performance-result.v2` остаётся
+backward-compatible: старые artifacts без новых optional fields принимаются,
+новые instrumented samples обязаны содержать их. `BudgetDenied`,
+`ImmutableRunError` и validation errors остаются частью case outcome.
+
+## Execution commands
+
+```text
+python -m pytest --collect-only -q
+python -m pytest tests/test_budget_ledger.py tests/test_performance_benchmark.py -q
+python -m pytest tests/test_control_db.py tests/test_db_primary_store.py tests/test_run_store_runtime.py -q
+python benchmarks/performance/run_benchmark.py --project <isolated-project> --profile smoke --size small --storage sqlite --warmup 1 --iterations 3 --seed 35527 --output /tmp/performance.json
+```
+
+## Limitations and open decisions
 
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
+Портативного точного busy-handler wait metric в Python 3.11 нет; для заполнения
+lock-wait fields потребуется explicit retry wrapper или platform-specific tracing.
+Сейчас выбран benchmark-only connection injection; production connection factory
+по умолчанию не меняется.

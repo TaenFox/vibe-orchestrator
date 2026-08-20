@@ -101,7 +101,8 @@ class BudgetLedger:
     """SQLite-backed transactional ledger for ticket and session budgets."""
 
     def __init__(self, project: str | Path, *, timeout: float = 10.0, pending_timeout: float = 60.0,
-                 clock: Callable[[], str] | None = None, authorizer: Callable[..., Any] | None = None):
+                 clock: Callable[[], str] | None = None, authorizer: Callable[..., Any] | None = None,
+                 connection_factory: Callable[..., sqlite3.Connection] | None = None):
         root = Path(project)
         self.path = root if root.suffix == ".sqlite3" else root / ".vibe" / "budgets" / "ledger.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,10 +110,11 @@ class BudgetLedger:
         self.pending_timeout = pending_timeout
         self.clock = clock or _now
         self.authorizer = authorizer
+        self.connection_factory = connection_factory or sqlite3.connect
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
+        connection = self.connection_factory(self.path, timeout=self.timeout, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
