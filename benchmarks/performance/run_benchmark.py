@@ -598,6 +598,21 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
             "isolation": isolation}
 
 
+def _unavailable_case(spec: CaseSpec, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Keep a registry case visible when its storage mode is not applicable."""
+    return {
+        "case_id": spec.case_id, "component": spec.component, "operation": spec.operation,
+        "kind": spec.kind, "storage_mode": storage_mode,
+        "storage_modes": list(spec.storage_modes), "dataset_dimensions": manifest["dimensions"],
+        "expected_outcome": spec.expected_outcome, "errors": [], "raw_samples": [],
+        "sample_count": 0, "statistics": {},
+        "limitations": [f"case is unavailable for storage mode {storage_mode}"],
+        "unavailable": True,
+        "isolation": {"before_hash": None, "after_hash": None, "leaked_entities": [],
+                      "leaked_paths": [], "cleanup_errors": [], "clean": True},
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.warmup < 0 or args.iterations <= 0:
         raise ValueError("warmup must be non-negative and iterations must be positive")
@@ -629,6 +644,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
             effective_cold = bool(args.cold and cold["available"])
             for item in cases:
+                if storage_mode not in item.storage_modes:
+                    pass_cases.append(_unavailable_case(item, storage_mode=storage_mode, manifest=manifest))
+                    continue
                 if effective_cold:
                     _prepare_cold(cold)
                 case_result = _run_case(item, pass_project, args.warmup, iterations, effective_cold,

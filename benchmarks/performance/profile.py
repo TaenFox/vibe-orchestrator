@@ -141,7 +141,7 @@ def main() -> int:
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,
-        "manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
@@ -149,7 +149,7 @@ def main() -> int:
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,
-        "manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
