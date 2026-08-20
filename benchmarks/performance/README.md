@@ -20,11 +20,15 @@ dataset manifest, case registry, raw samples, errors, aggregates, SQLite metrics
 profile links. `sample_count == len(raw_samples)`, warmup samples отсутствуют, а
 ошибки ссылаются на существующий sample.
 
-SQLite cases сохраняют query/transaction/error counters, lock timing и explain plans.
+SQLite cases сохраняют query/transaction/error counters, длительность завершённых
+транзакций (`sqlite_transaction_ms` — сумма `BEGIN`–`COMMIT`/`ROLLBACK` в sample),
+lock-wait fields и explain plans.
 Concurrency registry включает отдельные idempotent и denied-overallocation cases;
 результат фиксирует non-negative counters и terminal states. `sqlite_transaction_ms`
-отделён от `sqlite_lock_ms` (lock wait; при отсутствии наблюдаемого wait значение
-остаётся нулевым, а не подменяется длительностью transaction).
+отделён от `sqlite_lock_wait_ms`/`sqlite_lock_wait_count`. Lock-wait fields имеют
+значение `null`, когда ожидание не наблюдается инструментарием: stdlib `sqlite3`
+не предоставляет portable busy-handler для измерения скрытого ожидания успешного
+запроса. Они не подменяются длительностью транзакции.
 Profiling обязательно создаёт coverage record для каждого компонента: `profiled`,
 `unavailable` или `failed`; для `profiled` сохраняются pstats/text и manifest с
 `run_id`, case IDs, warmup/iterations и manifest hash. Каждый smoke/full запуск

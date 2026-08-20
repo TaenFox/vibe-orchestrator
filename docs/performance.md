@@ -98,7 +98,9 @@ scenario валидируется и сохраняется как focus, но �
 `fs_ops`/`fs_bytes` — наблюдаемые deltas файлового дерева, не syscall trace. Для
 SQLite cases connection factory устанавливается только harness-ом и собирает
 `sqlite_queries`, `sqlite_transactions`, `sqlite_errors` и
-`sqlite_busy_errors` per sample. `sqlite_attribution` содержит источник
+`sqlite_busy_errors` per sample. `sqlite_transaction_ms` — сумма длительностей
+завершённых `BEGIN`–`COMMIT`/`ROLLBACK` транзакций, измеренная trace callback.
+`sqlite_attribution` содержит источник
 instrumentation и версию контракта; `sqlite_explain_query_plan` остаётся
 привязанным к case. TicketStore, SessionStore и BudgetLedger используют один
 factory, поэтому counters не смешиваются между компонентами или итерациями.

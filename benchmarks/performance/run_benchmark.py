@@ -149,9 +149,9 @@ class SQLiteMetrics:
         self.transactions = 0
         self.errors = 0
         self.busy_errors = 0
+        self.transaction_ms = 0.0
         self.lock_wait_ms = None
         self.lock_wait_count = None
-        self.lock_ms = None  # legacy alias; transaction time is not lock wait
         self._transaction_started = None
         self.attribution = {"source": "sqlite3.trace_callback+connection_factory",
                             "contract_version": "sqlite-attribution.v1",
@@ -192,9 +192,15 @@ class InstrumentedConnection(sqlite3.Connection):
 def instrumented_connection_factory(metrics: SQLiteMetrics) -> Callable[..., sqlite3.Connection]:
     def trace(statement: str) -> None:
         normalized = statement.strip().upper()
-        metrics.queries += 1
-        if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
-            metrics.transactions += 1
+        now = time.perf_counter_ns()
+        with metrics._lock:
+            metrics.queries += 1
+            if normalized.startswith("BEGIN"):
+                metrics.transactions += 1
+                metrics._transaction_started = now
+            elif normalized.startswith(("COMMIT", "ROLLBACK")) and metrics._transaction_started is not None:
+                metrics.transaction_ms += (now - metrics._transaction_started) / 1_000_000
+                metrics._transaction_started = None
 
     def factory(path: str | Path, **kwargs: Any) -> sqlite3.Connection:
         kwargs["factory"] = lambda *args, **inner: InstrumentedConnection(*args, metrics=metrics, **inner)
@@ -214,9 +220,15 @@ class InstrumentedLedger(BudgetLedger):
 
         def trace(statement: str) -> None:
             normalized = statement.strip().upper()
-            self.metrics.queries += 1
-            if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
-                self.metrics.transactions += 1
+            now = time.perf_counter_ns()
+            with self.metrics._lock:
+                self.metrics.queries += 1
+                if normalized.startswith("BEGIN"):
+                    self.metrics.transactions += 1
+                    self.metrics._transaction_started = now
+                elif normalized.startswith(("COMMIT", "ROLLBACK")) and self.metrics._transaction_started is not None:
+                    self.metrics.transaction_ms += (now - self.metrics._transaction_started) / 1_000_000
+                    self.metrics._transaction_started = None
 
         connection.set_trace_callback(trace)
         return connection
@@ -271,7 +283,8 @@ def validate_result(result: dict[str, Any]) -> None:
                 raise ValueError("invalid sample schema")
             if sample.get("sqlite_queries") is not None:
                 required_metrics = ("sqlite_transactions", "sqlite_errors", "sqlite_busy_errors",
-                                     "sqlite_lock_wait_ms", "sqlite_lock_wait_count", "sqlite_attribution")
+                                     "sqlite_transaction_ms", "sqlite_lock_wait_ms", "sqlite_lock_wait_count",
+                                     "sqlite_attribution")
                 if any(field not in sample for field in required_metrics):
                     raise ValueError("SQLite sample missing attribution field")
                 attribution = sample["sqlite_attribution"]
@@ -279,6 +292,8 @@ def validate_result(result: dict[str, Any]) -> None:
                     raise ValueError("invalid SQLite attribution")
                 if sample["sqlite_lock_wait_ms"] is not None and sample["sqlite_lock_wait_count"] is None:
                     raise ValueError("lock wait duration requires lock wait count")
+                if not isinstance(sample["sqlite_transaction_ms"], (int, float)) or sample["sqlite_transaction_ms"] < 0:
+                    raise ValueError("transaction duration must be a non-negative number")
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
@@ -574,7 +589,7 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
                         "sqlite_transactions": metrics.transactions if metrics is not None else None,
-                        "sqlite_lock_ms": metrics.lock_ms if metrics is not None else None,
+                        "sqlite_transaction_ms": metrics.transaction_ms if metrics is not None else None,
                         "sqlite_lock_wait_ms": metrics.lock_wait_ms if metrics is not None else None,
                         "sqlite_lock_wait_count": metrics.lock_wait_count if metrics is not None else None,
                         "sqlite_errors": metrics.errors if metrics is not None else None,
