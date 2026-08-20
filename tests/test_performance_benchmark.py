@@ -129,13 +129,33 @@ def test_sqlite_store_cases_have_attributed_query_plans(tmp_path):
                 "sessionstore.get", "sessionstore.create", "sessionstore.activate",
                 "sessionstore.complete", "sessionstore.cancel", "sessionstore.add_membership",
                 "sessionstore.remove_membership")
+    expected_labels = {
+        "ticketstore.list.delivery": {"tickets.process list"},
+        "ticketstore.list.all": {"tickets ordered list"},
+        "ticketstore.get.hit": {"tickets.ticket_id lookup"},
+        "ticketstore.get.miss": {"tickets.ticket_id lookup"},
+        "ticketstore.children_of": {"tickets ordered list"},
+        "sessionstore.list": {"sessions ordered list"},
+        "sessionstore.get": {"sessions.session_id lookup"},
+        "sessionstore.create": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+        "sessionstore.activate": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+        "sessionstore.complete": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+        "sessionstore.cancel": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+        "sessionstore.add_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+        "sessionstore.remove_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+    }
     for case_id in case_ids:
         plans = getattr(cases[case_id], "_sqlite_plans")
         assert plans, case_id
         assert all(isinstance(plan["query"], str) and isinstance(plan["detail"], list) for plan in plans)
         assert all(all(isinstance(detail, str) for detail in plan["detail"]) for plan in plans)
-    assert any("tickets" in plan["query"] for plan in getattr(cases["ticketstore.get.hit"], "_sqlite_plans"))
+        assert {plan["query"] for plan in plans} == expected_labels[case_id]
+    assert any("USING INDEX" in detail or "USING INTEGER PRIMARY KEY" in detail
+               for detail in getattr(cases["ticketstore.get.hit"], "_sqlite_plans")[0]["detail"])
     assert any("sessions" in plan["query"] for plan in getattr(cases["sessionstore.get"], "_sqlite_plans"))
+    for case_id in expected_labels:
+        if case_id.startswith("sessionstore.") and case_id not in {"sessionstore.list", "sessionstore.get"}:
+            assert any("lifecycle read families" in item for item in getattr(cases[case_id], "_limitations"))
 
 
 def test_yaml_load_path_has_no_sqlite_plans(tmp_path):

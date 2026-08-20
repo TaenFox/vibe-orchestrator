@@ -57,8 +57,11 @@ SQLite cases connection factory устанавливается только harn
 `sqlite_busy_errors` per sample. `sqlite_attribution` содержит источник
 instrumentation и версию контракта. Для SQLite SQL cases benchmark сохраняет
 `sqlite_explain_query_plan` на уровне конкретного `case_id`: TicketStore покрывает
-process/full list и `ticket_id` lookup, SessionStore — list/get и lifecycle query
-families (`sessions`, `session_members`, `events`, а также ticket lookup).
+process/full list и `ticket_id` lookup, SessionStore — list/get и case-specific
+lifecycle read families (ticket validation и existing-session lookup, где они
+выполняются). Записи lifecycle в `sessions`, `session_members` и `events` не
+подменяются выдуманными DML plans; case содержит typed limitation о том, что
+`EXPLAIN QUERY PLAN` не даёт portable write-plan contract.
 Это статическое audit evidence формы запроса, а не trace фактически выполненных
 statements. TicketStore, SessionStore и BudgetLedger используют один factory,
 поэтому counters не смешиваются между компонентами или итерациями. Для
@@ -120,7 +123,8 @@ cache eviction и alternate filesystems capability-dependent; при недос�
 результат содержит причину и не формулирует portable comparison conclusion.
 Портативного точного busy-handler wait metric в Python 3.11 нет; для заполнения
 lock-wait fields потребуется explicit retry wrapper или platform-specific tracing.
-EXPLAIN зависит от версии SQLite и индексов; для DML фиксируются связанные
-read/query families, поскольку explain detail для записи не является универсальным
-контрактом. Сейчас выбран benchmark-only connection injection; production
-connection factory по умолчанию не меняется.
+EXPLAIN зависит от версии SQLite и индексов; для lifecycle DML фиксируются
+только фактически выполняемые связанные read/query families, поскольку explain
+detail для записи не является универсальным контрактом, а limitation сохраняет
+это различие явным. Сейчас выбран benchmark-only connection injection;
+production connection factory по умолчанию не меняется.

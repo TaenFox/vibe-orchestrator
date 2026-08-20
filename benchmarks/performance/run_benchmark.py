@@ -159,7 +159,14 @@ def _explain_plans(ledger: BudgetLedger) -> list[dict[str, Any]]:
 
 
 def _store_explain_specs(case_id: str) -> list[tuple[str, str, tuple[Any, ...]]]:
-    """Return only query families used by this benchmark case."""
+    """Return the SELECT query families executed by this benchmark case.
+
+    Session lifecycle cases also perform INSERT/UPDATE/DELETE statements.  Those
+    statements are deliberately not fabricated as plans: SQLite's
+    ``EXPLAIN QUERY PLAN`` is a read-plan API, so the result records their
+    limitation separately while retaining plans for the reads that precede or
+    validate each write.
+    """
     ticket_lookup = ("tickets.ticket_id lookup", "SELECT payload_json FROM tickets WHERE ticket_id = ?", ("FIX-MISSING",))
     ticket_process = ("tickets.process list", "SELECT payload_json FROM tickets WHERE process = ? ORDER BY ticket_id", ("delivery",))
     ticket_all = ("tickets ordered list", "SELECT payload_json FROM tickets ORDER BY ticket_id", ())
@@ -180,9 +187,29 @@ def _store_explain_specs(case_id: str) -> list[tuple[str, str, tuple[Any, ...]]]
     if case_id == "sessionstore.membership_validation.error":
         return [ticket_lookup]
     if case_id == "sessionstore.validation.overlap.error":
-        return [session_list, ticket_lookup]
-    if case_id.startswith("sessionstore.") and case_id != "sessionstore.load_path":
-        return [session_lookup, session_members, session_events, ticket_lookup]
+        return [ticket_lookup, session_lookup]
+    lifecycle_cases = {
+        "sessionstore.create", "sessionstore.activate", "sessionstore.complete",
+        "sessionstore.cancel", "sessionstore.add_membership",
+        "sessionstore.remove_membership",
+    }
+    if case_id in lifecycle_cases:
+        # isolated_session() creates a session before the case action.  Every
+        # lifecycle case therefore validates its ticket and reads the existing
+        # session during save(); complete() additionally calls get(), but that
+        # is the same query family and is represented once.
+        return [ticket_lookup, session_lookup]
+    return []
+
+
+def _store_explain_limitations(case_id: str) -> list[str]:
+    """Explain why write-only store work has no separate EXPLAIN plan."""
+    if case_id in {
+        "sessionstore.create", "sessionstore.activate", "sessionstore.complete",
+        "sessionstore.cancel", "sessionstore.add_membership",
+        "sessionstore.remove_membership",
+    }:
+        return ["EXPLAIN QUERY PLAN covers lifecycle read families; session writes to sessions, session_members and events have no portable DML plan"]
     return []
 
 
@@ -500,6 +527,8 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         limitations = [http_limitation] if http_limitation and component == "HTTP" else []
         if component in {"TicketStore", "SessionStore"} and case_id.endswith(".load_path"):
             limitations.append("case does not use SQLite; load_path reads YAML snapshot")
+        if use_database and component == "SessionStore":
+            limitations.extend(_store_explain_limitations(case_id))
         setattr(fn, "_limitations", limitations)
     return cases
 
