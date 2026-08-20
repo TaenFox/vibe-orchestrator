@@ -220,13 +220,16 @@ def load_dataset(path: Path) -> dict[str, Any]:
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    required = {"schema_version", "seed", "storage_mode", "counts", "dimensions", "hashes", "redaction_policy", "logical"}
+    required = {"schema_version", "source_kind", "seed", "storage_mode", "counts", "dimensions", "hashes",
+                "fixture_files_sha256", "logical_checksum", "materialized_tree_sha256", "redaction_policy", "logical"}
     missing = required - set(manifest)
     if missing:
         raise ValueError(f"manifest missing fields: {sorted(missing)}")
     counts = manifest["counts"]
     if any(not isinstance(counts.get(key), int) or counts[key] < 0 for key in ("tickets", "sessions", "ledger_runs")):
         raise ValueError("manifest counts must be non-negative integers")
+    if manifest["schema_version"] != SCHEMA_VERSION or manifest["source_kind"] != "synthetic":
+        raise ValueError("invalid manifest schema or source kind")
     if manifest["storage_mode"] not in {"sqlite", "yaml"} or manifest["redaction_policy"] != REDACTION_POLICY:
         raise ValueError("invalid manifest storage or redaction policy")
     dimensions = manifest["dimensions"]
@@ -241,6 +244,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             raise ValueError("profile dimensions do not match materialized fixture")
         if counts["sessions"] != expected["sessions"] or counts["ledger_runs"] != expected["ledger_runs"]:
             raise ValueError("manifest counts do not match materialized profile")
+    if dimensions.get("sizes") != SIZES:
+        raise ValueError("manifest size registry does not match fixture contract")
     run_counts = dimensions.get("runs_per_ticket_counts", {})
     if set(run_counts) != {str(value) for value in RUNS_PER_TICKET} or sum(run_counts.values()) != counts["tickets"]:
         raise ValueError("runs_per_ticket counts do not match materialized tickets")
@@ -254,9 +259,22 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("all budget states must be materialized")
     if sum(session_states.values()) != counts["sessions"]:
         raise ValueError("session state counts do not match materialized sessions")
-    if dimensions.get("ticket_status", {}).get("todo", 0) + sum(dimensions.get("ticket_status", {}).values()) == 0:
+    ticket_status = dimensions.get("ticket_status", {})
+    if set(ticket_status) != set(STATUSES) or any(not isinstance(value, int) or value < 0 for value in ticket_status.values()):
+        raise ValueError("ticket status counts are incomplete")
+    if ticket_status.get("todo", 0) + sum(ticket_status.values()) == 0:
         raise ValueError("ticket state distribution is empty")
     logical = manifest["logical"]
+    if manifest.get("logical_checksum") != manifest["hashes"].get("manifest_sha256"):
+        raise ValueError("logical checksum aliases do not match")
+    if manifest.get("fixture_files_sha256") != manifest["hashes"].get("manifest_sha256"):
+        raise ValueError("fixture checksum must identify the logical fixture")
+    if logical.get("schema_version") != SCHEMA_VERSION or logical.get("seed") != manifest["seed"] or logical.get("size") != size or logical.get("storage_mode") != manifest["storage_mode"]:
+        raise ValueError("logical manifest dimensions do not match envelope")
+    if logical.get("ticket_count") != counts["tickets"] or logical.get("session_states") != session_states or logical.get("budget_states") != budget_states:
+        raise ValueError("logical manifest counts do not match materialized dimensions")
+    if logical.get("ticket_status") != ticket_status or logical.get("runs_per_ticket") != run_counts or logical.get("ledger_runs") != counts["ledger_runs"]:
+        raise ValueError("logical manifest workload dimensions do not match envelope")
     expected_hash = _logical_hash(logical) if isinstance(logical, dict) else None
     if manifest["hashes"].get("manifest_sha256") != expected_hash:
         raise ValueError("manifest logical checksum does not match logical payload")

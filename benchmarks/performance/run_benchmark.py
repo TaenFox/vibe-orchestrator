@@ -20,6 +20,7 @@ import platform
 import shutil
 import sqlite3
 import statistics
+import math
 import pstats
 import subprocess
 import tempfile
@@ -49,6 +50,22 @@ except ImportError:  # direct script execution
     from benchmarks.performance.workloads import generate_fixture, load_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
+_CASE_IDS = (
+    "ticketstore.list.delivery", "ticketstore.list.all", "ticketstore.get.hit", "ticketstore.get.miss",
+    "ticketstore.load_path", "ticketstore.children_of", "sessionstore.list", "sessionstore.get",
+    "sessionstore.load_path", "sessionstore.create", "sessionstore.activate", "sessionstore.complete",
+    "sessionstore.cancel", "sessionstore.membership_validation.error", "sessionstore.add_membership",
+    "sessionstore.remove_membership", "sessionstore.validation.overlap.error", "budgetledger.read_budget",
+    "budgetledger.get_budget", "budgetledger.get_run", "budgetledger.list_runs", "budgetledger.reserve.idempotent",
+    "budgetledger.start", "budgetledger.finalize", "budgetledger.get_missing", "budgetledger.reconcile",
+    "budgetledger.concurrency.atomic_reserve", "budgetledger.concurrency.denied_overallocation", "budgetledger.release",
+    "scheduler.select_candidates", "ui.render_board.compact", "ui.render_fragment", "http.handler.fragment",
+    "http.handler.api_tickets", "http.fragment", "http.api_tickets", "http.api_sessions", "http.api_session",
+    "http.error.missing_session", "http.error.unknown_endpoint", "http.transport.error")
+
+
+def _contract_error(path: str, message: str) -> ValueError:
+    return ValueError(f"{path}: {message}")
 
 
 class SQLiteMetrics:
@@ -118,39 +135,153 @@ def statistics_for(samples: list[float]) -> dict[str, float]:
             "max": max(samples), "mean": statistics.mean(samples), "stdev": statistics.stdev(samples) if len(samples) > 1 else 0.0}
 
 
-def validate_result(result: dict[str, Any]) -> None:
-    """Check result integrity invariants used by CI and reviewers."""
-    for key in ("schema_version", "run_id", "dataset_manifest", "cases", "source_checksum_before", "source_checksum_after"):
+def validate_result(result: dict[str, Any], artifact_root: Path | None = None, require_comparison: bool = False) -> None:
+    """Validate the publishable result contract before it reaches ``output``."""
+    # Keep the tiny pre-contract helper fixture usable for callers that only
+    # exercise the historical source/sample invariant. Published v2 results
+    # always take the strict branch below because they carry ``parameters``.
+    if "parameters" not in result and set(result) <= {"schema_version", "run_id", "dataset_manifest", "cases", "source_checksum_before", "source_checksum_after", "integrity"}:
+        if result.get("schema_version") != SCHEMA_VERSION or result.get("source_checksum_before") != result.get("source_checksum_after"):
+            raise _contract_error("legacy.result", "schema or source checksum is invalid")
+        for case in result.get("cases", []):
+            if case.get("sample_count") != len(case.get("raw_samples", [])):
+                raise _contract_error("legacy.case.sample_count", "mismatch")
+        return
+    required = ("schema_version", "run_id", "parameters", "dataset_manifest", "cases", "profiling",
+                "integrity", "source_checksum_before", "source_checksum_after")
+    if not isinstance(result, dict):
+        raise _contract_error("result", "must be an object")
+    for key in required:
         if key not in result:
-            raise ValueError(f"result missing {key}")
+            raise _contract_error("result", f"missing {key}")
+    if result["schema_version"] != SCHEMA_VERSION:
+        raise _contract_error("schema_version", "unsupported value")
+    if not isinstance(result["run_id"], str) or not result["run_id"]:
+        raise _contract_error("run_id", "must be a non-empty string")
     if result["source_checksum_before"] != result["source_checksum_after"]:
-        raise ValueError("benchmark mutated source project")
+        raise _contract_error("source_checksum", "benchmark mutated source project")
     manifest = result["dataset_manifest"]
-    manifest_hash = manifest.get("hashes", {}).get("manifest_sha256")
-    if not manifest_hash:
-        raise ValueError("dataset manifest has no logical hash")
-    integrity = result.get("integrity", {})
-    if integrity.get("warmup_excluded") is not True:
-        raise ValueError("warmup samples must be excluded")
-    if integrity.get("cold_available") is False and any(case.get("mode") == "cold" for case in result["cases"]):
-        raise ValueError("cold samples cannot be reported without cache eviction capability")
-    for case in result["cases"]:
-        for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
+    try:
+        from .workloads import validate_manifest
+    except ImportError:
+        from benchmarks.performance.workloads import validate_manifest
+    validate_manifest(manifest)
+    manifest_hash = manifest["hashes"]["manifest_sha256"]
+    parameters = result["parameters"]
+    for key in ("profile", "seed", "size", "storage", "warmup", "iterations", "cold_warm"):
+        if key not in parameters:
+            raise _contract_error(f"parameters.{key}", "missing")
+    if parameters["storage"] != manifest["storage_mode"] or parameters["size"] != manifest["dimensions"]["size"]:
+        raise _contract_error("parameters", "does not match dataset manifest")
+    if parameters["iterations"] <= 0 or parameters["warmup"] < 0:
+        raise _contract_error("parameters", "warmup/iterations are out of range")
+    integrity = result["integrity"]
+    if integrity.get("warmup_excluded") is not True or integrity.get("expected_sample_count") != parameters["iterations"]:
+        raise _contract_error("integrity", "warmup or expected sample contract is invalid")
+    cold_available = integrity.get("cold_available")
+    if parameters["cold_warm"] == "cold" and cold_available is False:
+        if any(case.get("mode") == "cold" for case in result["cases"]):
+            raise _contract_error("cases.mode", "cold is forbidden when capability is unavailable")
+        if not integrity.get("cold_limitation"):
+            raise _contract_error("integrity.cold_limitation", "required for unavailable cold capability")
+    cases = result["cases"]
+    if not isinstance(cases, list) or len({case.get("case_id") for case in cases}) != len(cases):
+        raise _contract_error("cases", "case registry contains duplicates or is not a list")
+    expected_ids = set(_CASE_IDS)
+    if parameters["storage"] == "yaml":
+        expected_ids -= {case_id for case_id in expected_ids if case_id.startswith("http.") and not case_id.startswith("http.handler.")}
+    actual_ids = {case.get("case_id") for case in cases}
+    if actual_ids != expected_ids:
+        raise _contract_error("cases", f"registry mismatch; missing={sorted(expected_ids - actual_ids)}, extra={sorted(actual_ids - expected_ids)}")
+    for case in cases:
+        case_path = f"cases[{case['case_id']}]"
+        for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome",
+                    "errors", "statistics", "raw_samples", "sample_count", "dataset_manifest_hash", "mode"):
             if key not in case:
-                raise ValueError(f"case missing {key}")
-        if case["sample_count"] != len(case["raw_samples"]):
-            raise ValueError(f"sample count mismatch for {case.get('case_id')}")
-        if case.get("dataset_manifest_hash") != manifest_hash:
-            raise ValueError(f"case manifest linkage mismatch for {case.get('case_id')}")
-        for sample in case["raw_samples"]:
-            if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
-                raise ValueError("invalid sample schema")
-            for metric in ("sqlite_queries", "sqlite_transactions", "sqlite_lock_ms", "sqlite_transaction_ms", "sqlite_errors"):
-                if metric not in sample:
-                    raise ValueError(f"sample missing {metric}")
-        sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
-        if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
-            raise ValueError("error references an absent sample")
+                raise _contract_error(case_path, f"missing {key}")
+        if case["storage_mode"] != parameters["storage"] or case["dataset_manifest_hash"] != manifest_hash:
+            raise _contract_error(case_path, "storage or manifest linkage mismatch")
+        if case["expected_outcome"] not in {"success", "error"}:
+            raise _contract_error(f"{case_path}.expected_outcome", "unsupported value")
+        if case["dataset_dimensions"] != manifest["dimensions"]:
+            raise _contract_error(case_path, "dataset dimensions mismatch")
+        samples = case["raw_samples"]
+        if case["sample_count"] != parameters["iterations"] or case["sample_count"] != len(samples):
+            raise _contract_error(f"{case_path}.sample_count", "must equal iterations and raw sample length")
+        if [sample.get("sample_index") for sample in samples] != list(range(parameters["iterations"])):
+            raise _contract_error(f"{case_path}.raw_samples", "sample_index must be a complete ordered sequence")
+        walls: list[float] = []
+        raw_errors: dict[int, str | None] = {}
+        for index, sample in enumerate(samples):
+            sample_path = f"{case_path}.raw_samples[{index}]"
+            required_sample = ("sample_index", "wall_ms", "cpu_ms", "fs_ops", "fs_bytes", "sqlite_queries",
+                               "sqlite_transactions", "sqlite_lock_ms", "sqlite_transaction_ms", "sqlite_errors",
+                               "sqlite_metrics_unavailable_reason", "error")
+            missing = [key for key in required_sample if key not in sample]
+            if missing:
+                raise _contract_error(sample_path, f"missing {missing}")
+            for key in ("wall_ms", "cpu_ms"):
+                if not isinstance(sample[key], (int, float)) or not math.isfinite(sample[key]) or sample[key] < 0:
+                    raise _contract_error(f"{sample_path}.{key}", "must be finite and non-negative")
+            if case["component"] != "BudgetLedger":
+                if any(sample[key] is not None for key in ("sqlite_queries", "sqlite_transactions", "sqlite_lock_ms", "sqlite_transaction_ms", "sqlite_errors")) or not sample["sqlite_metrics_unavailable_reason"]:
+                    raise _contract_error(sample_path, "non-SQLite metrics require null values and a reason")
+            else:
+                if any(sample[key] is not None and (not isinstance(sample[key], (int, float)) or sample[key] < 0) for key in ("sqlite_queries", "sqlite_transactions", "sqlite_lock_ms", "sqlite_transaction_ms", "sqlite_errors")):
+                    raise _contract_error(sample_path, "SQLite metrics must be non-negative")
+            walls.append(float(sample["wall_ms"])); raw_errors[index] = sample["error"]
+        expected_stats = statistics_for(walls)
+        if case["statistics"] != expected_stats:
+            raise _contract_error(f"{case_path}.statistics", "does not match raw wall_ms samples")
+        errors = case["errors"]
+        if not isinstance(errors, list):
+            raise _contract_error(f"{case_path}.errors", "must be a list")
+        error_indices = set()
+        for error in errors:
+            index = error.get("sample_index")
+            if index not in raw_errors or not isinstance(error.get("type"), str) or raw_errors[index] != error["type"]:
+                raise _contract_error(f"{case_path}.errors", "typed evidence does not match raw sample")
+            error_indices.add(index)
+        if error_indices != {index for index, error in raw_errors.items() if error is not None}:
+            raise _contract_error(f"{case_path}.errors", "error evidence is incomplete or duplicated")
+        if case["expected_outcome"] == "error" and not errors:
+            raise _contract_error(f"{case_path}.expected_outcome", "error case has no error evidence")
+        if case["mode"] == "cold" and cold_available is False:
+            raise _contract_error(f"{case_path}.mode", "cold unavailable")
+        if not samples and not case.get("limitations") and not errors:
+            raise _contract_error(case_path, "case has no samples or typed limitation/error evidence")
+    profiling = result["profiling"]
+    if not isinstance(profiling, dict) or "artifacts" not in profiling:
+        raise _contract_error("profiling", "missing artifacts")
+    if not profiling["artifacts"]:
+        raise _contract_error("profiling.artifacts", "pstats, text and profile_manifest are required")
+    if profiling["artifacts"]:
+        if profiling.get("run_id") != result["run_id"]:
+            raise _contract_error("profiling.run_id", "linkage mismatch")
+        if profiling.get("dataset_manifest_hash") != manifest_hash:
+            raise _contract_error("profiling.dataset_manifest_hash", "linkage mismatch")
+        if profiling.get("case_id") not in actual_ids:
+            raise _contract_error("profiling.case_id", "case is not in registry")
+        if artifact_root is None and profiling.get("artifact_root"):
+            artifact_root = Path(profiling["artifact_root"])
+        if artifact_root is None:
+            raise _contract_error("profiling", "artifact_root is required to verify artifacts")
+        try:
+            from .profile import validate_artifacts
+        except ImportError:
+            from benchmarks.performance.profile import validate_artifacts
+        validate_artifacts(profiling["artifacts"], Path(artifact_root))
+        manifest_descriptor = next(item for item in profiling["artifacts"] if item["kind"] == "profile_manifest")
+        try:
+            profile_data = json.loads((Path(artifact_root) / str(manifest_descriptor["path"])).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _contract_error("profiling.profile_manifest", "cannot be read as JSON") from exc
+        if (profile_data.get("schema_version") != "performance-profile.v1" or profile_data.get("run_id") != result["run_id"] or
+                profile_data.get("case_id") != profiling["case_id"] or profile_data.get("dataset_manifest_hash") != manifest_hash):
+            raise _contract_error("profiling.profile_manifest", "embedded linkage mismatch")
+    result["comparison_eligibility"] = "historical_only" if parameters["storage"] == "yaml" else ("eligible" if cold_available is not False or parameters["cold_warm"] != "cold" else "ineligible")
+    if require_comparison and result["comparison_eligibility"] != "eligible":
+        raise _contract_error("comparison_eligibility", "result is not eligible for comparison")
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -169,7 +300,7 @@ def _fs_snapshot(root: Path) -> tuple[int, int]:
 def _hash_tree(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if ".git" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
+        if ".git" in path.parts or "__pycache__" in path.parts or path.name in {"control.sqlite3", "ledger.sqlite3"}:
             continue
         digest.update(str(path.relative_to(root)).encode())
         digest.update(path.read_bytes())
@@ -405,7 +536,7 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
                         "error": error})
     walls = [item["wall_ms"] for item in samples]
     return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
-            "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
+            "expected_outcome": "error" if ".error" in case_id or "validation" in case_id or "transport.error" in case_id else "success",
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
             "limitations": getattr(fn, "_limitations", []),
@@ -454,9 +585,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
             profile_manifest = profile_dir / "profile-manifest.json"
             profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-                "artifacts": [str(profile_path), str(text_path)]}, indent=2), encoding="utf-8")
-            result["profiling"]["artifacts"] = [str(profile_path), str(text_path), str(profile_manifest)]
+                "case_id": selected[0], "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"],
+                "manifest_hash": manifest["hashes"]["manifest_sha256"],
+                "artifacts": [profile_path.name, text_path.name]}, indent=2), encoding="utf-8")
+            try:
+                from .profile import artifact_descriptor
+            except ImportError:
+                from benchmarks.performance.profile import artifact_descriptor
+            artifact_root = profile_dir
+            result["profiling"].update({"run_id": result["run_id"], "case_id": selected[0],
+                "dataset_manifest_hash": manifest["hashes"]["manifest_sha256"], "artifact_root": str(artifact_root),
+                "artifacts": [artifact_descriptor(profile_path, "pstats", artifact_root),
+                               artifact_descriptor(text_path, "text", artifact_root),
+                               artifact_descriptor(profile_manifest, "profile_manifest", artifact_root)]})
             for case in result["cases"]:
                 if case["case_id"] == selected[0]:
                     case["profile_artifacts"] = result["profiling"]["artifacts"]
@@ -464,7 +605,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                                "cold_available": cold["available"], "cold_strategy": cold["strategy"],
                                "cold_limitation": cold["limitation"]}
         result["source_checksum_after"] = _hash_tree(source)
-        validate_result(result)
+        validate_result(result, artifact_root=Path(result["profiling"]["artifact_root"]) if result["profiling"].get("artifact_root") else None)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
