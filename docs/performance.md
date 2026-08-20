@@ -59,7 +59,9 @@ instrumentation и версию контракта. Для SQLite SQL cases benc
 `sqlite_explain_query_plan` на уровне конкретного `case_id`: TicketStore покрывает
 process/full list и `ticket_id` lookup, SessionStore — list/get и case-specific
 lifecycle read families (ticket validation и existing-session lookup, где они
-выполняются). Записи lifecycle в `sessions`, `session_members` и `events` не
+выполняются). Validation-error cases получают только query families, достигнутые
+до ошибки; например, membership/overlap validation получает `tickets.ticket_id`
+lookup без нерелевантного `sessions` lookup. Записи lifecycle в `sessions`, `session_members` и `events` не
 подменяются выдуманными DML plans; case содержит typed limitation о том, что
 `EXPLAIN QUERY PLAN` не даёт portable write-plan contract.
 Это статическое audit evidence формы запроса, а не trace фактически выполненных

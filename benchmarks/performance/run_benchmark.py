@@ -187,7 +187,11 @@ def _store_explain_specs(case_id: str) -> list[tuple[str, str, tuple[Any, ...]]]
     if case_id == "sessionstore.membership_validation.error":
         return [ticket_lookup]
     if case_id == "sessionstore.validation.overlap.error":
-        return [ticket_lookup, session_lookup]
+        # Membership validation fails before ``create`` reaches ``save``.
+        # In particular, no SessionStore.get() is part of this case's
+        # execution, so attributing a sessions lookup here would be evidence
+        # from a different query path.
+        return [ticket_lookup]
     lifecycle_cases = {
         "sessionstore.create", "sessionstore.activate", "sessionstore.complete",
         "sessionstore.cancel", "sessionstore.add_membership",
