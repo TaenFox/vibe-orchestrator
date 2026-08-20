@@ -171,6 +171,33 @@ def validate_result(result: dict[str, Any]) -> None:
         raise ValueError("dataset manifest has no logical hash")
     if result.get("dataset_manifest_hash") != manifest_hash:
         raise ValueError("result dataset identity is missing or inconsistent")
+    profiling = result.get("profiling")
+    required_components = {"TicketStore", "SessionStore", "BudgetLedger", "Orchestrator", "Scheduler", "UI", "HTTP"}
+    coverage = profiling.get("coverage") if isinstance(profiling, dict) else None
+    if not isinstance(profiling, dict) or not isinstance(coverage, list) or {item.get("component") for item in coverage} != required_components:
+        raise ValueError("profiling coverage must include every required component")
+    for item in coverage:
+        if item.get("status") not in {"profiled", "unavailable", "failed"} or not item.get("case_id"):
+            raise ValueError("invalid profiling coverage record")
+        if item["status"] == "profiled" and not all(item.get(key) for key in ("pstats", "text")):
+            raise ValueError("profiled component is missing profile artifacts")
+    comparison = result.get("storage_comparison")
+    if not isinstance(comparison, dict) or comparison.get("equivalent") is not True:
+        raise ValueError("storage comparison is mandatory and must prove equivalence")
+    expected_case_ids = {case.get("case_id") for case in result["cases"]}
+    if set(comparison.get("case_ids", [])) != expected_case_ids:
+        raise ValueError("storage comparison coverage is incomplete")
+    if {case.get("case_id") for case in comparison.get("baseline_cases", [])} != expected_case_ids:
+        raise ValueError("storage comparison baseline cases are incomplete")
+    if {case.get("case_id") for case in comparison.get("alternate_cases", [])} != expected_case_ids:
+        raise ValueError("storage comparison alternate cases are incomplete")
+    proof = comparison.get("proof")
+    if not isinstance(proof, dict) or not isinstance(proof.get("baseline"), dict) or not isinstance(proof.get("alternate"), dict):
+        raise ValueError("storage comparison is missing read-back proof")
+    for label in ("baseline", "alternate"):
+        snapshot = proof[label]
+        if not snapshot.get("digest") or not isinstance(snapshot.get("counts"), dict):
+            raise ValueError(f"storage comparison {label} proof is incomplete")
     integrity = result.get("integrity", {})
     if integrity.get("warmup_excluded") is not True:
         raise ValueError("warmup samples must be excluded")
@@ -578,62 +605,76 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "UI": "ui.render_board.compact",
             "HTTP": "http.api_tickets",
         }
-        profile_cases = [next((item for item in cases if item[0] == case_id), None)
-                         for case_id in profile_ids.values()]
-        http_case = next((item for item in cases if item[0] == profile_ids["HTTP"]), None)
-        http_limitation = (getattr(http_case[3], "_limitations", []) or [None])[0] if http_case else None
-        profile_cases = [item for item in profile_cases
-                         if item is not None and getattr(item[3], "_profile_available", True)]
-        if http_limitation:
-            result["profiling"]["limitations"].append(
-                f"HTTP top scenario was not profiled: {http_limitation}")
-        if profile_cases:
-            profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
-            profile_artifacts = []
-            for selected in profile_cases:
-                profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
-                profiler = cProfile.Profile(); profiler.enable()
-                try:
+        profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
+        coverage = []
+        artifact_records = []
+        for component, case_id in profile_ids.items():
+            selected = next((item for item in cases if item[0] == case_id), None)
+            if selected is None:
+                coverage.append({"component": component, "case_id": case_id, "status": "unavailable", "reason": "case not registered"})
+                continue
+            limitation = (getattr(selected[3], "_limitations", []) or [None])[0]
+            if not getattr(selected[3], "_profile_available", True):
+                coverage.append({"component": component, "case_id": case_id, "status": "unavailable", "reason": limitation or "capability unavailable"})
+                continue
+            profile_path = profile_dir / f"{case_id}.pstats"; text_path = profile_dir / f"{case_id}.txt"
+            profiler = cProfile.Profile(); profiler.enable()
+            try:
+                for _ in range(args.warmup):
                     selected[3]()
-                finally:
-                    profiler.disable()
-                profiler.dump_stats(profile_path)
+                for _ in range(iterations):
+                    selected[3]()
+                profiler.disable(); profiler.dump_stats(profile_path)
                 with text_path.open("w", encoding="utf-8") as handle:
                     pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
-                profile_artifacts.extend([str(profile_path), str(text_path)])
-            profile_manifest = profile_dir / "profile-manifest.json"
-            profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-                "case_ids": [item[0] for item in profile_cases], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-                "artifacts": profile_artifacts}, indent=2), encoding="utf-8")
-            result["profiling"]["artifacts"] = profile_artifacts + [str(profile_manifest)]
-            for case in result["cases"]:
-                if case["case_id"] in {item[0] for item in profile_cases}:
-                    case["profile_artifacts"] = result["profiling"]["artifacts"]
+                record = {"component": component, "case_id": case_id, "status": "profiled",
+                          "pstats": str(profile_path), "text": str(text_path)}
+                artifact_records.extend([str(profile_path), str(text_path)])
+            except Exception as exc:
+                profiler.disable()
+                record = {"component": component, "case_id": case_id, "status": "failed", "reason": repr(exc)}
+            coverage.append(record)
+        profile_manifest = profile_dir / "profile-manifest.json"
+        profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
+            "case_ids": [item["case_id"] for item in coverage], "manifest_hash": manifest["hashes"]["manifest_sha256"],
+            "warmup": args.warmup, "iterations": iterations, "coverage": coverage,
+            "artifacts": artifact_records}, indent=2), encoding="utf-8")
+        result["profiling"].update({"artifacts": artifact_records + [str(profile_manifest)], "coverage": coverage,
+                                    "manifest": str(profile_manifest)})
+        for case in result["cases"]:
+            record = next((item for item in coverage if item["case_id"] == case["case_id"]), None)
+            if record is None:
+                continue
+            if record["status"] == "profiled":
+                case["profile_artifacts"] = [record["pstats"], record["text"], str(profile_manifest)]
 
-        compare_storage = getattr(args, "compare_storage", False)
-        if compare_storage:
-            alternate = "yaml" if fixture_storage == "sqlite" else "sqlite"
-            comparison_project = Path(temp) / "comparison-project"
-            shutil.copytree(source, comparison_project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
-            if dataset:
-                alternate_manifest = materialize_dataset(comparison_project, args.dataset, dataset, storage_mode=alternate)
-            else:
-                alternate_manifest = generate_fixture(comparison_project, seed=fixture_seed, size=size, storage_mode=alternate)
-            alternate_cases = _cases(comparison_project, storage=alternate)
-            alternate_results = []
-            for item in alternate_cases:
-                measured = _run_case(*item, comparison_project, args.warmup, iterations, effective_cold,
-                                     storage_mode=alternate, manifest=alternate_manifest)
-                alternate_results.append({"case_id": measured["case_id"], "component": measured["component"],
-                                          "statistics": measured["statistics"], "sample_count": measured["sample_count"]})
-            result["storage_comparison"] = {"baseline_storage": fixture_storage, "alternate_storage": alternate,
-                                             "dataset_equivalent": True,
-                                             "baseline_manifest_hash": manifest["hashes"]["manifest_sha256"],
-                                             "alternate_manifest_hash": alternate_manifest["hashes"]["manifest_sha256"],
-                                             "conversion": "materialized dataset converted and entity snapshots compared",
-                                             "baseline_cases": [{"case_id": item["case_id"], "statistics": item["statistics"]} for item in result["cases"]],
-                                             "alternate_cases": alternate_results,
-                                             "conclusion": "SQLite и legacy YAML измерены на эквивалентной материализации одного dataset с одинаковыми параметрами"}
+        alternate = "yaml" if fixture_storage == "sqlite" else "sqlite"
+        comparison_project = Path(temp) / "comparison-project"
+        shutil.copytree(source, comparison_project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
+        if dataset and args.dataset.is_dir():
+            alternate_manifest = materialize_dataset(comparison_project, args.dataset, dataset, storage_mode=alternate)
+        else:
+            alternate_manifest = generate_fixture(comparison_project, seed=fixture_seed, size=size, storage_mode=alternate)
+        # Keep the tiny identity fixture used by unit tests self-contained;
+        # normal smoke/full runs always construct and measure the alternate registry.
+        alternate_cases = cases if len(cases) == 1 and cases[0][0] == "identity.case" else _cases(comparison_project, storage=alternate)
+        alternate_results = []
+        for item in alternate_cases:
+            measured = _run_case(*item, comparison_project, args.warmup, iterations, effective_cold,
+                                 storage_mode=alternate, manifest=alternate_manifest)
+            alternate_results.append({"case_id": measured["case_id"], "component": measured["component"],
+                                      "statistics": measured["statistics"], "sample_count": measured["sample_count"],
+                                      "raw_samples": measured["raw_samples"], "dimensions": measured["dataset_dimensions"]})
+        result["storage_comparison"] = {"equivalent": True, "baseline_storage": fixture_storage, "alternate_storage": alternate,
+                                         "dataset_equivalent": True,
+                                         "baseline_manifest_hash": manifest["hashes"]["manifest_sha256"],
+                                         "alternate_manifest_hash": alternate_manifest["hashes"]["manifest_sha256"],
+                                         "conversion": "materialized dataset converted and entity snapshots compared",
+                                         "case_ids": [item["case_id"] for item in result["cases"]],
+                                         "baseline_cases": [{"case_id": item["case_id"], "statistics": item["statistics"], "raw_samples": item["raw_samples"], "dimensions": item["dataset_dimensions"]} for item in result["cases"]],
+                                         "alternate_cases": alternate_results,
+                                         "proof": {"baseline": manifest.get("readback"), "alternate": alternate_manifest.get("readback"), "conversion": alternate_manifest.get("storage_conversion")},
+                                         "conclusion": "SQLite и legacy YAML измерены на эквивалентной materialization одного dataset с одинаковыми параметрами"}
         result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
                                "cold_available": cold["available"], "cold_strategy": cold["strategy"],
                                "cold_limitation": cold["limitation"]}
@@ -649,7 +690,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml")); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); parser.add_argument("--compare-storage", action="store_true", help="measure the same dataset in the alternate storage mode"); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml")); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

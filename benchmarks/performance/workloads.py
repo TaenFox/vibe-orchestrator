@@ -6,6 +6,7 @@ import json
 import random
 import shutil
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -250,7 +251,8 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
             raise ValueError(f"unsupported materialized budget state: {status}")
         budget_counts[status] += 1
     logical = _logical_manifest(seed, size, storage_mode, statuses, ticket_ids, session_counts, actual_ledger_count, budget_counts, run_counts)
-    materialized_checksum = _hash_tree(project)
+    materialized_checksum = _hash_tree(project / ".vibe")
+    readback = _readback_snapshot(project, storage_mode)
     manifest = {
         "schema_version": SCHEMA_VERSION, "source_kind": "synthetic", "seed": seed,
         "storage_mode": storage_mode, "hashes": {"manifest_sha256": logical["sha256"]},
@@ -269,6 +271,7 @@ def generate_fixture(project: Path, *, seed: int = 35527, size: str = "small",
         # provenance for the actual YAML/SQLite materialization.
         "fixture_files_sha256": logical["sha256"],
         "logical_checksum": logical["sha256"], "materialized_tree_sha256": materialized_checksum,
+        "dataset_tree_sha256": materialized_checksum, "readback": readback,
         "redaction_policy": REDACTION_POLICY,
         "logical": logical["logical"],
     }
@@ -300,12 +303,41 @@ def _storage_snapshot(project: Path, storage_mode: str) -> dict[str, Any]:
     }
 
 
+def _readback_snapshot(project: Path, storage_mode: str) -> dict[str, Any]:
+    """Read materialized entities and authoritative ledger content."""
+    snapshot = _storage_snapshot(project, storage_mode)
+    ledger = BudgetLedger(project)
+    with sqlite3.connect(ledger.path) as database:
+        database.row_factory = sqlite3.Row
+        budgets = [dict(row) for row in database.execute(
+            "SELECT * FROM budgets WHERE scope = 'ticket' ORDER BY budget_id").fetchall()]
+        runs = [dict(row) for row in database.execute(
+            "SELECT * FROM runs ORDER BY reserved_at, run_id").fetchall()]
+    for row in budgets + runs:
+        for key in list(row):
+            if key.endswith("_json"):
+                encoded = row.pop(key)
+                row[key[:-5]] = json.loads(encoded) if encoded is not None else None
+    payload = {"tickets": snapshot["tickets"], "sessions": snapshot["sessions"],
+               "budgets": budgets, "runs": runs}
+    return {
+        "digest": _logical_hash(payload),
+        "counts": {"tickets": len(payload["tickets"]), "sessions": len(payload["sessions"]),
+                    "budgets": len(budgets), "ledger_runs": len(runs)},
+        "ticket_ids": sorted(payload["tickets"]), "session_ids": sorted(payload["sessions"]),
+        "ledger_owners": [list(item) for item in sorted(
+            (row["run_id"], row["ticket_id"], row.get("ticket_budget_id")) for row in runs)],
+        "budget_statuses": {row["budget_id"]: row["status"] for row in budgets},
+    }
+
+
 def _convert_storage(project: Path, source_storage: str, target_storage: str) -> dict[str, Any]:
     """Convert control-plane materialization without regenerating the dataset."""
     if source_storage == target_storage:
-        return {"equivalent": True, "source_counts": {"tickets": 0, "sessions": 0},
-                "target_counts": {"tickets": 0, "sessions": 0}}
-    snapshot = _storage_snapshot(project, source_storage)
+        proof = _readback_snapshot(project, source_storage)
+        return {"equivalent": True, "source": proof, "target": proof}
+    before = _readback_snapshot(project, source_storage)
+    entity_snapshot = _storage_snapshot(project, source_storage)
     vibe = Path(project) / ".vibe"
     database = vibe / "control.sqlite3"
     for sidecar in (database, database.with_name(database.name + "-wal"), database.with_name(database.name + "-shm")):
@@ -315,26 +347,25 @@ def _convert_storage(project: Path, source_storage: str, target_storage: str) ->
         shutil.rmtree(vibe / "sessions", ignore_errors=True)
         tickets = TicketStore(project, use_database=False)
         tickets.init()
-        for payload in snapshot["tickets"].values():
+        for payload in entity_snapshot["tickets"].values():
             ticket = Ticket.from_dict(payload)
             tickets.ticket_path(ticket).parent.mkdir(parents=True, exist_ok=True)
             tickets.ticket_path(ticket).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
         sessions = SessionStore(project, tickets, use_database=False)
         sessions.init()
-        for payload in snapshot["sessions"].values():
+        for payload in entity_snapshot["sessions"].values():
             session = DeliverySession.from_dict(payload)
             sessions.session_path(session).parent.mkdir(parents=True, exist_ok=True)
             sessions.session_path(session).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
     else:
         from vibe_orchestrator.control_db_migration import migrate_control_plane
         migrate_control_plane(project, database)
-    converted = _storage_snapshot(project, target_storage)
-    equivalent = snapshot == converted
+    after = _readback_snapshot(project, target_storage)
+    equivalent = before["digest"] == after["digest"]
     if not equivalent:
         raise ValueError("alternate storage conversion changed dataset contents")
     return {"equivalent": True,
-            "source_counts": {key: len(value) for key, value in snapshot.items()},
-            "target_counts": {key: len(value) for key, value in converted.items()}}
+            "source": before, "target": after}
 
 
 def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, Any], *,
@@ -358,15 +389,18 @@ def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, A
     materialized["source_kind"] = "approved_dataset"
     materialized["dataset_root"] = str(root)
     materialized["materialized_tree_sha256"] = _hash_tree(target_vibe)
-    # ``materialized_tree_sha256`` in legacy manifests covers the whole bundle
-    # and may include the manifest file itself.  A bundle may opt into the
-    # unambiguous `.vibe`-only checksum through `dataset_tree_sha256`.
     expected = manifest.get("dataset_tree_sha256")
-    if expected and expected != materialized["materialized_tree_sha256"]:
+    if source.is_dir() and (not expected or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+        raise ValueError("approved dataset must declare dataset_tree_sha256")
+    if expected != materialized["materialized_tree_sha256"]:
         raise ValueError("dataset materialized tree checksum does not match manifest")
     materialized["dataset_tree_sha256"] = materialized["materialized_tree_sha256"]
+    readback = _readback_snapshot(project, manifest["storage_mode"])
+    if readback != manifest.get("readback"):
+        raise ValueError("dataset read-back reconciliation does not match manifest")
+    materialized["readback"] = readback
     if storage_mode is not None and storage_mode != manifest["storage_mode"]:
-        _convert_storage(project, manifest["storage_mode"], storage_mode)
+        conversion = _convert_storage(project, manifest["storage_mode"], storage_mode)
         materialized["storage_mode"] = storage_mode
         logical = dict(materialized["logical"])
         logical["storage_mode"] = storage_mode
@@ -376,13 +410,16 @@ def materialize_dataset(project: Path, dataset_path: Path, manifest: dict[str, A
         materialized["fixture_files_sha256"] = materialized["hashes"]["manifest_sha256"]
         materialized["materialized_tree_sha256"] = _hash_tree(target_vibe)
         materialized["dataset_tree_sha256"] = materialized["materialized_tree_sha256"]
+        materialized["readback"] = _readback_snapshot(project, storage_mode)
+        materialized["storage_conversion"] = conversion
         validate_manifest(materialized)
     return materialized
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
     required = {"schema_version", "source_kind", "seed", "storage_mode", "counts", "dimensions", "hashes",
-                "fixture_files_sha256", "logical_checksum", "materialized_tree_sha256", "redaction_policy", "logical"}
+                "fixture_files_sha256", "logical_checksum", "materialized_tree_sha256", "dataset_tree_sha256",
+                "redaction_policy", "logical", "readback"}
     missing = required - set(manifest)
     if missing:
         raise ValueError(f"manifest missing fields: {sorted(missing)}")
@@ -454,6 +491,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("logical fixture checksum mismatch")
     if not isinstance(manifest["materialized_tree_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", manifest["materialized_tree_sha256"]):
         raise ValueError("invalid materialized tree checksum")
+    if not isinstance(manifest["dataset_tree_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", manifest["dataset_tree_sha256"]):
+        raise ValueError("invalid dataset tree checksum")
+    readback = manifest["readback"]
+    if not isinstance(readback, dict) or not re.fullmatch(r"[0-9a-f]{64}", readback.get("digest", "")):
+        raise ValueError("invalid materialized read-back proof")
 
 
 def manifest_for_dataset(path: Path, *, seed: int = 35527, size: str = "small", storage_mode: str = "sqlite") -> dict[str, Any]:

@@ -49,10 +49,18 @@ raw timings, expected outcome, errors, sample count и aggregates. Mutation case
 ## Baseline results и hotspots
 
 Numerical baseline создаётся только командой CLI и сохраняется в указанном JSON;
-репозиторий не подменяет machine-specific timings. Top-сценарий каждого компонента
-создаёт pstats, text report и единый profile manifest, связанные по `run_id`, case IDs
-и manifest hash. Hotspot считается подтверждённым только при наличии такого artifact;
-`--compare-storage` сохраняет измеренные aggregates для SQLite и legacy YAML.
+репозиторий не подменяет machine-specific timings. Каждый обязательный компонент
+получает coverage со статусом `profiled`, `unavailable` или `failed`; для `profiled`
+обязательны pstats, text report и manifest с `run_id`, case IDs, manifest hash,
+warmup и iterations. Каждый smoke/full результат обязан содержать SQLite↔YAML
+comparison по всем case IDs с raw samples, aggregates, dimensions и read-back proof;
+comparison нельзя отключить.
+
+Standalone `profile.py` принимает тот же approved dataset contract: обязательны `--dataset`
+и совпадающий `--manifest-hash`; manifest-only путь материализуется детерминированно и
+проверяется через canonical identity. Warmup и iterations отражаются в
+`profile-manifest.json`, который также содержит coverage для всех компонентов: выбранный
+component получает `profiled` или `failed`, остальные — явный `unavailable`.
 
 ## Filesystem/SQLite attribution
 
@@ -77,8 +85,8 @@ budget states and dimensions. SQLite is authoritative for the ledger in both
 storage modes; YAML uses legacy ticket/session files.
 
 The `performance-fixture.v2` manifest is strict: it records schema/source kind,
-seed, storage, actual counts, dimensions, redaction policy, logical checksum and
-materialized-tree checksum. The canonical logical checksum is SHA-256 of compact,
+seed, storage, actual counts, dimensions, redaction policy, logical checksum,
+dataset-tree checksum and read-back proof. The canonical logical checksum is SHA-256 of compact,
 sorted-key JSON. `validate_manifest()` recomputes it and rejects missing fields,
 unsupported values, profile counts (including exact ticket cardinality),
 unmaterialized dimensions, non-synthetic IDs and tampered hashes. Consistent derived
@@ -93,8 +101,11 @@ state, uses non-negative integer counts, and its sum must equal `counts.tickets`
 validated before benchmark cases run. A manifest-only dataset may be materialized
 deterministically into the isolated project using its validated seed/profile/storage;
 the generated manifest's canonical logical payload and SHA-256 must equal the
-supplied manifest before it can be used. `materialized_tree_sha256` is provenance
-only and is excluded from this portable comparison. The result records
+supplied manifest before it can be used. For an approved directory bundle,
+`dataset_tree_sha256` is mandatory and must match the copied `.vibe` tree before
+cases are constructed. Its read-back proof covers ticket/session/budget/run
+content, counts and ownership; storage conversion repeats this proof and fails
+closed on any mismatch. The result records
 `dataset_materialization` and `dataset_manifest_hash` only after that proof. An
 omitted `--storage` leaves the manifest's `storage_mode` authoritative; explicit
 `--size`/`--storage` mismatches, malformed or incompatible manifests fail before
