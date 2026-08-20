@@ -64,6 +64,70 @@ def test_parser_does_not_estimate_unknown_or_legacy_output():
     assert parse_codex_usage(events) == unknown_token_usage()
 
 
+def test_real_codex_0147_payload_uses_runner_correlated_fallback():
+    events = (FIXTURES / "codex_turn_completed_0_147.jsonl").read_bytes()
+
+    usage = parse_codex_usage(
+        events,
+        runner_run_id="manifest-run",
+        profile={"model": "gpt-5.6-luna", "reasoning_effort": "medium"},
+        captured_at="2026-08-17T10:11:13+00:00",
+    )
+
+    assert usage["input_tokens"] == 1234
+    assert usage["output_tokens"] == 567
+    assert usage["total_tokens"] == 1801
+    assert usage["run_id"] == "manifest-run"
+    assert usage["model"] == "gpt-5.6-luna"
+    assert usage["reasoning_effort"] == "medium"
+    assert usage["source"] == "runner_fallback"
+    assert usage["fallback_policy_version"] == "codex_cli_0.147.0_turn_completed.v1"
+    assert usage["degraded_confidence"] is True
+    assert usage["captured_at"] == "2026-08-17T10:11:12+00:00"
+    assert is_confirmed_token_usage(usage, run_id="manifest-run", model="gpt-5.6-luna", reasoning_effort="medium")
+
+
+def test_runner_fallback_replay_is_idempotent_and_conflicting_identity_fails_closed():
+    event = {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}}
+    replay = "\n".join(json.dumps(event) for _ in range(2))
+    kwargs = {"runner_run_id": "r", "profile": {"model": "m", "reasoning_effort": "low"}, "captured_at": "capture"}
+
+    first = parse_codex_usage(json.dumps(event), **kwargs)
+    repeated = parse_codex_usage(replay, **kwargs)
+    changed = parse_codex_usage("\n".join([
+        json.dumps({"type": "turn.completed", "provider_event_id": "evt-1", "usage": {"input_tokens": 10, "output_tokens": 2}}),
+        json.dumps({"type": "turn.completed", "provider_event_id": "evt-1", "usage": {"input_tokens": 11, "output_tokens": 2}}),
+    ]), **kwargs)
+
+    assert repeated == first
+    assert changed["source"] == "unknown"
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "turn.completed", "usage": {"input_tokens": "10", "output_tokens": 2}},
+    {"type": "turn.completed", "usage": {"input_tokens": -1, "output_tokens": 2}},
+    {"type": "turn.completed", "usage": {"input_tokens": True, "output_tokens": 2}},
+    {"type": "message.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+    {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 99}},
+])
+def test_runner_fallback_invalid_or_ambiguous_payload_is_unknown(event):
+    usage = parse_codex_usage(
+        json.dumps(event), runner_run_id="r", profile={"model": "m", "reasoning_effort": "low"}, captured_at="capture",
+    )
+    assert usage["source"] == "unknown"
+    assert usage["input_tokens"] is None
+    assert usage["output_tokens"] is None
+
+
+def test_runner_fallback_does_not_use_request_id_as_usage_ref():
+    event = {"type": "turn.completed", "provider_request_id": "same-request", "usage": {"input_tokens": 10, "output_tokens": 2}}
+    usage = parse_codex_usage(
+        json.dumps(event), runner_run_id="r", profile={"model": "m", "reasoning_effort": "low"}, captured_at="capture",
+    )
+    assert usage["source"] == "runner_fallback"
+    assert usage["usage_ref"] != "same-request"
+
+
 def test_contract_parser_requires_exact_correlation_and_preserves_provenance():
     events = '\n'.join([
         json.dumps({"type": "turn.completed", "timestamp": "2026-08-17T10:00:00+00:00", "run_id": "run-1", "model": "m", "reasoning_effort": "medium", "usage_ref": "evt-1", "usage_semantics": "incremental", "usage": {"input_tokens": 10, "output_tokens": 2}}),

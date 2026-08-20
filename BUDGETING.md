@@ -223,9 +223,22 @@ refs, суммируются как два distinct факта. Cumulative snaps
 `fallback_policy_version`, `normalization_version` и `degraded_confidence: true`.
 Cost/currency и `rate_card_version` — optional audit metadata.
 
-### Изменения тикета DEL-B09FBE
+### Изменения тикета DEL-811955
 
-Adapter передаёт correlated contract без пересчёта в `run.json`, `result.json`, `run_history` и ledger. Ledger валидирует provenance на finalize boundary, сохраняет raw counts и metadata, а повторный finalize terminal run идемпотентен. Старые артефакты читаются через legacy parser, но `source=codex_cli.turn.completed` является только read-compatible форматом и никогда не считается confirmed или переносится в finalized aggregates. Если provider не поставляет correlation/stable event-or-snapshot ref/version/timestamp, результат остаётся `unknown`; upstream должен явно определить точное поле stable ref и гарантировать его стабильность на уровне события или snapshot. `provider_request_id` остаётся только optional metadata и не может заменять эту гарантию.
+Codex CLI 0.147.0 публикует фактический минимум как JSONL `type=turn.completed` с `usage.input_tokens` и `usage.output_tokens`; provider-side `run_id`, model, reasoning effort, usage ref, semantics и timestamp могут отсутствовать. Отдельная fallback-ветка принимает этот формат только вместе с run-контекстом runner-а: `run_id` берётся из manifest/ExecutionContract, model и reasoning effort — из того же contract, а отсутствие provider timestamp дополняется явным временем завершения подпроцесса.
+
+Результат адаптера сохраняется без пересчёта в `run.json`, `result.json`, `run_history` и ledger. Он маркируется `source=runner_fallback`, `fallback_policy_version=codex_cli_0.147.0_turn_completed.v1`, `degraded_confidence=true` и `normalization_version=tokens_per_1000.v1`. `usage_ref` детерминированно строится из версии политики, порядкового номера принятого события и хэша нормализованного payload; `provider_request_id` никогда не используется как единственный ref. Одинаковый replay одного payload идемпотентен, а разные непроверяемые события, malformed JSON, invalid counters, missing runner context и invalid explicit total дают `unknown`, а не частичный результат.
+
+Для fallback без provider semantics действует fail-closed single-event policy: одинаковые дубликаты схлопываются, но несколько отличающихся `turn.completed` не суммируются, поскольку невозможно безопасно доказать incremental semantics вместо cumulative snapshot. Unknown по-прежнему сохраняется в артефактах и не считается нулём; при enforced `limit_points` scope получает `blocked_unknown`.
+
+Acceptance scenarios:
+
+- минимальный fixture `tests/fixtures/codex_turn_completed_0_147.jsonl` сохраняет 1234 input, 567 output и 1801 total с runner correlation;
+- повтор того же payload не меняет stable usage fact, а provider request id не становится `usage_ref`;
+- строковые, отрицательные, boolean и несогласованные counters, malformed JSON и неоднозначные события дают `unknown` с `None` counters;
+- CodexRunner передаёт один normalized usage в `run.json` и `result.json`, после чего существующий pipeline передаёт его в history/ledger.
+
+Regression checks: `.venv/bin/pytest -q tests/test_codex.py`, `.venv/bin/pytest -q tests/test_budget_ledger.py tests/test_orchestrator.py` и `.venv/bin/pytest -q`.
 
 Перед вызовом Codex control plane атомарно создаёт reservation. При отказе по
 лимиту Codex не запускается, `failed` run не создаётся и зависший reservation
@@ -242,9 +255,9 @@ manifest; runner вызывает lifecycle callback непосредствен�
 `ambiguous_start`. Без evidence resolver запись не освобождается по одному
 таймауту: безопасный fallback сохраняет ambiguous.
 
-Подтверждённый provider usage, коррелированный с `run_id`, становится actual.
+Подтверждённый provider usage, коррелированный с `run_id`, становится actual. Разрешённый runner fallback также становится actual только при полном runner correlation и явных degraded-confidence metadata; provider-origin counters при этом сохраняются как есть.
 Fallback допустим только с явными `source=runner_fallback`,
-`normalization_version` и `rate_card_version`. При отсутствии подтверждённого
+`fallback_policy_version`, `degraded_confidence=true`, `normalization_version` и `rate_card_version`. При отсутствии подтверждённого
 или разрешённого fallback reservation снимается, finalized не увеличивается,
 run получает `unknown`. Scope с enforced `limit_points IS NOT NULL` получает
 `blocked_unknown` и запрещает следующий run до ручного решения; scope с
