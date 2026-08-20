@@ -19,8 +19,14 @@ def _age_key(ticket: Ticket) -> datetime:
     return datetime.fromisoformat(ticket.created_at)
 
 
-def wip_count(tickets: list[Ticket], status: str) -> int:
-    return sum(1 for t in tickets if t.status == status and not t.wip_exempt)
+def wip_count(tickets: list[Ticket], status: str, effective_by_id: dict[str, set[str]] | None = None) -> int:
+    return sum(
+        1
+        for t in tickets
+        if t.status == status
+        and not t.wip_exempt
+        and not (effective_by_id and effective_by_id.get(t.id))
+    )
 
 
 def _is_done(ticket: Ticket, workflow: Workflow) -> bool:
@@ -40,6 +46,32 @@ def _is_ancestor(candidate_id: str, ticket: Ticket, by_id: dict[str, Ticket]) ->
     return False
 
 
+def _distance(ancestor_id: str, ticket_id: str, by_id: dict[str, Ticket]) -> int | None:
+    current = ticket_id
+    distance = 0
+    visited: set[str] = set()
+    while current and current not in visited:
+        if current == ancestor_id:
+            return distance
+        visited.add(current)
+        ticket = by_id.get(current)
+        current = ticket.parent if ticket else None
+        distance += 1
+    return None
+
+
+def _root_blockers(parent_id: str, blocker_ids: set[str], by_id: dict[str, Ticket]) -> set[str]:
+    distances = {
+        blocker_id: _distance(parent_id, blocker_id, by_id)
+        for blocker_id in blocker_ids
+    }
+    known = [distance for distance in distances.values() if distance is not None]
+    if not known:
+        return set(blocker_ids)
+    nearest = min(known)
+    return {blocker_id for blocker_id, distance in distances.items() if distance == nearest}
+
+
 def effective_blockers(ticket: Ticket, tickets: list[Ticket], workflow: Workflow) -> set[str]:
     """Resolve inherited parent gates without creating self-blocking branches."""
     by_id = {item.id: item for item in tickets}
@@ -52,12 +84,13 @@ def effective_blockers(ticket: Ticket, tickets: list[Ticket], workflow: Workflow
         if parent is None:
             break
         parent_blockers = set(parent.blocked_by)
+        root_blockers = _root_blockers(parent.id, parent_blockers, by_id)
         # A direct resolver must remain runnable. Its descendants also skip
         # their own ancestor blocker, while inheriting sibling gates.
-        if ticket.id not in parent_blockers:
+        if ticket.id not in root_blockers:
             blockers.update(
                 blocker_id
-                for blocker_id in parent_blockers
+                for blocker_id in root_blockers
                 if blocker_id != ticket.id and not _is_ancestor(blocker_id, ticket, by_id)
             )
         current = parent.parent
@@ -106,7 +139,7 @@ def select_candidates(
             and ticket.id not in session_participants
         ):
             continue
-        if source.kind == "queue" and not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id) >= target.wip:
+        if source.kind == "queue" and not ticket.wip_exempt and target.wip is not None and wip_count(tickets, target.id, effective_by_id) >= target.wip:
             continue
         candidates.append(Candidate(ticket=ticket, source_status=source.id, target_status=target.id, stage_position=workflow.position(source.id)))
     candidates.sort(key=lambda c: (-c.stage_position, 0 if c.ticket.wip_exempt else 1, c.ticket.priority, _age_key(c.ticket), c.ticket.id))
