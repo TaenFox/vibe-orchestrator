@@ -32,6 +32,16 @@ Profiling обязательно создаёт coverage record для кажд�
 aggregates и полный read-back proof; отдельного opt-in флага нет. Смотрите
 [каноническую методику](../../docs/performance.md).
 
+Standalone profiling использует тот же проверенный dataset identity и требует
+`--dataset` вместе с точным `--manifest-hash`; storage по умолчанию берётся из
+manifest:
+
+```bash
+python benchmarks/performance/profile.py --project . --dataset /path/to/approved \
+  --scenario ticketstore.list.delivery --output /tmp/performance-profile \
+  --run-id profile-smoke --manifest-hash <validated-hash> --warmup 5 --iterations 30
+```
+
 Для `--storage yaml` tickets и sessions materialize legacy YAML documents через
 `use_database=False`; BudgetLedger остаётся SQLite authoritative backend и явно
 помечается в manifest. Если loopback bind запрещён окружением, HTTP cases всё равно

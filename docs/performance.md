@@ -56,6 +56,12 @@ warmup и iterations. Каждый smoke/full результат обязан с
 comparison по всем case IDs с raw samples, aggregates, dimensions и read-back proof;
 comparison нельзя отключить.
 
+Standalone `profile.py` принимает тот же approved dataset contract: обязательны `--dataset`
+и совпадающий `--manifest-hash`; manifest-only путь материализуется детерминированно и
+проверяется через canonical identity. Warmup и iterations отражаются в
+`profile-manifest.json`, который также содержит coverage для всех компонентов: выбранный
+component получает `profiled` или `failed`, остальные — явный `unavailable`.
+
 ## Filesystem/SQLite attribution
 
 `fs_ops`/`fs_bytes` — наблюдаемые deltas файлового дерева, не syscall trace. Для

@@ -334,7 +334,8 @@ def test_result_validation_rejects_mutated_source_and_sample_mismatch():
               "source_checksum_before": "a", "source_checksum_after": "a",
               "integrity": {"warmup_excluded": True}}
     result["dataset_manifest_hash"] = "m"
-    validate_result(result)
+    with pytest.raises(ValueError, match="profiling coverage"):
+        validate_result(result)
     result["cases"][0]["sample_count"] = 1
     with pytest.raises(ValueError):
         validate_result(result)

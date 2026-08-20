@@ -174,20 +174,30 @@ def validate_result(result: dict[str, Any]) -> None:
     profiling = result.get("profiling")
     required_components = {"TicketStore", "SessionStore", "BudgetLedger", "Orchestrator", "Scheduler", "UI", "HTTP"}
     coverage = profiling.get("coverage") if isinstance(profiling, dict) else None
-    if profiling is not None:
-        if not isinstance(coverage, list) or {item.get("component") for item in coverage} != required_components:
-            raise ValueError("profiling coverage must include every required component")
-        for item in coverage:
-            if item.get("status") not in {"profiled", "unavailable", "failed"} or not item.get("case_id"):
-                raise ValueError("invalid profiling coverage record")
-            if item["status"] == "profiled" and not all(item.get(key) for key in ("pstats", "text")):
-                raise ValueError("profiled component is missing profile artifacts")
+    if not isinstance(profiling, dict) or not isinstance(coverage, list) or {item.get("component") for item in coverage} != required_components:
+        raise ValueError("profiling coverage must include every required component")
+    for item in coverage:
+        if item.get("status") not in {"profiled", "unavailable", "failed"} or not item.get("case_id"):
+            raise ValueError("invalid profiling coverage record")
+        if item["status"] == "profiled" and not all(item.get(key) for key in ("pstats", "text")):
+            raise ValueError("profiled component is missing profile artifacts")
     comparison = result.get("storage_comparison")
-    if comparison is not None:
-        if not isinstance(comparison, dict) or comparison.get("equivalent") is not True:
-            raise ValueError("storage comparison is mandatory and must prove equivalence")
-        if set(comparison.get("case_ids", [])) != {case.get("case_id") for case in result["cases"]}:
-            raise ValueError("storage comparison coverage is incomplete")
+    if not isinstance(comparison, dict) or comparison.get("equivalent") is not True:
+        raise ValueError("storage comparison is mandatory and must prove equivalence")
+    expected_case_ids = {case.get("case_id") for case in result["cases"]}
+    if set(comparison.get("case_ids", [])) != expected_case_ids:
+        raise ValueError("storage comparison coverage is incomplete")
+    if {case.get("case_id") for case in comparison.get("baseline_cases", [])} != expected_case_ids:
+        raise ValueError("storage comparison baseline cases are incomplete")
+    if {case.get("case_id") for case in comparison.get("alternate_cases", [])} != expected_case_ids:
+        raise ValueError("storage comparison alternate cases are incomplete")
+    proof = comparison.get("proof")
+    if not isinstance(proof, dict) or not isinstance(proof.get("baseline"), dict) or not isinstance(proof.get("alternate"), dict):
+        raise ValueError("storage comparison is missing read-back proof")
+    for label in ("baseline", "alternate"):
+        snapshot = proof[label]
+        if not snapshot.get("digest") or not isinstance(snapshot.get("counts"), dict):
+            raise ValueError(f"storage comparison {label} proof is incomplete")
     integrity = result.get("integrity", {})
     if integrity.get("warmup_excluded") is not True:
         raise ValueError("warmup samples must be excluded")
@@ -610,7 +620,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             profile_path = profile_dir / f"{case_id}.pstats"; text_path = profile_dir / f"{case_id}.txt"
             profiler = cProfile.Profile(); profiler.enable()
             try:
-                selected[3]()
+                for _ in range(args.warmup):
+                    selected[3]()
+                for _ in range(iterations):
+                    selected[3]()
                 profiler.disable(); profiler.dump_stats(profile_path)
                 with text_path.open("w", encoding="utf-8") as handle:
                     pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
