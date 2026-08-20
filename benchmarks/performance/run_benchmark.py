@@ -24,6 +24,7 @@ import statistics
 import pstats
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import urllib.error
@@ -132,18 +133,70 @@ class SQLiteMetrics:
         self.reset()
 
     def reset(self) -> None:
+        self._lock = getattr(self, "_lock", threading.Lock())
         self.queries = 0
         self.transactions = 0
         self.errors = 0
-        self.lock_ms = 0.0
         self.busy_errors = 0
+        self.lock_wait_ms = None
+        self.lock_wait_count = None
+        self.lock_ms = None  # legacy alias; transaction time is not lock wait
         self._transaction_started = None
+        self.attribution = {"source": "sqlite3.trace_callback+connection_factory",
+                            "contract_version": "sqlite-attribution.v1",
+                            "lock_wait": "unavailable: sqlite3 exposes no portable busy handler"}
+
+    def record_error(self, error: sqlite3.Error) -> None:
+        text = str(error).lower()
+        with self._lock:
+            self.errors += 1
+            if "locked" in text or "busy" in text:
+                self.busy_errors += 1
+
+
+class InstrumentedConnection(sqlite3.Connection):
+    """Connection-level attribution without changing SQLite timeout semantics."""
+
+    def __init__(self, *args: Any, metrics: SQLiteMetrics, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._metrics = metrics
+
+    def _execute(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return getattr(super(), method)(*args, **kwargs)
+        except sqlite3.Error as exc:
+            self._metrics.record_error(exc)
+            raise
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        return self._execute("execute", *args, **kwargs)
+
+    def executemany(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        return self._execute("executemany", *args, **kwargs)
+
+    def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        return self._execute("executescript", *args, **kwargs)
+
+
+def instrumented_connection_factory(metrics: SQLiteMetrics) -> Callable[..., sqlite3.Connection]:
+    def trace(statement: str) -> None:
+        normalized = statement.strip().upper()
+        metrics.queries += 1
+        if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
+            metrics.transactions += 1
+
+    def factory(path: str | Path, **kwargs: Any) -> sqlite3.Connection:
+        kwargs["factory"] = lambda *args, **inner: InstrumentedConnection(*args, metrics=metrics, **inner)
+        connection = sqlite3.connect(path, **kwargs)
+        connection.set_trace_callback(trace)
+        return connection
+    return factory
 
 
 class InstrumentedLedger(BudgetLedger):
     def __init__(self, project: Path, metrics: SQLiteMetrics) -> None:
         self.metrics = metrics
-        super().__init__(project)
+        super().__init__(project, connection_factory=instrumented_connection_factory(metrics))
 
     def _connect(self) -> sqlite3.Connection:
         connection = super()._connect()
@@ -153,11 +206,6 @@ class InstrumentedLedger(BudgetLedger):
             self.metrics.queries += 1
             if normalized.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")):
                 self.metrics.transactions += 1
-            if normalized.startswith("BEGIN"):
-                self.metrics._transaction_started = time.perf_counter_ns()
-            elif normalized in {"COMMIT", "ROLLBACK"} and getattr(self.metrics, "_transaction_started", None):
-                self.metrics.lock_ms += (time.perf_counter_ns() - self.metrics._transaction_started) / 1_000_000
-                self.metrics._transaction_started = None
 
         connection.set_trace_callback(trace)
         return connection
@@ -210,6 +258,16 @@ def validate_result(result: dict[str, Any]) -> None:
         for sample in case["raw_samples"]:
             if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
                 raise ValueError("invalid sample schema")
+            if sample.get("sqlite_queries") is not None:
+                required_metrics = ("sqlite_transactions", "sqlite_errors", "sqlite_busy_errors",
+                                     "sqlite_lock_wait_ms", "sqlite_lock_wait_count", "sqlite_attribution")
+                if any(field not in sample for field in required_metrics):
+                    raise ValueError("SQLite sample missing attribution field")
+                attribution = sample["sqlite_attribution"]
+                if not isinstance(attribution, dict) or not attribution.get("source"):
+                    raise ValueError("invalid SQLite attribution")
+                if sample["sqlite_lock_wait_ms"] is not None and sample["sqlite_lock_wait_count"] is None:
+                    raise ValueError("lock wait duration requires lock wait count")
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
@@ -268,8 +326,9 @@ def _prepare_cold(capability: dict[str, Any]) -> None:
 def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, str, Callable[[], Any]]]:
     use_database = storage == "sqlite"
     sqlite_metrics = SQLiteMetrics()
-    store, sessions, workflow, ledger = TicketStore(project, use_database=use_database), None, load_workflow("delivery"), InstrumentedLedger(project, sqlite_metrics)
-    sessions = SessionStore(project, store, use_database=use_database)
+    connection_factory = instrumented_connection_factory(sqlite_metrics) if use_database else None
+    store, sessions, workflow, ledger = TicketStore(project, use_database=use_database, connection_factory=connection_factory), None, load_workflow("delivery"), InstrumentedLedger(project, sqlite_metrics)
+    sessions = SessionStore(project, store, use_database=use_database, connection_factory=connection_factory)
     store.init(); sessions.init(); tickets = store.list("delivery")
     ticket_id = next((item.id for item in tickets
                       if (ledger.get_budget(f"ticket:{item.id}") or {}).get("status") == "active"), tickets[0].id)
@@ -463,7 +522,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         # BudgetLedger owns the instrumented connection. Ticket/session stores
         # deliberately retain their internal connection lifecycle and report a
         # typed unavailable reason instead of pretending the counters are zero.
-        setattr(fn, "_sqlite_metrics", sqlite_metrics if component == "BudgetLedger" else None)
+        setattr(fn, "_sqlite_metrics", sqlite_metrics if use_database and component in {"TicketStore", "SessionStore", "BudgetLedger"} else None)
         setattr(fn, "_sqlite_plans", _explain_plans(ledger) if component == "BudgetLedger" else [])
         if http_limitation and component in {"HTTP", "UI"}:
             setattr(fn, "_limitations", list(getattr(fn, "_limitations", [])) + [http_limitation])
@@ -493,8 +552,6 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
             fn()
         except Exception as exc:
             error = type(exc).__name__
-            if metrics is not None:
-                metrics.errors += 1
             errors.append({"sample_index": index, "type": error})
         finally:
             if spec.teardown:
@@ -507,7 +564,11 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
                         "sqlite_queries": metrics.queries if metrics is not None else None,
                         "sqlite_transactions": metrics.transactions if metrics is not None else None,
                         "sqlite_lock_ms": metrics.lock_ms if metrics is not None else None,
+                        "sqlite_lock_wait_ms": metrics.lock_wait_ms if metrics is not None else None,
+                        "sqlite_lock_wait_count": metrics.lock_wait_count if metrics is not None else None,
                         "sqlite_errors": metrics.errors if metrics is not None else None,
+                        "sqlite_busy_errors": metrics.busy_errors if metrics is not None else None,
+                        "sqlite_attribution": metrics.attribution if metrics is not None else {"source": None, "limitation": "case does not use SQLite"},
                         "sqlite_metrics_unavailable_reason": None if metrics is not None else "case does not use SQLite",
                         "error": error, "isolation_clean": after_snapshot["hash"] == sample_snapshot["hash"]})
     walls = [item["wall_ms"] for item in samples]

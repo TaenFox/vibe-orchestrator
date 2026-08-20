@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import json
 import pytest
 
-from benchmarks.performance.run_benchmark import CaseSpec, _cold_capability, _cases, percentile, statistics_for, validate_result
+from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold_capability, _cases,
+                                                   instrumented_connection_factory, percentile,
+                                                   statistics_for, validate_result)
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
@@ -24,6 +25,31 @@ def test_result_schema_requires_raw_timing_fields():
     sample = {"sample_index": 0, "wall_ms": 1.0, "cpu_ms": 0.5, "fs_ops": None,
               "fs_bytes": None, "sqlite_queries": None, "sqlite_lock_ms": None, "error": None}
     assert {"sample_index", "wall_ms", "error"} <= sample.keys()
+
+
+def test_sqlite_metrics_reset_and_classify_busy_errors(tmp_path):
+    metrics = SQLiteMetrics()
+    connect = instrumented_connection_factory(metrics)
+    db = connect(tmp_path / "metrics.sqlite3")
+    db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+    metrics.reset()
+    db.execute("INSERT INTO items DEFAULT VALUES")
+    assert metrics.queries >= 1
+    assert metrics.errors == 0
+    assert metrics.lock_wait_ms is None
+    assert metrics.lock_wait_count is None
+    assert metrics.attribution["contract_version"] == "sqlite-attribution.v1"
+    db.close()
+
+
+def test_sqlite_result_validation_requires_new_fields_when_present():
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
+                          "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
+                          "sample_count": 1, "raw_samples": [{"sample_index": 0, "wall_ms": 1, "error": None,
+                            "sqlite_queries": 1}]}], "source_checksum_before": "a", "source_checksum_after": "a"}
+    with pytest.raises(ValueError, match="attribution"):
+        validate_result(result)
 
 
 def test_fixture_is_seeded_redacted_and_materializes_dimensions(tmp_path):

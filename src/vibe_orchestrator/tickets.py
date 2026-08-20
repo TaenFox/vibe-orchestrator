@@ -122,13 +122,15 @@ class Ticket:
 
 
 class TicketStore:
-    def __init__(self, project: Path, *, use_database: bool = True):
+    def __init__(self, project: Path, *, use_database: bool = True,
+                 connection_factory: Any | None = None):
         self.project = project.resolve()
         self.root = self.project / ".vibe"
         self.tickets_root = self.root / "tickets"
         self.runs_root = self.root / "runs"
         self.database = self.root / "control.sqlite3"
         self.use_database = use_database
+        self.connection_factory = connection_factory or sqlite3.connect
 
     @property
     def database_enabled(self) -> bool:
@@ -139,7 +141,7 @@ class TicketStore:
     def _db(self) -> sqlite3.Connection:
         from .control_db_migration import ensure_control_schema
         ensure_control_schema(self.database)
-        db = sqlite3.connect(self.database, timeout=10)
+        db = self.connection_factory(self.database, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=10000")
