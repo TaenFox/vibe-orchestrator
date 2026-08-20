@@ -127,10 +127,12 @@ busy-handler callback для измерения скрытого ожидани�
 
 ## Optimization criteria and regression policy
 
-Latency SLO values are owner-approved per case or case group; no absolute
-numeric SLO is asserted by this audit until the owner supplies those values.
-Until then, the committed artifact is a reproducibility baseline and not an
-SLO pass/fail claim. An improvement of at least 20% in the agreed metric for
+**Owner-approved SLO decision for DEL-355F27:** no absolute latency SLO is
+approved for the current audit. The owner decision is to keep this artifact as
+a reproducibility baseline until product owners provide per-case or case-group
+latency targets; therefore this baseline must not be reported as an SLO
+pass/fail result. Once targets are approved, they are recorded here and used
+for the same comparison procedure below. An improvement of at least 20% in the agreed metric for
 the same case, dataset, storage mode and runtime conditions is a significant
 optimization candidate. A degradation greater than 5% is a regression signal
 and requires investigation.

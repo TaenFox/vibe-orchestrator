@@ -34,9 +34,10 @@ def test_benchmark_docs_use_required_decimal_seed():
 def test_performance_policy_documents_thresholds_and_slo_decision():
     text = Path("docs/performance.md").read_text(encoding="utf-8")
     assert "Optimization criteria and regression policy" in text
+    assert "Owner-approved SLO decision" in text
+    assert "no absolute latency SLO is" in text
     assert "at least 20%" in text
     assert ">5%" in text
-    assert "no absolute" in text
 
 
 def test_profile_linkage_descriptors_are_portable_and_complete():
