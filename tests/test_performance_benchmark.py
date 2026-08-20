@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import json
 import pytest
+import yaml
 
-from benchmarks.performance.run_benchmark import CaseRegistry, CaseSpec, _cold_capability, _cases, _run_case, percentile, run, statistics_for, validate_result
+from benchmarks.performance.run_benchmark import CaseRegistry, CaseSpec, _cold_capability, _cases, _logical_snapshot, _run_case, percentile, run, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
@@ -168,6 +168,28 @@ def test_run_case_read_only_contamination_is_rejected_by_validation(tmp_path):
     with pytest.raises(ValueError, match=r"test\.read_only_contamination.*sample_index 0"):
         validate_result({"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
                          "cases": [result], "source_checksum_before": "a", "source_checksum_after": "a"})
+
+
+def test_logical_snapshot_reuses_unchanged_yaml_files(tmp_path, monkeypatch):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    fixture = root / "fixture.yaml"
+    fixture.write_text("state: stable\n", encoding="utf-8")
+    calls = []
+    original = yaml.safe_load
+
+    def counted(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr("benchmarks.performance.run_benchmark.yaml.safe_load", counted)
+    _logical_snapshot(tmp_path)
+    _logical_snapshot(tmp_path)
+    assert len(calls) == 1
+
+    fixture.write_text("state: changed\n", encoding="utf-8")
+    _logical_snapshot(tmp_path)
+    assert len(calls) == 2
 
 
 def test_case_registry_cleanup_is_idempotent():

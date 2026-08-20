@@ -91,6 +91,7 @@ class CaseRegistry(list[CaseSpec]):
 
 _VOLATILE_FIELDS = {"created_at", "updated_at", "started_at", "completed_at", "cancelled_at",
                     "reserved_at", "started_at", "terminal_at", "timestamp", "consumed_at"}
+_SNAPSHOT_FILE_CACHE: dict[str, tuple[int, int, Any]] = {}
 
 
 def _normalize_logical(value: Any) -> Any:
@@ -123,7 +124,15 @@ def _logical_snapshot(project: Path) -> dict[str, Any]:
         for path in sorted(root.rglob("*")):
             if path.is_file() and path.suffix in {".yaml", ".yml", ".json"} and path.name not in {"manifest.json"}:
                 try:
-                    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    stat = path.stat()
+                    cache_key = str(path)
+                    fingerprint = (stat.st_mtime_ns, stat.st_size)
+                    cached = _SNAPSHOT_FILE_CACHE.get(cache_key)
+                    if cached is not None and cached[:2] == fingerprint:
+                        loaded = cached[2]
+                    else:
+                        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+                        _SNAPSHOT_FILE_CACHE[cache_key] = (*fingerprint, loaded)
                     files[str(path.relative_to(root))] = _normalize_logical(loaded)
                 except (OSError, yaml.YAMLError):
                     files[str(path.relative_to(root))] = path.read_bytes().hex()
