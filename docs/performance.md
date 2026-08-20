@@ -33,9 +33,13 @@ manifest. `generate_fixture` выполняет эту проверку пере
 его logical SHA-256 и materialized counts, проверяет полный уникальный registry для
 режима storage, последовательность `sample_index == 0..iterations-1`, типы и
 неотрицательность метрик, а также `min/p50/p95/p99/max/mean/stdev` по raw
-`wall_ms`. Ошибка обязана иметь typed evidence (`sample_index`, `type`), совпадать
-с `raw_samples[index].error`; отсутствие case, duplicate/out-of-range sample,
-malformed error или silently ignored dataset делает run невалидным.
+`wall_ms`. `expected_outcome=success` означает, что каждый sample успешен
+(`error=null`) и `errors=[]`. `expected_outcome=error` означает ошибку на каждой
+итерации: каждый sample содержит непустую строку `error`, а `errors` содержит
+ровно одну typed-запись (`sample_index`, `type`) для каждого sample. Typed evidence
+обязана совпадать с `raw_samples[index].error`; смешение успешных и ошибочных
+samples, отсутствие case, duplicate/out-of-range sample, malformed error или
+silently ignored dataset делает run невалидным.
 
 ## Profiling artifacts and linkage
 
@@ -66,6 +70,10 @@ Warmup выполняется вне raw samples. В обычном режиме
 active/exhausted/blocked_unknown/over_budget budgets. В error cases проверяются
 missing entities, malformed dataset, membership/validation failures, budget denial и
 HTTP 4xx. В result ошибки ссылаются на конкретный `sample_index`.
+Ожидаемый outcome — контракт всего case, а не требование наличия хотя бы одной
+ошибки: success не допускает error evidence, а error не допускает успешных samples.
+Связь profiling artifacts с `run_id`, `case_id` и `dataset_manifest_hash` остаётся
+обязательной и проверяется независимо от outcome samples.
 
 ## Методика
 
@@ -103,4 +111,6 @@ Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются эт�
 cache eviction и alternate filesystems capability-dependent; при недоступности
 результат содержит причину и не формулирует portable comparison conclusion.
 SQLite checksum — provenance текущей materialization и не обещает
-кросс-машинную детерминированность binary layout.
+кросс-машинную детерминированность binary layout. HTTP loopback может быть
+недоступен в окружении; в таком случае producer должен сохранить limitation для
+соответствующего case, поскольку validator не ослабляет outcome consistency.

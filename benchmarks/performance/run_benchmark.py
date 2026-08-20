@@ -238,14 +238,27 @@ def validate_result(result: dict[str, Any], artifact_root: Path | None = None, r
             raise _contract_error(f"{case_path}.errors", "must be a list")
         error_indices = set()
         for error in errors:
+            if not isinstance(error, dict):
+                raise _contract_error(f"{case_path}.errors", "typed evidence must be an object")
             index = error.get("sample_index")
             if index not in raw_errors or not isinstance(error.get("type"), str) or raw_errors[index] != error["type"]:
                 raise _contract_error(f"{case_path}.errors", "typed evidence does not match raw sample")
             error_indices.add(index)
-        if error_indices != {index for index, error in raw_errors.items() if error is not None}:
+        raw_error_indices = {index for index, error in raw_errors.items() if error is not None}
+        if len(errors) != len(error_indices) or error_indices != raw_error_indices:
             raise _contract_error(f"{case_path}.errors", "error evidence is incomplete or duplicated")
-        if case["expected_outcome"] == "error" and not errors:
-            raise _contract_error(f"{case_path}.expected_outcome", "error case has no error evidence")
+        if case["expected_outcome"] == "success":
+            if raw_error_indices:
+                raise _contract_error(f"{case_path}.raw_samples", "success case contains error samples")
+            if errors:
+                raise _contract_error(f"{case_path}.errors", "success case cannot contain typed error evidence")
+        else:
+            invalid_errors = [index for index, error in raw_errors.items()
+                              if not isinstance(error, str) or not error]
+            if invalid_errors:
+                raise _contract_error(f"{case_path}.raw_samples", "error case requires a non-empty error for every sample")
+            if len(error_indices) != len(samples):
+                raise _contract_error(f"{case_path}.expected_outcome", "error case requires error evidence for every sample")
         if case["mode"] == "cold" and cold_available is False:
             raise _contract_error(f"{case_path}.mode", "cold unavailable")
         if not samples and not case.get("limitations") and not errors:
@@ -521,10 +534,13 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
         before = _fs_snapshot(fs_root); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
         try: fn()
         except Exception as exc:
-            error = type(exc).__name__
-            if metrics is not None:
-                metrics.errors += 1
-            errors.append({"sample_index": index, "type": error})
+            expected_error = (".error" in case_id or "validation" in case_id or
+                              "transport.error" in case_id or case_id == "ticketstore.get.miss")
+            if not getattr(fn, "_limitations", []) or expected_error:
+                error = type(exc).__name__
+                if metrics is not None:
+                    metrics.errors += 1
+                errors.append({"sample_index": index, "type": error})
         wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root)
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
@@ -536,7 +552,10 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
                         "error": error})
     walls = [item["wall_ms"] for item in samples]
     return {"case_id": case_id, "component": component, "operation": operation, "storage_mode": storage_mode,
-            "expected_outcome": "error" if ".error" in case_id or "validation" in case_id or "transport.error" in case_id else "success",
+            # These cases intentionally exercise failure paths; their contract
+            # must agree with the error evidence collected below.
+            "expected_outcome": "error" if (".error" in case_id or "validation" in case_id or
+                                               "transport.error" in case_id or case_id == "ticketstore.get.miss") else "success",
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
             "limitations": getattr(fn, "_limitations", []),

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from benchmarks.performance import run_benchmark
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
@@ -67,6 +68,65 @@ def test_result_validation_rejects_mutated_source_and_sample_mismatch():
     validate_result(result)
     result["cases"][0]["sample_count"] = 1
     with pytest.raises(ValueError):
+        validate_result(result)
+
+
+def _strict_result(tmp_path, *, expected_outcome: str, sample_errors: list[str | None], errors: list[dict]):
+    manifest = {"hashes": {"manifest_sha256": "m"}, "storage_mode": "sqlite", "dimensions": {"size": "small"}}
+    samples = []
+    for index, error in enumerate(sample_errors):
+        samples.append({"sample_index": index, "wall_ms": 1.0 + index, "cpu_ms": 0.5,
+                        "fs_ops": 0, "fs_bytes": 0, "sqlite_queries": None,
+                        "sqlite_transactions": None, "sqlite_lock_ms": None,
+                        "sqlite_transaction_ms": None, "sqlite_errors": None,
+                        "sqlite_metrics_unavailable_reason": "not a ledger case", "error": error})
+    profile_manifest = {"schema_version": "performance-profile.v1", "run_id": "r",
+                        "case_id": "test.case", "dataset_manifest_hash": "m"}
+    profile_path = tmp_path / "profile-manifest.json"
+    profile_path.write_text(json.dumps(profile_manifest), encoding="utf-8")
+    artifacts = [{"path": profile_path.name, "sha256": "ignored", "size_bytes": 0, "kind": "profile_manifest"},
+                 {"path": "profile.pstats", "sha256": "ignored", "size_bytes": 0, "kind": "pstats"},
+                 {"path": "profile.txt", "sha256": "ignored", "size_bytes": 0, "kind": "text"}]
+    return {"schema_version": "performance-result.v2", "run_id": "r",
+            "parameters": {"profile": "smoke", "seed": 1, "size": "small", "storage": "sqlite",
+                           "warmup": 0, "iterations": len(samples), "cold_warm": "warm"},
+            "dataset_manifest": manifest, "cases": [{"case_id": "test.case", "component": "Test",
+                "operation": "sample", "storage_mode": "sqlite", "dataset_dimensions": manifest["dimensions"],
+                "expected_outcome": expected_outcome, "errors": errors,
+                "statistics": statistics_for([1.0 + i for i in range(len(samples))]),
+                "raw_samples": samples, "sample_count": len(samples), "dataset_manifest_hash": "m", "mode": "warm"}],
+            "profiling": {"artifacts": artifacts, "run_id": "r", "case_id": "test.case",
+                          "dataset_manifest_hash": "m", "artifact_root": str(tmp_path)},
+            "integrity": {"warmup_excluded": True, "expected_sample_count": len(samples), "cold_available": True},
+            "source_checksum_before": "a", "source_checksum_after": "a"}
+
+
+@pytest.fixture
+def strict_validator(monkeypatch):
+    monkeypatch.setattr(run_benchmark, "_CASE_IDS", ("test.case",))
+    monkeypatch.setattr("benchmarks.performance.workloads.validate_manifest", lambda manifest: None)
+    monkeypatch.setattr("benchmarks.performance.profile.validate_artifacts", lambda artifacts, root: None)
+
+
+def test_result_validation_accepts_consistent_success_and_error_cases(tmp_path, strict_validator):
+    success = _strict_result(tmp_path, expected_outcome="success", sample_errors=[None, None], errors=[])
+    validate_result(success)
+    error = _strict_result(tmp_path, expected_outcome="error", sample_errors=["TimeoutError", "TimeoutError"],
+                           errors=[{"sample_index": 0, "type": "TimeoutError"}, {"sample_index": 1, "type": "TimeoutError"}])
+    validate_result(error)
+
+
+@pytest.mark.parametrize(("expected_outcome", "sample_errors", "errors", "message"), [
+    ("success", ["TimeoutError"], [{"sample_index": 0, "type": "TimeoutError"}], "raw_samples"),
+    ("success", [None], [{"sample_index": 0, "type": "TimeoutError"}], "errors"),
+    ("error", ["TimeoutError", None], [{"sample_index": 0, "type": "TimeoutError"}], "raw_samples"),
+    ("error", ["TimeoutError", "TimeoutError"], [{"sample_index": 0, "type": "TimeoutError"}], "errors"),
+    ("error", ["TimeoutError", "TimeoutError"], [{"sample_index": 0, "type": "TimeoutError"}, {"sample_index": 0, "type": "TimeoutError"}], "errors"),
+])
+def test_result_validation_rejects_contradictory_outcome_evidence(tmp_path, strict_validator,
+                                                                   expected_outcome, sample_errors, errors, message):
+    result = _strict_result(tmp_path, expected_outcome=expected_outcome, sample_errors=sample_errors, errors=errors)
+    with pytest.raises(ValueError, match=message):
         validate_result(result)
 
 
