@@ -24,6 +24,7 @@ from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_techn
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
 from .run_store import RunStore
+from .human_gate import validate_gate, resolve_gate
 
 log = logging.getLogger("vibe")
 MAX_REWORK_REVIEW_ATTEMPTS = 3
@@ -37,14 +38,17 @@ def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
         raise ValueError("Возобновить можно только Delivery rework")
     if ticket.blocked_reason != "rework_cycle_stopped":
         raise ValueError("Тикет не ожидает ручного разрешения реворка")
-    ticket.status = "ready_for_development"
+    # A resumed rework must be re-analyzed before implementation. This keeps
+    # the corrective scope explicit instead of sending review findings straight
+    # back to development.
+    ticket.status = "selected_for_session"
     ticket.blocked_reason = None
     ticket.last_outcome = "manual_rework_resumed"
     ticket.last_summary = "Ручное разрешение: запущен дополнительный проход реворка"
     store.record_run_event(
         ticket,
         run_id=None,
-        stage_id="ready_for_development",
+        stage_id=ticket.status,
         event="manual_rework_resumed",
         reason="rework_cycle_stopped",
         to_status=ticket.status,
@@ -80,6 +84,23 @@ def recover_stale_run(store: TicketStore, ticket_id: str, *, now: datetime | Non
     ticket.last_summary = f"Зависший запуск восстановлен после {int(age.total_seconds() // 60)} мин.; тикет возвращён в очередь"
     store.record_run_event(ticket, run_id=run_id, stage_id=source_status, event="stale_run_recovered",
                            reason="stale_run_recovered", age_seconds=int(age.total_seconds()), to_status=source_status)
+    store.save(ticket)
+    return ticket
+
+
+def decide_human_gate(store: TicketStore, ticket_id: str, decision: str, *, actor: str = "owner") -> Ticket:
+    ticket = store.get(ticket_id)
+    gate = ticket.context.get("human_gate") if isinstance(ticket.context, dict) else None
+    stage_id = gate.get("stage") if isinstance(gate, dict) else None
+    if not isinstance(stage_id, str):
+        raise ValueError("В human_gate отсутствует этап для продолжения")
+    workflow = load_all_workflows()[ticket.process]
+    queue = next((item.id for item in workflow.stages if item.kind == "queue" and item.pull_to == stage_id), None)
+    if queue is None:
+        raise ValueError(f"Для этапа {stage_id} не найдена очередь продолжения")
+    resolve_gate(ticket, decision, actor=actor)
+    ticket.status = queue
+    store.record_run_event(ticket, run_id=None, stage_id=queue, event="human_decision", decision=decision, actor=actor, to_status=queue)
     store.save(ticket)
     return ticket
 
@@ -447,10 +468,19 @@ class Orchestrator:
         ticket.retry_after = None
         context_before = ticket.context_revision
         context_update = _extract_context_payload(result.details)
+        if result.outcome == "needs_human_decision":
+            gate = validate_gate(context_update.get("human_gate"))
+            gate["stage"] = stage.id
+            gate["run_id"] = active_run
+            gate["requested_at"] = datetime.now(timezone.utc).isoformat()
+            context_update["human_gate"] = gate
         if context_update:
             ticket.context = _merge_context(ticket.context, context_update)
             ticket.context_revision += 1
         target_status = (stage.outcomes or {})[result.outcome]
+        if result.outcome == "needs_human_decision":
+            target_status = stage.id
+            ticket.blocked_reason = "human_decision_required"
         if ticket.type == "rework" and workflow.id == "delivery" and result.outcome == "needs_rework":
             attempts = sum(
                 1
@@ -460,7 +490,9 @@ class Orchestrator:
                 and event.get("outcome") == "needs_rework"
             ) + 1
             if attempts < MAX_REWORK_REVIEW_ATTEMPTS:
-                target_status = "ready_for_development"
+                # Rework findings can change the scope. Always pass them through
+                # system analysis before another implementation attempt.
+                target_status = "selected_for_session"
             else:
                 target_status = "selected_for_session"
                 ticket.blocked_reason = "rework_cycle_stopped"

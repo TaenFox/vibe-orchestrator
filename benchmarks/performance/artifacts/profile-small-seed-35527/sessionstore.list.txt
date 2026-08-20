@@ -1,48 +1,48 @@
-         9836 function calls in 0.019 seconds
+         9836 function calls in 0.028 seconds
 
    Ordered by: cumulative time
    List reduced from 70 to 40 due to restriction <40>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-       35    0.000    0.000    0.019    0.001 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:474(<lambda>)
-       35    0.000    0.000    0.019    0.001 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:189(list)
-       35    0.000    0.000    0.012    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:123(_db)
-       35    0.000    0.000    0.010    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/control_db_migration.py:174(ensure_control_schema)
-      280    0.007    0.000    0.007    0.000 {method 'execute' of 'sqlite3.Connection' objects}
-      105    0.000    0.000    0.004    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:198(execute)
-      105    0.000    0.000    0.004    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:191(_execute)
-       35    0.000    0.000    0.003    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:193(<listcomp>)
-       35    0.003    0.000    0.003    0.000 {method 'commit' of 'sqlite3.Connection' objects}
+       35    0.000    0.000    0.028    0.001 <project-path>:507(<lambda>)
+       35    0.000    0.000    0.028    0.001 <project-path>:189(list)
+       35    0.000    0.000    0.014    0.000 <project-path>:123(_db)
+       35    0.000    0.000    0.012    0.000 <project-path>:174(ensure_control_schema)
+       35    0.000    0.000    0.009    0.000 <project-path>:193(<listcomp>)
+      140    0.001    0.000    0.009    0.000 <project-path>:60(from_dict)
+      280    0.008    0.000    0.008    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+      140    0.006    0.000    0.006    0.000 <project-path>:36(now_iso)
+      105    0.000    0.000    0.004    0.000 <project-path>:211(execute)
+      105    0.000    0.000    0.004    0.000 <project-path>:204(_execute)
+       35    0.004    0.000    0.004    0.000 {method 'commit' of 'sqlite3.Connection' objects}
        70    0.001    0.000    0.003    0.000 {built-in method _sqlite3.connect}
-      140    0.001    0.000    0.003    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:60(from_dict)
        35    0.002    0.000    0.002    0.000 {method 'executescript' of 'sqlite3.Connection' objects}
-       35    0.000    0.000    0.001    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:221(factory)
-       35    0.000    0.000    0.001    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:222(<lambda>)
-       35    0.001    0.000    0.001    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:187(__init__)
-      140    0.001    0.000    0.001    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:84(<dictcomp>)
-      140    0.000    0.000    0.001    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/__init__.py:299(loads)
-      140    0.000    0.000    0.001    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/decoder.py:332(decode)
-      140    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/decoder.py:343(raw_decode)
-       35    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:1111(mkdir)
-       70    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/functools.py:518(decorating_function)
-       35    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/control_db_migration.py:180(<setcomp>)
-      140    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:36(now_iso)
-       70    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/functools.py:35(update_wrapper)
-      140    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:88(<dictcomp>)
-      105    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:209(trace)
+       35    0.000    0.000    0.002    0.000 <project-path>:234(factory)
+       35    0.000    0.000    0.002    0.000 <project-path>:235(<lambda>)
+       35    0.002    0.000    0.002    0.000 <project-path>:200(__init__)
+      140    0.000    0.000    0.001    0.000 <project-path>:299(loads)
+      140    0.001    0.000    0.001    0.000 <project-path>:87(<setcomp>)
+      140    0.000    0.000    0.001    0.000 <project-path>:332(decode)
+      140    0.000    0.000    0.000    0.000 <project-path>:343(raw_decode)
+       35    0.000    0.000    0.000    0.000 <project-path>:1111(mkdir)
+       70    0.000    0.000    0.000    0.000 <project-path>:518(decorating_function)
+       35    0.000    0.000    0.000    0.000 <project-path>:180(<setcomp>)
+       70    0.000    0.000    0.000    0.000 <project-path>:35(update_wrapper)
+      140    0.000    0.000    0.000    0.000 <project-path>:88(<dictcomp>)
+      105    0.000    0.000    0.000    0.000 <project-path>:222(trace)
        35    0.000    0.000    0.000    0.000 {built-in method posix.mkdir}
       140    0.000    0.000    0.000    0.000 {method 'isoformat' of 'datetime.datetime' objects}
-       35    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:1245(is_dir)
-      140    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:546(__fspath__)
+       35    0.000    0.000    0.000    0.000 <project-path>:1245(is_dir)
+      140    0.000    0.000    0.000    0.000 <project-path>:546(__fspath__)
      1680    0.000    0.000    0.000    0.000 {method 'setdefault' of 'dict' objects}
-       35    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:1008(stat)
+      140    0.000    0.000    0.000    0.000 <project-path>:84(<dictcomp>)
+       35    0.000    0.000    0.000    0.000 <project-path>:1008(stat)
       595    0.000    0.000    0.000    0.000 {built-in method builtins.getattr}
-       35    0.000    0.000    0.000    0.000 {method 'fetchall' of 'sqlite3.Cursor' objects}
        35    0.000    0.000    0.000    0.000 {built-in method posix.stat}
-      140    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:87(<setcomp>)
+       35    0.000    0.000    0.000    0.000 {method 'fetchall' of 'sqlite3.Cursor' objects}
       140    0.000    0.000    0.000    0.000 <string>:2(__init__)
-      140    0.000    0.000    0.000    0.000 /opt/homebrew/Cellar/python@3.11/3.11.16/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pathlib.py:536(__str__)
-      140    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/sessions.py:86(<listcomp>)
+      140    0.000    0.000    0.000    0.000 <project-path>:536(__str__)
+      140    0.000    0.000    0.000    0.000 <project-path>:86(<listcomp>)
       280    0.000    0.000    0.000    0.000 {method 'match' of 're.Pattern' objects}
 
 

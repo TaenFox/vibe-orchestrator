@@ -6,6 +6,7 @@ import hashlib
 import json
 import pstats
 import platform
+import re
 import shutil
 import sys
 import tempfile
@@ -38,7 +39,9 @@ def prepare_output(output: Path) -> None:
             path.unlink()
 
 
-def artifact_descriptor(path: Path, kind: str, artifact_root: Path) -> dict[str, object]:
+def artifact_descriptor(path: Path, kind: str, artifact_root: Path, *, run_id: str,
+                        case_id: str, component: str, manifest_hash: str,
+                        command_hash: str) -> dict[str, object]:
     """Describe a profiling artifact relative to its controlled output root."""
     path = path.resolve()
     root = artifact_root.resolve()
@@ -49,8 +52,10 @@ def artifact_descriptor(path: Path, kind: str, artifact_root: Path) -> dict[str,
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"profile artifact is not a regular file: {relative}")
     data = path.read_bytes()
-    return {"path": relative.as_posix(), "sha256": hashlib.sha256(data).hexdigest(),
-            "size_bytes": len(data), "kind": kind}
+    return {"run_id": run_id, "case_id": case_id, "component": component,
+            "manifest_hash": manifest_hash, "path": relative.as_posix(),
+            "kind": kind, "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data), "command_hash": command_hash}
 
 
 def validate_artifacts(artifacts: list[dict[str, object]], artifact_root: Path) -> None:
@@ -58,13 +63,20 @@ def validate_artifacts(artifacts: list[dict[str, object]], artifact_root: Path) 
     seen: list[str] = []
     root = artifact_root.resolve()
     for artifact in artifacts:
-        if set(artifact) != {"path", "sha256", "size_bytes", "kind"}:
+        required_fields = {"run_id", "case_id", "component", "manifest_hash", "path",
+                           "sha256", "size_bytes", "kind", "command_hash"}
+        if set(artifact) != required_fields:
             raise ValueError("profiling artifact descriptor has an invalid schema")
         kind = str(artifact["kind"])
         if kind not in required or (kind == "profile_manifest" and kind in seen):
             raise ValueError(f"invalid or duplicate profiling artifact kind: {kind}")
         seen.append(kind)
-        descriptor = artifact_descriptor((root / str(artifact["path"])).resolve(), kind, root)
+        descriptor = artifact_descriptor(
+            (root / str(artifact["path"])).resolve(), kind, root,
+            run_id=str(artifact["run_id"]), case_id=str(artifact["case_id"]),
+            component=str(artifact["component"]), manifest_hash=str(artifact["manifest_hash"]),
+            command_hash=str(artifact["command_hash"]),
+        )
         # The manifest contains its own descriptor, so its final digest cannot
         # be embedded without a recursive checksum.  Path/schema are still
         # checked; data artifacts retain strict checksum validation.
@@ -110,6 +122,10 @@ def main() -> int:
         manifest = None
         manifest_hash = None
     prepare_output(args.output)
+    command_hash = hashlib.sha256(json.dumps([
+        "profile", args.run_id, args.scenario, args.seed, args.size, storage,
+        args.warmup, args.iterations, manifest_hash,
+    ], sort_keys=True).encode()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="vibe-profile-") as temp:
         project = Path(temp) / "project"
         shutil.copytree(args.project, project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
@@ -147,9 +163,26 @@ def main() -> int:
                 try: match[3]()
                 except Exception as exc: errors.append({"sample_index": index, "error": repr(exc)})
             profiler.disable(); profiler.dump_stats(path)
+            # cProfile stores the temporary checkout's absolute filenames in
+            # the binary stats file too.  Strip directory components before
+            # committing the artifact so it remains portable across worktrees.
+            pstats.Stats(str(path)).strip_dirs().dump_stats(str(path))
             with text_path.open("w", encoding="utf-8") as handle:
                 pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
-            artifacts.extend([artifact_descriptor(path, "pstats", args.output), artifact_descriptor(text_path, "text", args.output)])
+            text = text_path.read_text(encoding="utf-8")
+            # cProfile reports temporary checkout paths. Keep the report useful
+            # while making committed evidence portable across worktrees.
+            text = re.sub(r"/(?:Users|private|tmp|var|home|opt)/[^\s:]+",
+                          "<project-path>", text)
+            text_path.write_text(text, encoding="utf-8")
+            artifacts.extend([
+                artifact_descriptor(path, "pstats", args.output, run_id=args.run_id,
+                                    case_id=case_id, component=component,
+                                    manifest_hash=manifest_hash, command_hash=command_hash),
+                artifact_descriptor(text_path, "text", args.output, run_id=args.run_id,
+                                    case_id=case_id, component=component,
+                                    manifest_hash=manifest_hash, command_hash=command_hash),
+            ])
             coverage.append({"component": component, "case_id": case_id,
                              "status": "failed" if errors else "profiled",
                              "artifact_paths": [str(path.relative_to(args.output)), str(text_path.relative_to(args.output))],
@@ -169,7 +202,10 @@ def main() -> int:
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
-    artifacts.append(artifact_descriptor(profile_manifest, "profile_manifest", args.output))
+    artifacts.append(artifact_descriptor(profile_manifest, "profile_manifest", args.output,
+                                         run_id=args.run_id, case_id=args.scenario,
+                                         component="profiling", manifest_hash=manifest_hash,
+                                         command_hash=command_hash))
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,

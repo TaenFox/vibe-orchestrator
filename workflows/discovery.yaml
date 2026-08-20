@@ -11,7 +11,7 @@ stages:
     prompt: discovery/generation.md
     model: gpt-5.6-luna
     reasoning_effort: medium
-    outcomes: {completed: human}
+    outcomes: {completed: human, needs_human_decision: generation}
   - {id: human, title: Человек, kind: human, next: ready_for_analysis}
   - {id: ready_for_analysis, title: Готово к анализу, kind: queue, pull_to: analysis}
   - id: analysis
@@ -21,7 +21,7 @@ stages:
     prompt: discovery/analysis.md
     model: gpt-5.6-luna
     reasoning_effort: medium
-    outcomes: {completed: ready_for_technical_analysis, needs_correction: analysis}
+    outcomes: {completed: ready_for_technical_analysis, needs_correction: analysis, needs_human_decision: analysis}
   - {id: ready_for_technical_analysis, title: Готово к техническому анализу, kind: queue, pull_to: technical_analysis}
   - id: technical_analysis
     title: Технический анализ
@@ -30,7 +30,7 @@ stages:
     prompt: discovery/technical_analysis.md
     model: gpt-5.6-luna
     reasoning_effort: medium
-    outcomes: {completed: investment_decision, needs_correction: technical_analysis}
+    outcomes: {completed: investment_decision, needs_correction: technical_analysis, needs_human_decision: technical_analysis}
   - {id: investment_decision, title: Инвестиционное решение, kind: human, next: implementation}
   - {id: implementation, title: Реализация, kind: wait, next: ready_for_validation}
   - {id: ready_for_validation, title: Готово к валидации, kind: queue, pull_to: validation}
@@ -41,5 +41,5 @@ stages:
     prompt: discovery/validation.md
     model: gpt-5.6-luna
     reasoning_effort: low
-    outcomes: {completed: done, needs_correction: validation}
+    outcomes: {completed: done, needs_correction: validation, needs_human_decision: validation}
   - {id: done, title: Готово, kind: done}

@@ -31,6 +31,53 @@ def test_benchmark_docs_use_required_decimal_seed():
         assert "--seed 355F27" not in text
 
 
+def test_performance_policy_documents_thresholds_and_slo_decision():
+    text = Path("docs/performance.md").read_text(encoding="utf-8")
+    decision = Path("docs/decisions/DEL-355F27-performance-policy.md")
+    decision_text = decision.read_text(encoding="utf-8")
+    assert "Optimization criteria and regression policy" in text
+    assert "Decision status (DEL-355F27): no-SLO." in text
+    assert "decisions/DEL-355F27-performance-policy.md" in text
+    assert "descriptive-only" in text
+    required_fields = {
+        "authority": "owner",
+        "date_or_revision": "2026-08-20T13:00:21.551344+00:00",
+        "scope": "performance audit for DEL-355F27 control plane",
+        "decision": "no-SLO",
+        "stable_identifier": "DEL-355F27-AC-6-no-SLO",
+    }
+    for field, value in required_fields.items():
+        assert f"{field}: {value}" in decision_text
+    assert "rationale:" in decision_text
+    assert "slo_target:" not in decision_text
+    assert "decision: SLO" not in decision_text
+    assert "at least 20%" in text
+    assert ">5%" in text
+
+
+def test_profile_linkage_descriptors_are_portable_and_complete():
+    result = json.loads(Path("benchmarks/performance/artifacts/baseline-small-seed-35527.json").read_text(encoding="utf-8"))
+    validate_result(result)
+    assert result["parameters"]["warmup"] >= 5
+    assert result["parameters"]["iterations"] >= 30
+    assert result["profiling"]["artifacts"]
+    for descriptor in result["profiling"]["artifacts"]:
+        assert set(descriptor) == {"run_id", "case_id", "component", "manifest_hash", "path",
+                                   "kind", "sha256", "size_bytes", "command_hash"}
+        assert not Path(descriptor["path"]).is_absolute()
+        assert ".." not in Path(descriptor["path"]).parts
+
+
+def test_committed_profile_artifacts_have_no_absolute_worktree_paths():
+    root = Path("benchmarks/performance/artifacts/profile-small-seed-35527")
+    for path in root.iterdir():
+        if path.is_file() and path.suffix in {".pstats", ".txt", ".json"}:
+            content = path.read_bytes()
+            assert b"DEL-F15BD9" not in content
+            assert b"/Users/" not in content
+            assert b"/private/" not in content
+
+
 def test_provenance_contract_requires_synthetic_marker_and_manifest_hash():
     result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
               "cases": [], "source_checksum_before": "a", "source_checksum_after": "a",
