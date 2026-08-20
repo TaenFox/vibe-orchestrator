@@ -188,20 +188,22 @@ def _store_explain_specs(case_id: str) -> list[tuple[str, str, tuple[Any, ...]]]
         return [ticket_lookup]
     if case_id == "sessionstore.validation.overlap.error":
         # ``create`` validates the ticket, then ``save`` checks whether the
-        # newly generated session already exists. Both reads are part of the
-        # attempted operation, even though validation raises before the write.
-        return [ticket_lookup, session_lookup]
+        # newly generated session already exists. ``_validate_session`` then
+        # scans open sessions before raising on overlap; all reads are part of
+        # the attempted operation, even though validation raises before write.
+        return [ticket_lookup, session_lookup, session_list]
     lifecycle_cases = {
         "sessionstore.create", "sessionstore.activate", "sessionstore.complete",
         "sessionstore.cancel", "sessionstore.add_membership",
         "sessionstore.remove_membership",
     }
     if case_id in lifecycle_cases:
-        # isolated_session() creates a session before the case action.  Every
-        # lifecycle case therefore validates its ticket and reads the existing
-        # session during save(); complete() additionally calls get(), but that
-        # is the same query family and is represented once.
-        return [ticket_lookup, session_lookup]
+        # isolated_session() creates a session before the case action. Every
+        # lifecycle case therefore validates its ticket, reads the existing
+        # session during save(), and scans sessions while validating overlap.
+        # complete() additionally calls get(), but that is the same query
+        # family and is represented once.
+        return [ticket_lookup, session_lookup, session_list]
     return []
 
 

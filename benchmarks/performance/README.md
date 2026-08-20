@@ -21,7 +21,8 @@ profile links. `sample_count == len(raw_samples)`, warmup samples отсутст
 
 SQLite SQL cases сохраняют query/transaction/error counters, lock timing и
 per-case explain plans для фактически используемых query families. Для
-SessionStore lifecycle cases планы относятся к read/validation families, а
+SessionStore lifecycle cases планы относятся к read/validation families,
+включая ordered scan открытых sessions при сохранении, а
 отсутствие отдельного portable DML plan явно указано в limitation. YAML и SQLite-backed
 `load_path` cases явно помечаются как non-SQLite и не получают планы.
 Профилирование выбранного scheduler case связывает pstats/text/profile manifest с

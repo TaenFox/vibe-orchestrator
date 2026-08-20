@@ -139,13 +139,13 @@ def test_sqlite_store_cases_have_attributed_query_plans(tmp_path):
         "sessionstore.list": {"sessions ordered list"},
         "sessionstore.get": {"sessions.session_id lookup"},
         "sessionstore.membership_validation.error": {"tickets.ticket_id lookup"},
-        "sessionstore.validation.overlap.error": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
-        "sessionstore.create": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
-        "sessionstore.activate": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
-        "sessionstore.complete": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
-        "sessionstore.cancel": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
-        "sessionstore.add_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
-        "sessionstore.remove_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup"},
+        "sessionstore.validation.overlap.error": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.create": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.activate": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.complete": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.cancel": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.add_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.remove_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
     }
     for case_id in case_ids:
         plans = getattr(cases[case_id], "_sqlite_plans")
@@ -171,7 +171,7 @@ def test_session_validation_plan_attribution_matches_executed_query_family(tmp_p
 
     overlap = getattr(cases["sessionstore.validation.overlap.error"], "_sqlite_plans")
     missing_membership = getattr(cases["sessionstore.membership_validation.error"], "_sqlite_plans")
-    assert [plan["query"] for plan in overlap] == ["tickets.ticket_id lookup", "sessions.session_id lookup"]
+    assert [plan["query"] for plan in overlap] == ["tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"]
     assert [plan["query"] for plan in missing_membership] == ["tickets.ticket_id lookup"]
     assert any("sessions" in detail.lower() for plan in overlap for detail in plan["detail"])
 
