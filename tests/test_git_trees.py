@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from vibe_orchestrator.codex import AgentResult
-from vibe_orchestrator.git_trees import GitTreeError, GitTreeManager
+from vibe_orchestrator.git_trees import GitTreeError, GitTreeManager, TreeRecord
 from vibe_orchestrator.orchestrator import Orchestrator
 from vibe_orchestrator.tickets import TicketStore
 
@@ -57,6 +57,23 @@ def test_rework_tree_starts_from_parent_tree_and_targets_parent_branch(tmp_path:
 
     assert (child_workspace / "app.txt").read_text(encoding="utf-8") == "parent\n"
     assert git(child_workspace, "merge-base", "HEAD", f"vibe/{parent.id.lower()}") == git(child_workspace, "rev-parse", "HEAD")
+
+
+def test_release_target_skips_missing_merged_parent_tree(tmp_path: Path):
+    project = git_project(tmp_path)
+    store = TicketStore(project)
+    store.init()
+    manager = GitTreeManager(project, store)
+    root = store.create("delivery", "task", "Root")
+    root_workspace = manager.workspace_for(root)
+    child = store.create("delivery", "rework", "Merged child", parent=root.id)
+    grandchild = store.create("delivery", "rework", "Current rework", parent=child.id)
+    manager.trees.save(TreeRecord(child.id, f"vibe/{child.id.lower()}", f"vibe/{root.id.lower()}", str(tmp_path / "missing-child"), "merged"))
+
+    branch, target = manager._integration_target(grandchild)
+
+    assert branch == f"vibe/{root.id.lower()}"
+    assert target == root_workspace
 
 
 def test_orchestrator_releases_ready_ticket_into_main(tmp_path: Path):
