@@ -18,7 +18,7 @@ from starlette.routing import Mount, Route
 from .config import load_all_workflows
 from .control_db import ControlPlaneReader
 from .control import DeliverySessionStore, SessionError, WorkerControl
-from .orchestrator import recover_stale_run, resume_rework, STALE_RUN_TIMEOUT
+from .orchestrator import decide_human_gate, recover_stale_run, resume_rework, STALE_RUN_TIMEOUT
 from .run_store import RunStore
 from .tickets import TicketStore, next_status_for_ticket
 
@@ -36,6 +36,9 @@ input, select, textarea { width: 100%; border: 1px solid #344454; border-radius:
 .panel { max-width: 900px; padding: 24px; background: #151c24; border: 1px solid #293544; border-radius: 14px; } .panel h2 { margin-top: 0; overflow-wrap: anywhere; } .field { margin: 16px 0; } .field label { display: block; margin-bottom: 6px; color: #94a7b8; font-size: 12px; text-transform: uppercase; } .actions { display: flex; flex-wrap: wrap; gap: 8px; } .empty { color: #94a7b8; } .session-list { display: grid; gap: 10px; max-width: 1000px; } .session-item { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 14px; background: #151c24; border: 1px solid #293544; border-radius: 10px; } .session-item:hover { border-color: #65c8f1; } .session-item h3 { margin: 0 0 5px; } .session-actions { display: flex; flex-wrap: wrap; gap: 7px; } .session-actions form { margin: 0; } .member-list { display: grid; gap: 7px; padding: 0; list-style: none; } .member-list li { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 9px 11px; background: #1b2631; border-radius: 8px; }
 @media (max-width: 800px) { .ticket-table, .ticket-table tbody, .ticket-table tr, .ticket-table td { display: block; } .ticket-table thead { display: none; } .ticket-row { margin: 10px 0; } .ticket-row td { border-left: 1px solid #293544; border-right: 1px solid #293544; border-radius: 0; } .ticket-row td:first-child { border-radius: 9px 9px 0 0; } .ticket-row td:last-child { border-radius: 0 0 9px 9px; } }
 """
+
+STYLE += "\n.blocked-badge { display: inline-block; margin-left: 6px; padding: 2px 5px; border-radius: 999px; font-size: 10px; color: #ffd0c5; background: #713b35; white-space: nowrap; }"
+STYLE += "\n.human-gate { margin: 16px 0; padding: 14px; border: 1px solid #c49a4a; border-radius: 10px; background: #3a3020; } .human-gate strong { color: #ffe2a0; } .human-gate .actions { margin-top: 12px; }"
 
 
 def _escape(value: Any) -> str:
@@ -90,6 +93,48 @@ def _ticket_data(ticket: Any) -> dict[str, Any]:
     return data
 
 
+def _blocker_items(store: TicketStore, blocker_ids: list[str]) -> list[str]:
+    items = []
+    for blocker_id in blocker_ids:
+        try:
+            blocker = store.get(blocker_id)
+            items.append(f"{blocker_id}: {blocker.title}")
+        except KeyError:
+            items.append(str(blocker_id))
+    return items
+
+
+def _blocker_badge(store: TicketStore, blocker_ids: list[str]) -> str:
+    if not blocker_ids:
+        return ""
+    items = _blocker_items(store, blocker_ids)
+    title = "Ожидает: " + "; ".join(items)
+    label = f"ждёт {len(blocker_ids)} завис." if len(blocker_ids) > 1 else "ждёт зависимость"
+    return f'<span class=blocked-badge title="{_escape(title)}">{_escape(label)}</span>'
+
+
+def _human_gate(ticket: Any) -> dict[str, Any] | None:
+    gate = ticket.context.get("human_gate") if isinstance(getattr(ticket, "context", None), dict) else None
+    return gate if isinstance(gate, dict) and gate.get("status") == "pending" else None
+
+
+def _human_gate_html(ticket: Any) -> str:
+    gate = _human_gate(ticket)
+    if not gate:
+        return ""
+    question = _escape(gate.get("question", "Решение владельца"))
+    proposal = _escape(gate.get("proposal", ""))
+    agree = _escape(gate.get("agree_label", "Согласиться"))
+    disagree = _escape(gate.get("disagree_label", "Не согласиться"))
+    return (
+        f'<div class="human-gate"><strong>Требуется решение владельца</strong>'
+        f'<div class="details-row"><span class="meta">Вопрос</span>{question}</div>'
+        f'<div class="details-row"><span class="meta">Предложение агента</span>{proposal}</div>'
+        f'<div class="actions"><form method=post action="/ticket/{_escape(ticket.id)}/human-decision"><button name=decision value=agree>{agree}</button></form>'
+        f'<form method=post action="/ticket/{_escape(ticket.id)}/human-decision"><button name=decision value=disagree>{disagree}</button></form></div></div>'
+    )
+
+
 def _board_html(store: TicketStore, workflows: dict, process: str, search: str = "", reader: ControlPlaneReader | None = None,
                 worker_limit: int | None = None, view: str = "wip") -> str:
     source = reader.list_tickets(process=process, limit=1_000_000) if reader else store.list(process)
@@ -125,14 +170,17 @@ def _board_html(store: TicketStore, workflows: dict, process: str, search: str =
         attention_reason = ""
         if stage and stage.kind == "human":
             attention_reason = "нужно ваше действие"
+        elif ticket.get("blocked_by"):
+            attention_reason = "ожидает завершения зависимостей"
         elif ticket.get("blocked_reason"):
             attention_reason = str(ticket.get("blocked_reason"))
         elif stale:
             attention_reason = "запуск завис более 30 минут"
         attention = f'<span class=attention-badge title="{_escape(attention_reason)}">внимание</span>' if attention_reason else ""
+        blocked = _blocker_badge(store, list(ticket.get("blocked_by") or []))
         parent = ticket.get("parent") or "—"
         actions = _ticket_actions_html(store, workflows, store.get(ticket_id), stale=stale) if view == "wip" else ""
-        rows.append(f'<tr class="ticket-row{" agent-active" if active else ""}{" needs-attention" if attention_reason else ""}" data-ticket="{_escape(ticket_id)}" data-status="{_escape(status)}" draggable="{"true" if view == "wip" else "false"}"><td><a href="/ticket/{_escape(ticket_id)}"><span class=ticket-title>{_escape(ticket.get("title", ""))}{badge}{attention}</span><span class=ticket-id>{_escape(ticket_id)} · {_escape(ticket.get("type", ticket.get("ticket_type", "")))}</span></a></td><td><div class=progress aria-label="Прогресс по статусам">{progress}</div><span class=status-label>{_escape(stage.title if stage else status)}</span></td><td class=meta>{_escape(parent)}</td><td class=meta>{_escape(str(ticket.get("updated_at", "")).replace("T", " ")[:16])}</td><td class=row-actions>{actions or "—"}</td></tr>')
+        rows.append(f'<tr class="ticket-row{" agent-active" if active else ""}{" needs-attention" if attention_reason else ""}" data-ticket="{_escape(ticket_id)}" data-status="{_escape(status)}" draggable="{"true" if view == "wip" else "false"}"><td><a href="/ticket/{_escape(ticket_id)}"><span class=ticket-title>{_escape(ticket.get("title", ""))}{badge}{blocked}{attention}</span><span class=ticket-id>{_escape(ticket_id)} · {_escape(ticket.get("type", ticket.get("ticket_type", "")))}</span></a></td><td><div class=progress aria-label="Прогресс по статусам">{progress}</div><span class=status-label>{_escape(stage.title if stage else status)}</span></td><td class=meta>{_escape(parent)}</td><td class=meta>{_escape(str(ticket.get("updated_at", "")).replace("T", " ")[:16])}</td><td class=row-actions>{actions or "—"}</td></tr>')
     switch = f'<div class=view-switch><a class="{"active" if view == "wip" else ""}" href="/?process={_escape(process)}&view=wip&search={urllib.parse.quote(search)}">WIP</a><a class="{"active" if view == "done" else ""}" href="/?process={_escape(process)}&view=done&search={urllib.parse.quote(search)}">Done</a></div>'
     worker_form = f'<form method=post action=/workers><input type=hidden name=process value="{_escape(process)}"><button name=delta value=-1 aria-label="Уменьшить количество воркеров">−1</button><span class=meta>Воркеры: <strong>{_escape(worker_limit if worker_limit is not None else "?")}</strong></span><button name=delta value=1 aria-label="Увеличить количество воркеров">+1</button></form>' if worker_limit is not None else ""
     table = f'<table class=ticket-table><thead><tr><th>Тикет</th><th>Прогресс</th><th>Родитель</th><th>Обновлён</th><th>Действия</th></tr></thead><tbody>{"".join(rows)}</tbody></table>' if rows else '<div class=empty>В этом представлении тикетов нет</div>'
@@ -146,6 +194,8 @@ def _ticket_html(store: TicketStore, workflows: dict, ticket_id: str, reader: Co
     data = data or _ticket_data(ticket)
     next_status = next_status_for_ticket(store, ticket)
     action = _ticket_actions_html(store, workflows, ticket, allow_fresh_recovery=True)
+    blocker_items = _blocker_items(store, list(data.get("blocked_by") or []))
+    blocker_html = "<ul>" + "".join(f"<li>{_escape(item)}</li>" for item in blocker_items) + "</ul>" if blocker_items else "нет"
     history = "".join(f'<li><b>{_escape(item.get("event", "event"))}</b> · {_escape(item.get("stage", ""))} · {_escape(item.get("timestamp", ""))}<br>{_escape(item.get("summary", ""))}</li>' for item in reversed(data.get("run_history", [])))
     run_cards = []
     if reader:
@@ -159,12 +209,14 @@ def _ticket_html(store: TicketStore, workflows: dict, ticket_id: str, reader: Co
             run_cards.append(f'<li><b>{_escape(run.get("stage") or "run")}</b> · {_escape(run.get("state") or "unknown")}{_escape(token_label)}<br><span class=meta>{_escape(run.get("run_id"))}</span><br>{_escape(result_data.get("summary") or "Результат пока отсутствует")}</li>')
     run_section = f'<div class=field><label>Запуски</label><ol>{"".join(run_cards) or "<li class=empty>Запусков пока нет</li>"}</ol></div>'
     process = data.get("process", ticket.process)
-    content = f'<main><article class=panel><a href="/?process={_escape(process)}">← К доске</a><h2>{_escape(data.get("title", ""))}</h2><div class=meta>{_escape(data.get("id", ticket.id))} · {_escape(data.get("type", ""))} · {_escape(data.get("status", ""))} · приоритет {_escape(data.get("priority", 100))}</div><div class=field><label>Описание</label><div class=summary>{_escape(data.get("description") or "(пусто)")}</div></div><div class=field><label>Последний результат</label><div class=summary>{_escape(data.get("last_summary") or "нет")}</div></div><div class=actions>{action}</div>{run_section}<div class=field><label>История запусков</label><ol>{history or "<li class=empty>История пока пуста</li>"}</ol></div></article></main>'
+    content = f'<main><article class=panel><a href="/?process={_escape(process)}">← К доске</a><h2>{_escape(data.get("title", ""))}</h2><div class=meta>{_escape(data.get("id", ticket.id))} · {_escape(data.get("type", ""))} · {_escape(data.get("status", ""))} · приоритет {_escape(data.get("priority", 100))}</div><div class=field><label>Описание</label><div class=summary>{_escape(data.get("description") or "(пусто)")}</div></div><div class=field><label>Блокировки</label><div class=summary>{blocker_html}</div></div><div class=field><label>Последний результат</label><div class=summary>{_escape(data.get("last_summary") or "нет")}</div></div><div class=actions>{action}</div>{run_section}<div class=field><label>История запусков</label><ol>{history or "<li class=empty>История пока пуста</li>"}</ol></div></article></main>'
     return _layout(content, process)
 
 
 def _ticket_actions_html(store: TicketStore, workflows: dict, ticket: Any, *, stale: bool | None = None,
                          allow_fresh_recovery: bool = False) -> str:
+    if _human_gate(ticket):
+        return _human_gate_html(ticket)
     workflow = workflows[ticket.process]
     next_status = next_status_for_ticket(store, ticket)
     action = f'<form method=post action="/ticket/{_escape(ticket.id)}/move"><input type=hidden name=target value="{_escape(next_status)}"><button>Перевести в {_escape(workflow.by_id[next_status].title)}</button></form>' if next_status else ""
@@ -314,6 +366,14 @@ def create_app(project: str | Path) -> Starlette:
             return Response(str(exc), status_code=400)
         return RedirectResponse(f"/ticket/{urllib.parse.quote(ticket.id)}", status_code=303)
 
+    async def human_decision_ticket(request):
+        try:
+            decision = _parse_body(await request.body()).get("decision", "")
+            ticket = decide_human_gate(store, request.path_params["ticket_id"], decision)
+        except (KeyError, ValueError) as exc:
+            return Response(str(exc), status_code=400)
+        return RedirectResponse(f"/ticket/{urllib.parse.quote(ticket.id)}", status_code=303)
+
     async def recover_stale_run_ticket(request):
         try:
             ticket = recover_stale_run(store, request.path_params["ticket_id"], force=True)
@@ -358,7 +418,7 @@ def create_app(project: str | Path) -> Starlette:
         Route("/", board), Route("/healthz", health), Route("/ticket/{ticket_id}", ticket),
         Route("/new", new_ticket), Route("/sessions", sessions_page, methods=["GET", "POST"]), Route("/sessions/new", new_session), Route("/sessions/{session_id}", session_detail), Route("/sessions/{session_id}/{action}", session_action, methods=["POST"]),
         Route("/tickets/reorder", reorder_tickets, methods=["POST"]), Route("/tickets", create_ticket, methods=["POST"]),
-        Route("/ticket/{ticket_id}/move", move_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/resume-rework", resume_rework_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/recover-stale-run", recover_stale_run_ticket, methods=["POST"]),
+        Route("/ticket/{ticket_id}/move", move_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/resume-rework", resume_rework_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/human-decision", human_decision_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/recover-stale-run", recover_stale_run_ticket, methods=["POST"]),
         Route("/workers", workers_page, methods=["GET", "POST"]),
     ])
 

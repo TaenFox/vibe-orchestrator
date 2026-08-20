@@ -11,7 +11,7 @@ stages:
     prompt: process_management/work.md
     model: gpt-5.6-luna
     reasoning_effort: medium
-    outcomes: {completed: ready_for_auto_acceptance}
+    outcomes: {completed: ready_for_auto_acceptance, needs_human_decision: in_progress}
   - {id: ready_for_auto_acceptance, title: Готово к авто-приемке, kind: queue, pull_to: auto_acceptance}
   - id: auto_acceptance
     title: Авто-приемка
@@ -20,6 +20,6 @@ stages:
     prompt: process_management/auto_acceptance.md
     model: gpt-5.6-luna
     reasoning_effort: low
-    outcomes: {completed: human_acceptance}
+    outcomes: {completed: human_acceptance, needs_human_decision: auto_acceptance}
   - {id: human_acceptance, title: Приемка человеком, kind: human, next: done}
   - {id: done, title: Готово, kind: done}

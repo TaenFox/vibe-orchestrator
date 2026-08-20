@@ -127,21 +127,13 @@ busy-handler callback для измерения скрытого ожидани�
 
 ## Optimization criteria and regression policy
 
-**Decision status (DEL-355F27): pending verifiable owner/product approval.**
+**Decision status (DEL-355F27): no-SLO.** The owner decision is recorded in
+[`docs/decisions/DEL-355F27-performance-policy.md`](decisions/DEL-355F27-performance-policy.md),
+which contains the authority, decision timestamp, scope, rationale and stable
+identifier. No absolute latency SLO has been approved. This baseline is
+descriptive-only and must not be interpreted as an SLO pass/fail result.
 
-The repository does not contain a committed decision record or a stable
-authoritative reference that identifies the authority, date/revision, scope and
-exact SLO/no-SLO outcome. The current audit must therefore be treated as a
-descriptive reproducibility baseline, not as an SLO pass/fail result. This is an
-open governance dependency; no approval is inferred from acceptance prose.
-
-Once an owner/product decision is supplied, it must be recorded in a stable
-repository-relative decision artifact or resolvable external reference, with
-the required fields above. If the outcome is no-SLO, the artifact must state
-that no absolute latency target exists; if SLOs are approved, it must provide
-numeric per-case or case-group targets, percentile, units and pass/fail rules.
-
-Regardless of that pending decision, an improvement of at least 20% in the agreed metric for
+Regardless of the no-SLO decision, an improvement of at least 20% in the agreed metric for
 the same case, dataset, storage mode and runtime conditions is a significant
 optimization candidate. A degradation greater than 5% is a regression signal
 and requires investigation.
@@ -192,8 +184,8 @@ python benchmarks/performance/run_benchmark.py --project <isolated-project> --pr
 
 ## Limitations and open decisions
 
-- The SLO/no-SLO decision for DEL-355F27 remains pending until a verifiable
-  owner/product approval artifact or stable authoritative reference is supplied.
+- The DEL-355F27 no-SLO decision is closed by the committed decision record
+  above; absolute latency targets remain intentionally unapproved.
 
 Browser DOM/focus/viewport/keyboard/auto-refresh не измеряются этим harness. OS-level
 cache eviction и alternate filesystems capability-dependent; при недоступности
