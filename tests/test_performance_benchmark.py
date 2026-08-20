@@ -31,6 +31,27 @@ def test_benchmark_docs_use_required_decimal_seed():
         assert "--seed 355F27" not in text
 
 
+def test_performance_policy_documents_thresholds_and_slo_decision():
+    text = Path("docs/performance.md").read_text(encoding="utf-8")
+    assert "Optimization criteria and regression policy" in text
+    assert "at least 20%" in text
+    assert ">5%" in text
+    assert "no absolute" in text
+
+
+def test_profile_linkage_descriptors_are_portable_and_complete():
+    result = json.loads(Path("benchmarks/performance/artifacts/baseline-small-seed-35527.json").read_text(encoding="utf-8"))
+    validate_result(result)
+    assert result["parameters"]["warmup"] >= 5
+    assert result["parameters"]["iterations"] >= 30
+    assert result["profiling"]["artifacts"]
+    for descriptor in result["profiling"]["artifacts"]:
+        assert set(descriptor) == {"run_id", "case_id", "component", "manifest_hash", "path",
+                                   "kind", "sha256", "size_bytes", "command_hash"}
+        assert not Path(descriptor["path"]).is_absolute()
+        assert ".." not in Path(descriptor["path"]).parts
+
+
 def test_provenance_contract_requires_synthetic_marker_and_manifest_hash():
     result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
               "cases": [], "source_checksum_before": "a", "source_checksum_after": "a",

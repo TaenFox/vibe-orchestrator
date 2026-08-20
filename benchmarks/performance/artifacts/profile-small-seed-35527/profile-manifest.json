@@ -1,6 +1,6 @@
 {
   "schema_version": "performance-profile.v1",
-  "run_id": "profile",
+  "run_id": "baseline-small-seed-35527",
   "case_id": "ticketstore.list.delivery",
   "requested_scenario": "ticketstore.list.delivery",
   "manifest": {
@@ -80,7 +80,7 @@
     "materialized_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "dataset_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "readback": {
-      "digest": "afbe0be2e4f02f102696df5972efa377f0693f8b023792efb87e381c072111d6",
+      "digest": "cd1a0d287f5994ac767504d200d3ce9e7926a3da67acd915234f285c44a778ea",
       "counts": {
         "tickets": 100,
         "sessions": 4,
@@ -1020,7 +1020,7 @@
     "materialized_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "dataset_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "readback": {
-      "digest": "afbe0be2e4f02f102696df5972efa377f0693f8b023792efb87e381c072111d6",
+      "digest": "cd1a0d287f5994ac767504d200d3ce9e7926a3da67acd915234f285c44a778ea",
       "counts": {
         "tickets": 100,
         "sessions": 4,
@@ -1900,7 +1900,11 @@
       "--output",
       "benchmarks/performance/artifacts/profile-small-seed-35527",
       "--run-id",
-      "profile",
+      "baseline-small-seed-35527",
+      "--size",
+      "small",
+      "--storage",
+      "sqlite",
       "--warmup",
       "5",
       "--iterations",
@@ -1997,58 +2001,103 @@
   ],
   "artifacts": [
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "ticketstore.list.delivery",
+      "component": "TicketStore",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "ticketstore.list.delivery.pstats",
-      "sha256": "216119f379833723897edc7fba4a637ad3a6700a26efec78272b7c74e62bc191",
+      "kind": "pstats",
+      "sha256": "41b919d54d6a43f3008d4848ad29e2224bbde2ebe2493b03129db520874b0de7",
       "size_bytes": 8160,
-      "kind": "pstats"
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "ticketstore.list.delivery",
+      "component": "TicketStore",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "ticketstore.list.delivery.txt",
-      "sha256": "7f76ca132e6fa799044939bb3b934d8c3e426f4ed9ac5d669c34a4c7b90569d6",
-      "size_bytes": 5892,
-      "kind": "text"
+      "kind": "text",
+      "sha256": "57fbcd9a711fe04c0b431fa735eac73f201b2a5bbb37732f275e41ae68650a40",
+      "size_bytes": 3367,
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "sessionstore.list",
+      "component": "SessionStore",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "sessionstore.list.pstats",
-      "sha256": "9e498f450cd2702d3a6d8bb21df6c2ceadce293f227d565606ed3982a395ec05",
+      "kind": "pstats",
+      "sha256": "3875d0513d418203dc5bd62a1dbf5c33324d08eda48a8632a9e4a4a76ce266e2",
       "size_bytes": 8943,
-      "kind": "pstats"
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "sessionstore.list",
+      "component": "SessionStore",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "sessionstore.list.txt",
-      "sha256": "86a288940c6e01eebb738070f9b780d6424b2e23c49367479f8ee13131a5dec1",
-      "size_bytes": 6185,
-      "kind": "text"
+      "kind": "text",
+      "sha256": "1f8fcd871c43e0815496c008f8a2a9e3827f3683b1974c35f749bc72eb702479",
+      "size_bytes": 3345,
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "budgetledger.list_runs",
+      "component": "BudgetLedger",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "budgetledger.list_runs.pstats",
-      "sha256": "18b0c3a396dca1ba9c7de5d095a22f53f8d35865ad3cd01f079323bd2175f511",
+      "kind": "pstats",
+      "sha256": "e0d0cf3e1ce0b26e3f2318745ab07d98f6df54f7bd4dd1ee1447177e4682230a",
       "size_bytes": 5344,
-      "kind": "pstats"
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "budgetledger.list_runs",
+      "component": "BudgetLedger",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "budgetledger.list_runs.txt",
-      "sha256": "4e82b7e1a45bcac54adaceacfb47118754a4ce9e7d7fbeb71215ffdcf1408eb6",
-      "size_bytes": 5452,
-      "kind": "text"
+      "kind": "text",
+      "sha256": "e918c988c26cec7e1e228bb3afd3ebba2479c111934e692b8d556e0767f02da4",
+      "size_bytes": 3409,
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "scheduler.select_candidates",
+      "component": "Scheduler",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "scheduler.select_candidates.pstats",
-      "sha256": "7b3f5078db9ad00f8012fd4faef55c09bfcb83b17d0f3c45bc958355d1a34135",
+      "kind": "pstats",
+      "sha256": "3efb2a4241bb15d168a4575fe8666539ede0cdcbd53bde575823a2693b94a1e6",
       "size_bytes": 1724,
-      "kind": "pstats"
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "scheduler.select_candidates",
+      "component": "Scheduler",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "scheduler.select_candidates.txt",
-      "sha256": "7868792ef71f8d997ec58c7d8d55dc325c0961ea19bf787b51a6699e993a35d9",
-      "size_bytes": 2104,
-      "kind": "text"
+      "kind": "text",
+      "sha256": "0df945a9d96a1ac19e44dc88a32346967b76c15024febafd543d8ec98ba0cfb1",
+      "size_bytes": 1196,
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     },
     {
+      "run_id": "baseline-small-seed-35527",
+      "case_id": "ticketstore.list.delivery",
+      "component": "profiling",
+      "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
       "path": "profile-manifest.json",
-      "sha256": "096c4ca8646e4fe60e04670fbf6d55b9230e466a04a322815d35d5e23543dbaf",
-      "size_bytes": 54034,
-      "kind": "profile_manifest"
+      "kind": "profile_manifest",
+      "sha256": "385a62f40191da4b1ec237cecae5b4f284c8581a9a76641524adb5346cd51298",
+      "size_bytes": 56566,
+      "command_hash": "c3360c04ca144a94f682d00777493defd3fc8fa5a348b9f2eba319c85a3f8d9f"
     }
   ]
 }

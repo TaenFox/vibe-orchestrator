@@ -49,7 +49,7 @@ child rows/events до parent rows в `finally`. Результат содерж
 
 CLI: `python3 benchmarks/performance/run_benchmark.py --project . --profile smoke
 --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527
---output /tmp/performance.json`. Доступны размеры `small=100`, `medium=1000`,
+--output <output-dir>/performance.json`. Доступны размеры `small=100`, `medium=1000`,
 `large=5000`, `xlarge=10000`, а также `--dataset manifest.json`. Seed влияет на
 порядок, статусы, parent/blocked связи и run histories. Warmup не попадает в raw
 samples и агрегаты. `--cold` сообщает capability; если OS cache eviction недоступен,
@@ -67,9 +67,12 @@ Numerical baseline сохраняется в committed artifact
 источником machine-specific повторных измерений. Выбранные profiling cases
 создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
 manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
-Committed baseline использует synthetic-only fixture (`seed=35527`, `warmup=0`,
-`iterations=1`); result и profile manifest содержат provenance, manifest hash,
-raw samples/aggregates и checksum descriptors фактически сохранённых artifacts.
+Committed baseline использует synthetic-only fixture (`seed=35527`, `warmup=5`,
+`iterations=30`); warmup samples excluded, and every available case retains 30
+raw samples with p50/p95 recalculated from those samples. Result and profile
+manifest share a stable run ID and manifest hash; baseline descriptors carry
+relative paths, checksums, sizes and command hashes for every committed profile
+artifact.
 
 ## Approved dataset и storage comparison
 
@@ -122,6 +125,27 @@ busy-handler callback для измерения скрытого ожидани�
 Поэтому lock-wait fields сериализуются как `null` с явной limitation; это не
 означает нулевое ожидание и не меняет production retry/timeout semantics.
 
+## Optimization criteria and regression policy
+
+Latency SLO values are owner-approved per case or case group; no absolute
+numeric SLO is asserted by this audit until the owner supplies those values.
+Until then, the committed artifact is a reproducibility baseline and not an
+SLO pass/fail claim. An improvement of at least 20% in the agreed metric for
+the same case, dataset, storage mode and runtime conditions is a significant
+optimization candidate. A degradation greater than 5% is a regression signal
+and requires investigation.
+
+Comparisons use the same seed, manifest, case set, storage and warmup/iteration
+parameters. The comparison is repeated in a fresh isolated checkout; p50 and
+p95 are preferred, while stdev and raw samples are used to assess variance and
+outliers. A single outlier does not establish a regression when a repeat run
+does not reproduce it, but repeated >5% degradation is escalated. Unavailable
+cases remain unavailable and are excluded from claims rather than treated as
+zero latency. Filesystem values are instrumented file-count/bytes deltas, not
+syscall traces; lock-wait remains `null` because stdlib `sqlite3` lacks a
+portable busy handler; browser/DOM/viewport/keyboard/auto-refresh checks are
+outside this worker's capabilities.
+
 ## Concurrency and invariants matrix
 
 Regression tests используют отдельные SQLite databases и ThreadPoolExecutor:
@@ -152,7 +176,7 @@ backward-compatible: старые artifacts без новых optional fields п
 python -m pytest --collect-only -q
 python -m pytest tests/test_budget_ledger.py tests/test_performance_benchmark.py -q
 python -m pytest tests/test_control_db.py tests/test_db_primary_store.py tests/test_run_store_runtime.py -q
-python benchmarks/performance/run_benchmark.py --project <isolated-project> --profile smoke --size small --storage sqlite --warmup 1 --iterations 3 --seed 35527 --output /tmp/performance.json
+python benchmarks/performance/run_benchmark.py --project <isolated-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/performance.json
 ```
 
 ## Limitations and open decisions

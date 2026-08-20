@@ -80,6 +80,9 @@ REQUIRED_PROFILE_CASES = {
     "HTTP": "http.api_tickets",
 }
 
+PROFILE_DESCRIPTOR_FIELDS = {"run_id", "case_id", "component", "manifest_hash", "path",
+                             "kind", "sha256", "size_bytes", "command_hash"}
+
 
 @dataclass
 class CaseSpec:
@@ -139,14 +142,24 @@ def _logical_snapshot(project: Path) -> dict[str, Any]:
         except sqlite3.Error:
             continue
     files = {}
+    yaml_cache = getattr(_logical_snapshot, "_yaml_cache", {})
     if root.exists():
         for path in sorted(root.rglob("*")):
             if path.is_file() and path.suffix in {".yaml", ".yml", ".json"} and path.name not in {"manifest.json"}:
                 try:
-                    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-                    files[str(path.relative_to(root))] = _normalize_logical(loaded)
+                    key = str(path)
+                    stat = path.stat()
+                    signature = (stat.st_mtime_ns, stat.st_size)
+                    cached = yaml_cache.get(key)
+                    if cached and cached[0] == signature:
+                        loaded = cached[1]
+                    else:
+                        loaded = _normalize_logical(yaml.safe_load(path.read_text(encoding="utf-8")))
+                        yaml_cache[key] = (signature, loaded)
+                    files[str(path.relative_to(root))] = loaded
                 except (OSError, yaml.YAMLError):
                     files[str(path.relative_to(root))] = path.read_bytes().hex()
+    _logical_snapshot._yaml_cache = yaml_cache
     payload = _normalize_logical({"entities": entities, "files": files})
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()
     return {"hash": hashlib.sha256(encoded).hexdigest(), "entities": payload["entities"],
@@ -295,6 +308,24 @@ def validate_result(result: dict[str, Any]) -> None:
         raise ValueError("invalid provenance seed or manifest hash")
     if result["source_checksum_before"] != result["source_checksum_after"]:
         raise ValueError("benchmark mutated source project")
+    profiling = result.get("profiling")
+    if profiling is not None:
+        artifacts = profiling.get("artifacts", [])
+        if artifacts:
+            if not profiling.get("run_id") or profiling.get("run_id") != result["run_id"]:
+                raise ValueError("profiling run_id is not linked to result")
+            if profiling.get("manifest_hash") != provenance["manifest_hash"]:
+                raise ValueError("profiling manifest hash does not match result")
+            for descriptor in artifacts:
+                if set(descriptor) != PROFILE_DESCRIPTOR_FIELDS:
+                    raise ValueError("profiling descriptor has an invalid schema")
+                if descriptor["run_id"] != profiling["run_id"] or descriptor["manifest_hash"] != profiling["manifest_hash"]:
+                    raise ValueError("profiling descriptor provenance mismatch")
+                path = Path(str(descriptor["path"]))
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("profiling artifact path must be repository-relative")
+                if descriptor["kind"] not in {"pstats", "text", "profile_manifest"}:
+                    raise ValueError("invalid profiling artifact kind")
     for case in result["cases"]:
         for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
             if key not in case:
@@ -601,11 +632,14 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
         try: fn()
         except Exception: pass
     samples = []; errors = []; cleanup_errors: list[dict[str, Any]] = []; fs_root = project / ".vibe"; before_snapshot = _logical_snapshot(project)
+    track_sample_isolation = spec.kind == "mutation"
     metrics = getattr(fn, "_sqlite_metrics", None)
     for index in range(iterations):
         if metrics is not None:
             metrics.reset()
-        before = _fs_snapshot(fs_root); sample_snapshot = _logical_snapshot(project); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
+        before = _fs_snapshot(fs_root) if track_sample_isolation else (0, 0)
+        sample_snapshot = _logical_snapshot(project) if track_sample_isolation else None
+        start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
         try:
             if spec.setup:
                 spec.setup()
@@ -619,7 +653,9 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
                     spec.teardown()
                 except Exception as exc:
                     cleanup_errors.append({"sample_index": index, "type": type(exc).__name__})
-        wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root); after_snapshot = _logical_snapshot(project)
+        wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000
+        after = _fs_snapshot(fs_root) if track_sample_isolation else (0, 0)
+        after_snapshot = _logical_snapshot(project) if track_sample_isolation else None
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
                         "sqlite_transactions": metrics.transactions if metrics is not None else None,
@@ -630,7 +666,7 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
                         "sqlite_busy_errors": metrics.busy_errors if metrics is not None else None,
                         "sqlite_attribution": metrics.attribution if metrics is not None else {"source": None, "limitation": "case does not use SQLite"},
                         "sqlite_metrics_unavailable_reason": None if metrics is not None else "case does not use SQLite",
-                        "error": error, "isolation_clean": after_snapshot["hash"] == sample_snapshot["hash"]})
+                        "error": error, "isolation_clean": after_snapshot["hash"] == sample_snapshot["hash"] if track_sample_isolation else True})
     walls = [item["wall_ms"] for item in samples]
     after_run = _logical_snapshot(project)
     isolation = {"before_hash": before_snapshot["hash"], "after_hash": after_run["hash"],
@@ -728,7 +764,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "alternate_available": other is not None,
                 "limitation": None if other else "case is not registered for alternate storage"}
         manifest_hash = manifest["hashes"]["manifest_sha256"]
-        result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
+        result = {"schema_version": SCHEMA_VERSION, "run_id": args.run_id or f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
@@ -744,6 +780,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                   "storage_comparison": comparison, "alternate_run": {"storage_mode": alternate_storage,
                       "manifest": alternate_manifest, "cases": alternate_cases, "available": alternate_state["available"]},
                   "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
+        if args.profile_artifacts:
+            profile_root = Path(args.profile_artifacts).resolve()
+            profile_manifest_path = profile_root / "profile-manifest.json"
+            profile_manifest = json.loads(profile_manifest_path.read_text(encoding="utf-8"))
+            if profile_manifest.get("run_id") != result["run_id"]:
+                raise ValueError("profile run_id must equal benchmark run_id")
+            if profile_manifest.get("manifest_hash") != manifest_hash:
+                raise ValueError("profile manifest hash does not match benchmark")
+            descriptors = []
+            for item in profile_manifest.get("artifacts", []):
+                descriptor = dict(item)
+                path = Path(str(descriptor.get("path", "")))
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("profile artifact path must be relative")
+                actual = profile_root / path
+                data = actual.read_bytes()
+                if descriptor.get("kind") != "profile_manifest" and (descriptor.get("sha256") != hashlib.sha256(data).hexdigest() or descriptor.get("size_bytes") != len(data)):
+                    raise ValueError(f"profile artifact checksum mismatch: {path}")
+                # profile-manifest.json contains its own descriptor, so its
+                # checksum is necessarily recursive. Store the final digest
+                # in the result descriptor after reading the completed file.
+                if descriptor.get("kind") == "profile_manifest":
+                    descriptor["sha256"] = hashlib.sha256(data).hexdigest()
+                    descriptor["size_bytes"] = len(data)
+                descriptors.append(descriptor)
+            result["profiling"].update({"run_id": result["run_id"], "manifest_hash": manifest_hash,
+                                        "profile_manifest": "profile-manifest.json", "artifacts": descriptors,
+                                        "coverage": profile_manifest.get("coverage", [])})
         result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
                                "cold_available": None, "cold_strategy": "per-storage-pass",
                                "cold_limitation": "cold capability is recorded per storage pass"}
@@ -760,7 +824,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED); parser.add_argument("--run-id"); parser.add_argument("--profile-artifacts", type=Path); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)
