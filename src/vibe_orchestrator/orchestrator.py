@@ -23,8 +23,11 @@ from .sessions import SessionStore
 from .technical_debt import ObservationVerifier, TechnicalDebtError, parse_technical_debt, preflight_technical_debt, technical_debt_basis
 from .token_usage import is_confirmed_token_usage, unknown_token_usage
 from .budget_ledger import BudgetDenied, BudgetLedger, TERMINAL
+from .run_store import RunStore
 
 log = logging.getLogger("vibe")
+MAX_REWORK_REVIEW_ATTEMPTS = 3
+STALE_RUN_TIMEOUT = timedelta(minutes=30)
 
 
 def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
@@ -46,6 +49,37 @@ def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
         reason="rework_cycle_stopped",
         to_status=ticket.status,
     )
+    store.save(ticket)
+    return ticket
+
+
+def recover_stale_run(store: TicketStore, ticket_id: str, *, now: datetime | None = None,
+                      timeout: timedelta = STALE_RUN_TIMEOUT, force: bool = False) -> Ticket:
+    """Recover a started run; stale runs are automatic, fresh runs require force."""
+    ticket = store.get(ticket_id)
+    run_id = ticket.active_run
+    if not run_id:
+        raise ValueError("У тикета нет активного запуска")
+    run = RunStore(store.database).get(run_id)
+    if not run or run.get("state") != "started":
+        raise ValueError("Активный запуск уже завершён или не найден")
+    started_at = datetime.fromisoformat(run["started_at"])
+    current = now or datetime.now(timezone.utc)
+    age = current - started_at
+    if age < timeout and not force:
+        raise ValueError(f"Запуск ещё не считается зависшим: {int(age.total_seconds())} секунд")
+    started_events = [event for event in ticket.run_history if event.get("run_id") == run_id and event.get("event") == "started"]
+    source_status = started_events[-1].get("from_status") if started_events else None
+    if not source_status:
+        raise ValueError("Не найден исходный статус зависшего запуска")
+    if not RunStore(store.database).abort(run_id, reason="stale_run_recovered"):
+        raise ValueError("Запуск уже изменён другим процессом")
+    ticket.active_run = None
+    ticket.status = source_status
+    ticket.last_outcome = "run_interrupted"
+    ticket.last_summary = f"Зависший запуск восстановлен после {int(age.total_seconds() // 60)} мин.; тикет возвращён в очередь"
+    store.record_run_event(ticket, run_id=run_id, stage_id=source_status, event="stale_run_recovered",
+                           reason="stale_run_recovered", age_seconds=int(age.total_seconds()), to_status=source_status)
     store.save(ticket)
     return ticket
 
@@ -418,10 +452,18 @@ class Orchestrator:
             ticket.context_revision += 1
         target_status = (stage.outcomes or {})[result.outcome]
         if ticket.type == "rework" and workflow.id == "delivery" and result.outcome == "needs_rework":
-            # A rework is already the corrective pass. A second rejection must
-            # stop automatic execution instead of restarting the same loop.
-            target_status = "selected_for_session"
-            ticket.blocked_reason = "rework_cycle_stopped"
+            attempts = sum(
+                1
+                for event in ticket.run_history
+                if event.get("stage") == stage.id
+                and event.get("event") == "completed"
+                and event.get("outcome") == "needs_rework"
+            ) + 1
+            if attempts < MAX_REWORK_REVIEW_ATTEMPTS:
+                target_status = "ready_for_development"
+            else:
+                target_status = "selected_for_session"
+                ticket.blocked_reason = "rework_cycle_stopped"
         if ticket.type == "correction" and workflow.id == "discovery" and result.outcome == "completed":
             target_status = "done"
         if ticket.type == "rework" and workflow.id == "delivery" and stage.id == ticket.rework_stage and result.outcome == "completed":
@@ -662,15 +704,74 @@ class Orchestrator:
             self.store.save(parent)
 
     def _reconcile_tickets(self) -> None:
+        self._reconcile_rework_sessions()
         self._reconcile_blockers()
+        self._reconcile_delivery_dependencies()
         self._reconcile_discovery_implementation()
         self._reconcile_releases()
+
+    def _delivery_dependencies(self, ticket: Ticket, *, visited: set[str] | None = None) -> list[str]:
+        """Return unfinished mandatory descendants that gate this delivery tree."""
+        visited = visited or set()
+        if ticket.id in visited:
+            return []
+        visited.add(ticket.id)
+        dependencies: list[str] = []
+        for child in self.store.children_of(ticket.id, process="delivery"):
+            if not child.mandatory:
+                continue
+            if not self.store.is_done(child):
+                dependencies.append(child.id)
+            dependencies.extend(self._delivery_dependencies(child, visited=visited))
+        return sorted(set(dependencies))
+
+    def _reconcile_delivery_dependencies(self) -> None:
+        """Keep delivery parents behind every unfinished mandatory descendant."""
+        for ticket in self.store.list("delivery"):
+            if self.store.is_done(ticket):
+                continue
+            dependencies = self._delivery_dependencies(ticket)
+            if not dependencies:
+                continue
+            merged = sorted(set(ticket.blocked_by) | set(dependencies))
+            if merged != sorted(ticket.blocked_by):
+                ticket.blocked_by = merged
+                self.store.save(ticket)
+
+    def _reconcile_rework_sessions(self) -> None:
+        """Repair session membership missed by an older or interrupted process."""
+        for session in self.session_store.list():
+            if session.status != "active":
+                continue
+            members = self.session_store.effective_ticket_ids(session)
+            for parent_id in list(members):
+                try:
+                    parent = self.store.get(parent_id)
+                except KeyError:
+                    continue
+                if parent.process != "delivery":
+                    continue
+                for rework in self.store.children_of(parent.id, process="delivery"):
+                    if rework.type != "rework" or self.store.is_done(rework):
+                        continue
+                    if rework.id not in self.session_store.effective_ticket_ids(session):
+                        try:
+                            self.session_store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            log.error("не удалось восстановить membership %s для %s: %s", rework.id, session.id, exc)
 
     def _reconcile_releases(self) -> None:
         if not self.tree_manager.enabled():
             return
         for ticket in self.store.list("delivery"):
             if ticket.status != "ready_for_release" or ticket.active_run or ticket.blocked_by:
+                continue
+            dependencies = self._delivery_dependencies(ticket)
+            if dependencies:
+                ticket.blocked_by = dependencies
+                ticket.last_outcome = "blocked_dependencies"
+                ticket.last_summary = "Релиз отложен: обязательные дочерние тикеты ещё не завершены"
+                self.store.save(ticket)
                 continue
             record = self.tree_manager.trees.get(ticket.id)
             if record and record.integration_status == "conflict":

@@ -204,7 +204,12 @@ class SessionStore:
                     persisted = None
                 if persisted is not None:
                     self._validate_transition(persisted, session, allow_active_membership_extension=_allow_active_membership_extension)
-                self._validate_session(session, allow_active_membership_extension=_allow_active_membership_extension)
+                allowed_completed = set(persisted.ticket_ids) if _allow_active_membership_extension else set()
+                self._validate_session(
+                    session,
+                    allow_active_membership_extension=_allow_active_membership_extension,
+                    allowed_completed_ids=allowed_completed,
+                )
                 session.updated_at = now_iso()
                 payload = session.to_dict()
                 encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -456,7 +461,8 @@ class SessionStore:
                       if event.get("event") == "membership_override" and isinstance(event.get("ticket_id"), str))
         return result
 
-    def _validate_session(self, session: DeliverySession, *, allow_active_membership_extension: bool = False) -> None:
+    def _validate_session(self, session: DeliverySession, *, allow_active_membership_extension: bool = False,
+                          allowed_completed_ids: set[str] | None = None) -> None:
         self._validate_session_id(session.id)
         if session.schema_version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported session schema version: {session.schema_version!r}")
@@ -472,7 +478,12 @@ class SessionStore:
             value = session.budget_limits[dimension]
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
                 raise ValueError("budget limits must be non-negative integers or null")
-        self._validate_membership(session, session.ticket_ids, allow_active_membership_extension=allow_active_membership_extension)
+        self._validate_membership(
+            session,
+            session.ticket_ids,
+            allow_active_membership_extension=allow_active_membership_extension,
+            allowed_completed_ids=allowed_completed_ids,
+        )
         if not isinstance(session.membership_priorities, dict):
             raise ValueError("membership_priorities must be an object")
         if set(session.membership_priorities) - set(session.ticket_ids):
@@ -606,7 +617,7 @@ class SessionStore:
             handle.close()
 
     def _validate_membership(self, session: DeliverySession, ticket_ids: list[str], *, allow_active_membership_extension: bool = False,
-                             validate_dependencies: bool = False) -> None:
+                             validate_dependencies: bool = False, allowed_completed_ids: set[str] | None = None) -> None:
         if not isinstance(ticket_ids, list):
             raise TypeError("ticket_ids must be a list")
         if session.status != "draft" and not allow_active_membership_extension and ticket_ids != session.ticket_ids:
@@ -622,7 +633,7 @@ class SessionStore:
                 raise ValueError(f"Unknown ticket: {ticket_id}") from exc
             if ticket.process != "delivery" or ticket.type not in DELIVERY_TICKET_TYPES:
                 raise ValueError(f"Invalid delivery ticket type: {ticket.type!r}")
-            if session.status in OPEN_STATUSES and self.ticket_store.is_done(ticket):
+            if session.status in OPEN_STATUSES and self.ticket_store.is_done(ticket) and ticket_id not in (allowed_completed_ids or set()):
                 raise ValueError(f"A completed ticket cannot belong to a session: {ticket_id}")
             for dependency_id in ticket.blocked_by if validate_dependencies else ():
                 try:

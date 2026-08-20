@@ -1,14 +1,15 @@
 import asyncio
 import json
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from vibe_orchestrator.codex import AgentResult, ExecutionContract
 from vibe_orchestrator.config import PromptSpec, load_workflow
-from vibe_orchestrator.orchestrator import Orchestrator, resume_rework
+from vibe_orchestrator.orchestrator import Orchestrator, recover_stale_run, resume_rework
+from vibe_orchestrator.run_store import RunStore
 from vibe_orchestrator.scheduler import Candidate, select_candidates
 from vibe_orchestrator.technical_debt import TechnicalDebtError, technical_debt_basis
 from vibe_orchestrator.tickets import TicketStore, TicketWriteService, next_status_for_ticket, reset_failed_retry
@@ -238,6 +239,43 @@ def test_review_rework_inherits_parent_active_session(tmp_path: Path):
     )
 
 
+def test_reconcile_rework_sessions_repairs_missing_membership(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("delivery", "task", "Session parent", status="review")
+    session = orchestrator.session_store.create([parent.id])
+    orchestrator.session_store.activate(session)
+    rework = orchestrator.store.create(
+        "delivery", "rework", "Existing rework", parent=parent.id,
+        status="selected_for_session", rework_stage="review",
+    )
+
+    orchestrator._reconcile_rework_sessions()
+
+    loaded_session = orchestrator.session_store.get(session.id)
+    assert rework.id in orchestrator.session_store.effective_ticket_ids(loaded_session)
+
+
+def test_delivery_parent_waits_for_unfinished_descendants(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path)
+    parent = orchestrator.store.create("delivery", "rework", "Integration parent", status="review")
+    completed_child = orchestrator.store.create(
+        "delivery", "task", "Completed component", parent=parent.id, status="done", mandatory=True,
+    )
+    pending_child = orchestrator.store.create(
+        "delivery", "task", "Pending component", parent=completed_child.id, status="review", mandatory=True,
+    )
+
+    orchestrator._reconcile_tickets()
+
+    assert orchestrator.store.get(parent.id).blocked_by == [pending_child.id]
+
+    pending_child.status = "done"
+    orchestrator.store.save(pending_child)
+    orchestrator._reconcile_tickets()
+
+    assert orchestrator.store.get(parent.id).blocked_by == []
+
+
 def test_rework_schedule_uses_parent_and_session_budgets(tmp_path: Path):
     async def scenario() -> None:
         orchestrator = Orchestrator(tmp_path, max_agents=1)
@@ -406,7 +444,7 @@ def test_reservation_metadata_is_carried_to_contract_and_history(tmp_path: Path)
         assert run_events(completed)[1]["reservation"] == metadata
 
     asyncio.run(scenario())
-def test_rework_needs_rework_stops_the_automatic_cycle(tmp_path: Path):
+def test_rework_needs_rework_allows_three_review_attempts_then_stops(tmp_path: Path):
     orchestrator = Orchestrator(tmp_path)
     ticket = orchestrator.store.create(
         "delivery",
@@ -415,21 +453,28 @@ def test_rework_needs_rework_stops_the_automatic_cycle(tmp_path: Path):
         status="review",
         rework_stage="review",
     )
-    ticket.active_run = "run-rework-review"
-    orchestrator.store.save(ticket)
-
     workflow = load_workflow("delivery")
-    orchestrator._apply_result(
-        workflow,
-        ticket.id,
-        workflow.by_id["review"],
-        AgentResult(outcome="needs_rework", summary="Нужен integration-тест", details="AC-7.4"),
-    )
+    review = workflow.by_id["review"]
+    for attempt in range(1, 4):
+        current = orchestrator.store.get(ticket.id)
+        current.active_run = f"run-rework-review-{attempt}"
+        orchestrator.store.save(current)
+        orchestrator._apply_result(
+            workflow,
+            ticket.id,
+            review,
+            AgentResult(outcome="needs_rework", summary="Нужен integration-тест", details="AC-7.4"),
+        )
+        updated = orchestrator.store.get(ticket.id)
+        if attempt < 3:
+            assert updated.status == "ready_for_development"
+            assert updated.blocked_reason is None
+        else:
+            assert updated.status == "selected_for_session"
+            assert updated.blocked_reason == "rework_cycle_stopped"
 
     updated = orchestrator.store.get(ticket.id)
-    assert updated.status == "selected_for_session"
     assert updated.last_outcome == "needs_rework"
-    assert updated.blocked_reason == "rework_cycle_stopped"
     assert orchestrator.store.children_of(ticket.id, process="delivery") == []
     assert select_candidates(workflow, [updated], set()) == []
 
@@ -447,6 +492,57 @@ def test_manual_resume_rework_returns_to_development_queue(tmp_path: Path):
     assert resumed.blocked_reason is None
     assert resumed.last_outcome == "manual_rework_resumed"
     assert resumed.run_history[-1]["event"] == "manual_rework_resumed"
+
+
+def test_recover_stale_run_returns_ticket_to_source_queue(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Stale run", status="ready_for_review")
+    run_id = "stale-run"
+    RunStore(store.database).start(
+        {"run_id": run_id, "ticket_id": ticket.id, "process": "delivery", "stage": "review"},
+        prompt_contract="contract",
+        prompt_text="prompt",
+    )
+    ticket.status = "review"
+    ticket.active_run = run_id
+    store.record_run_event(ticket, run_id=run_id, stage_id="review", event="started", from_status="ready_for_review", to_status="review")
+    store.save(ticket)
+
+    recovered = recover_stale_run(
+        store,
+        ticket.id,
+        now=datetime.now(timezone.utc) + timedelta(minutes=31),
+    )
+
+    assert recovered.status == "ready_for_review"
+    assert recovered.active_run is None
+    assert recovered.last_outcome == "run_interrupted"
+    assert recovered.run_history[-1]["event"] == "stale_run_recovered"
+    assert RunStore(store.database).get(run_id)["state"] == "aborted"
+
+
+def test_recover_stale_run_rejects_fresh_run(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Fresh run", status="development")
+    run_id = "fresh-run"
+    RunStore(store.database).start(
+        {"run_id": run_id, "ticket_id": ticket.id, "process": "delivery", "stage": "development"},
+        prompt_contract="contract",
+        prompt_text="prompt",
+    )
+    ticket.status = "development"
+    ticket.active_run = run_id
+    store.record_run_event(ticket, run_id=run_id, stage_id="development", event="started", from_status="ready_for_development", to_status="development")
+    store.save(ticket)
+
+    with pytest.raises(ValueError, match="ещё не считается зависшим"):
+        recover_stale_run(store, ticket.id)
+
+    recovered = recover_stale_run(store, ticket.id, force=True)
+    assert recovered.active_run is None
+    assert recovered.status == "ready_for_development"
 
 
 @pytest.mark.parametrize(

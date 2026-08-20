@@ -529,6 +529,7 @@ def test_ticket_drawer_contains_context_history_artifacts_and_accessibility(proj
     assert 'data-ticket-drawer' in page and 'data-drawer-ticket="' + ticket.id + '"' in page
     assert "Подробное описание" in page and "Итог запуска" in page
     assert "DEL-PARENT" in page and "DEL-BLOCKED" in page
+    assert "ждёт зависимость" in page
     assert "/artifacts/run-active" in page
     assert "aria-label=\"Контекст тикета\"" in page
     assert "Escape" in page and "data-drawer-close" in page
