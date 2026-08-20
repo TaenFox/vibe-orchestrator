@@ -34,14 +34,15 @@ def test_benchmark_docs_use_required_decimal_seed():
 def test_performance_policy_documents_thresholds_and_slo_decision():
     text = Path("docs/performance.md").read_text(encoding="utf-8")
     assert "Optimization criteria and regression policy" in text
-    assert "Decision record (DEL-355F27, acceptance revision 3)" in text
-    assert "Authority/reference:" in text
-    assert "product-owner decision recorded" in text
-    assert "Future per-case or case-group targets must be recorded here" in text
-    assert "Owner-approved SLO decision" in text
-    assert "no absolute latency SLO is" in text
+    assert "Decision status (DEL-355F27): pending verifiable owner/product approval." in text
+    assert "does not contain a committed decision record" in text
+    assert "no approval is inferred from acceptance prose" in text
+    assert "repository-relative decision artifact" in text
+    assert "numeric per-case or case-group targets" in text
     assert "at least 20%" in text
     assert ">5%" in text
+    assert "Owner-approved SLO decision" not in text
+    assert "product-owner decision recorded" not in text
 
 
 def test_profile_linkage_descriptors_are_portable_and_complete():
