@@ -49,6 +49,23 @@ def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path)
     assert "Stopped rework" in board
 
 
+def test_framework_ui_shows_blocker_titles_on_board_and_detail(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    blocker = store.create("delivery", "task", "Незавершённая зависимость", status="review")
+    ticket = store.create("delivery", "task", "Ожидающий тикет", status="development")
+    ticket.blocked_by = [blocker.id]
+    store.save(ticket)
+
+    board = _board_html(store, load_all_workflows(), "delivery")
+    detail = _ticket_html(store, load_all_workflows(), ticket.id)
+
+    assert "ждёт зависимость" in board
+    assert blocker.id in board and blocker.title in board
+    assert "Блокировки" in detail
+    assert blocker.title in detail
+
+
 def test_manual_rework_resume_clears_only_cycle_block():
     ticket = type("Ticket", (), {"type": "rework", "blocked_reason": "rework_cycle_stopped"})()
 

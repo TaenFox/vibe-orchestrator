@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import json
 import pytest
+import yaml
 
-from benchmarks.performance.run_benchmark import CaseRegistry, CaseSpec, _cold_capability, _cases, _run_case, percentile, run, statistics_for, validate_result
+from benchmarks.performance.run_benchmark import CaseRegistry, CaseSpec, _cold_capability, _cases, _logical_snapshot, _run_case, percentile, run, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
@@ -123,6 +123,22 @@ def test_result_validation_requires_clean_isolation_for_mutation():
         validate_result(result)
 
 
+@pytest.mark.parametrize(
+    ("expected_outcome", "error"),
+    [("success", "RuntimeError"), ("error", None)],
+)
+def test_result_validation_requires_declared_outcome(expected_outcome, error):
+    sample = {"sample_index": 2, "wall_ms": 1.0, "error": error}
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [{"case_id": "outcome.case", "component": "x", "operation": "y",
+                          "kind": "read_only", "storage_mode": "sqlite", "dataset_dimensions": {},
+                          "expected_outcome": expected_outcome, "errors": [], "statistics": {},
+                          "sample_count": 1, "raw_samples": [sample]}],
+              "source_checksum_before": "a", "source_checksum_after": "a"}
+    with pytest.raises(ValueError, match=r"outcome\.case.*sample_index 2"):
+        validate_result(result)
+
+
 @pytest.mark.parametrize("isolation_clean", [False, None])
 def test_result_validation_requires_clean_isolation_for_each_read_only_sample(isolation_clean):
     sample = {"sample_index": 3, "wall_ms": 1.0, "error": None}
@@ -152,6 +168,28 @@ def test_run_case_read_only_contamination_is_rejected_by_validation(tmp_path):
     with pytest.raises(ValueError, match=r"test\.read_only_contamination.*sample_index 0"):
         validate_result({"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
                          "cases": [result], "source_checksum_before": "a", "source_checksum_after": "a"})
+
+
+def test_logical_snapshot_reuses_unchanged_yaml_files(tmp_path, monkeypatch):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    fixture = root / "fixture.yaml"
+    fixture.write_text("state: stable\n", encoding="utf-8")
+    calls = []
+    original = yaml.safe_load
+
+    def counted(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr("benchmarks.performance.run_benchmark.yaml.safe_load", counted)
+    _logical_snapshot(tmp_path)
+    _logical_snapshot(tmp_path)
+    assert len(calls) == 1
+
+    fixture.write_text("state: changed\n", encoding="utf-8")
+    _logical_snapshot(tmp_path)
+    assert len(calls) == 2
 
 
 def test_case_registry_cleanup_is_idempotent():
@@ -212,6 +250,85 @@ def test_run_case_callback_exception_still_cleans_mutation(tmp_path):
     assert result["isolation"]["leaked_paths"] == []
     assert result["isolation"]["cleanup_errors"] == []
     assert result["isolation"]["clean"] is True
+
+
+def test_run_case_warmup_uses_cleanup_and_does_not_move_baseline(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    synthetic = root / "warmup.yaml"
+    calls = []
+
+    def setup():
+        calls.append("setup")
+
+    def run_callback():
+        synthetic.write_text("state: warmup\n", encoding="utf-8")
+        calls.append("run")
+
+    def teardown():
+        synthetic.unlink(missing_ok=True)
+        calls.append("teardown")
+
+    result = _run_case(CaseSpec("test.warmup", "test", "mutation", run_callback,
+                                kind="mutation", setup=setup, teardown=teardown),
+                       tmp_path, warmup=1, iterations=1, noisy=False, storage_mode="sqlite",
+                       manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+    assert calls == ["setup", "run", "teardown", "setup", "run", "teardown"]
+    assert result["isolation"]["clean"] is True
+
+
+def test_run_case_warmup_teardown_runs_after_exception(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+    synthetic = root / "warmup-error.yaml"
+    teardown_calls = []
+
+    def run_callback():
+        synthetic.write_text("state: leaked\n", encoding="utf-8")
+        raise RuntimeError("expected")
+
+    def teardown():
+        teardown_calls.append(True)
+        synthetic.unlink(missing_ok=True)
+
+    result = _run_case(CaseSpec("test.warmup.error", "test", "mutation", run_callback,
+                                kind="mutation", expected_outcome="error", teardown=teardown),
+                       tmp_path, warmup=1, iterations=1, noisy=False, storage_mode="sqlite",
+                       manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+    assert teardown_calls == [True, True]
+    assert result["errors"] == [{"sample_index": 0, "type": "RuntimeError"}]
+    assert result["isolation"]["clean"] is True
+
+
+def test_run_case_rejects_unexpected_warmup_error(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+
+    def run_callback():
+        raise RuntimeError("unexpected")
+
+    with pytest.raises(ValueError, match="warmup execution failed.*RuntimeError"):
+        _run_case(CaseSpec("test.warmup.unexpected", "test", "mutation", run_callback,
+                           kind="mutation"), tmp_path, warmup=1, iterations=1,
+                  noisy=False, storage_mode="sqlite",
+                  manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+
+
+def test_budget_override_cases_use_isolated_budget(tmp_path):
+    generate_fixture(tmp_path, seed=12, size="small", storage_mode="sqlite")
+    cases = _cases(tmp_path, storage="sqlite")
+    try:
+        for case_id in ("budgetledger.increase_limit", "budgetledger.allow_overrun",
+                        "budgetledger.set_status", "budgetledger.resolve_unknown",
+                        "budgetledger.adjustment"):
+            case = next(case for case in cases if case.case_id == case_id)
+            result = _run_case(case, tmp_path, warmup=1, iterations=1, noisy=False,
+                               storage_mode="sqlite", manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+            assert result["errors"] == []
+            assert result["raw_samples"][0]["error"] is None
+            assert result["isolation"]["clean"] is True
+    finally:
+        cases.cleanup()
 
 
 def test_run_case_reports_only_real_teardown_failure(tmp_path):
