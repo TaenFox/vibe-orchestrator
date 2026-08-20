@@ -704,15 +704,74 @@ class Orchestrator:
             self.store.save(parent)
 
     def _reconcile_tickets(self) -> None:
+        self._reconcile_rework_sessions()
         self._reconcile_blockers()
+        self._reconcile_delivery_dependencies()
         self._reconcile_discovery_implementation()
         self._reconcile_releases()
+
+    def _delivery_dependencies(self, ticket: Ticket, *, visited: set[str] | None = None) -> list[str]:
+        """Return unfinished mandatory descendants that gate this delivery tree."""
+        visited = visited or set()
+        if ticket.id in visited:
+            return []
+        visited.add(ticket.id)
+        dependencies: list[str] = []
+        for child in self.store.children_of(ticket.id, process="delivery"):
+            if not child.mandatory:
+                continue
+            if not self.store.is_done(child):
+                dependencies.append(child.id)
+            dependencies.extend(self._delivery_dependencies(child, visited=visited))
+        return sorted(set(dependencies))
+
+    def _reconcile_delivery_dependencies(self) -> None:
+        """Keep delivery parents behind every unfinished mandatory descendant."""
+        for ticket in self.store.list("delivery"):
+            if self.store.is_done(ticket):
+                continue
+            dependencies = self._delivery_dependencies(ticket)
+            if not dependencies:
+                continue
+            merged = sorted(set(ticket.blocked_by) | set(dependencies))
+            if merged != sorted(ticket.blocked_by):
+                ticket.blocked_by = merged
+                self.store.save(ticket)
+
+    def _reconcile_rework_sessions(self) -> None:
+        """Repair session membership missed by an older or interrupted process."""
+        for session in self.session_store.list():
+            if session.status != "active":
+                continue
+            members = self.session_store.effective_ticket_ids(session)
+            for parent_id in list(members):
+                try:
+                    parent = self.store.get(parent_id)
+                except KeyError:
+                    continue
+                if parent.process != "delivery":
+                    continue
+                for rework in self.store.children_of(parent.id, process="delivery"):
+                    if rework.type != "rework" or self.store.is_done(rework):
+                        continue
+                    if rework.id not in self.session_store.effective_ticket_ids(session):
+                        try:
+                            self.session_store.inherit_ticket(session, rework.id, source_ticket=parent.id)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            log.error("не удалось восстановить membership %s для %s: %s", rework.id, session.id, exc)
 
     def _reconcile_releases(self) -> None:
         if not self.tree_manager.enabled():
             return
         for ticket in self.store.list("delivery"):
             if ticket.status != "ready_for_release" or ticket.active_run or ticket.blocked_by:
+                continue
+            dependencies = self._delivery_dependencies(ticket)
+            if dependencies:
+                ticket.blocked_by = dependencies
+                ticket.last_outcome = "blocked_dependencies"
+                ticket.last_summary = "Релиз отложен: обязательные дочерние тикеты ещё не завершены"
+                self.store.save(ticket)
                 continue
             record = self.tree_manager.trees.get(ticket.id)
             if record and record.integration_status == "conflict":
