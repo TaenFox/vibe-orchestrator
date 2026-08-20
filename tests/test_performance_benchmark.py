@@ -157,6 +157,22 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
     assert {item[3] for item in cases}
 
 
+def test_http_registry_reports_unavailable_loopback_without_relative_url(monkeypatch, tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+
+    def unavailable_server(*args, **kwargs):
+        raise OSError("loopback disabled")
+
+    monkeypatch.setattr("benchmarks.performance.run_benchmark.start_server", unavailable_server)
+    cases = _cases(tmp_path, storage="sqlite")
+    http_case = next(case for case in cases if case.case_id == "http.api_tickets")
+
+    assert http_case.limitations == ["HTTP loopback server unavailable: OSError"]
+    with pytest.raises(RuntimeError, match="HTTP loopback server unavailable"):
+        http_case.run()
+    cases.cleanup()
+
+
 def test_case_registry_has_stable_kinds_and_required_matrix(tmp_path):
     generate_fixture(tmp_path, seed=8, size="small", storage_mode="sqlite")
     cases = _cases(tmp_path, storage="sqlite")

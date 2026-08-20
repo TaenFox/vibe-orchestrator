@@ -80,7 +80,7 @@
     "materialized_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "dataset_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "readback": {
-      "digest": "10656f7b7c5a8e1072744d4d90b83930b295fe0cf52bdc9fb466989470a215db",
+      "digest": "5c28dc84595f50da1bcf4d22a463270822b45d7aea5623bac52b4d6f0df370d1",
       "counts": {
         "tickets": 100,
         "sessions": 4,
@@ -1020,7 +1020,7 @@
     "materialized_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "dataset_tree_sha256": "d8ae36a01a56e89d591af31faae799c894d5227ebfea27c35524a19091d24761",
     "readback": {
-      "digest": "10656f7b7c5a8e1072744d4d90b83930b295fe0cf52bdc9fb466989470a215db",
+      "digest": "5c28dc84595f50da1bcf4d22a463270822b45d7aea5623bac52b4d6f0df370d1",
       "counts": {
         "tickets": 100,
         "sessions": 4,
@@ -1899,16 +1899,18 @@
       "ticketstore.list.delivery",
       "--output",
       "benchmarks/performance/artifacts/profile-small-seed-35527",
+      "--run-id",
+      "profile",
       "--warmup",
-      "0",
+      "5",
       "--iterations",
-      "1",
+      "30",
       "--seed",
       "35527"
     ]
   },
-  "warmup": 0,
-  "iterations": 1,
+  "warmup": 5,
+  "iterations": 30,
   "coverage": [
     {
       "component": "TicketStore",
@@ -1920,8 +1922,8 @@
       ],
       "errors": [],
       "sample_parameters": {
-        "warmup": 0,
-        "iterations": 1
+        "warmup": 5,
+        "iterations": 30
       }
     },
     {
@@ -1934,8 +1936,8 @@
       ],
       "errors": [],
       "sample_parameters": {
-        "warmup": 0,
-        "iterations": 1
+        "warmup": 5,
+        "iterations": 30
       }
     },
     {
@@ -1948,8 +1950,8 @@
       ],
       "errors": [],
       "sample_parameters": {
-        "warmup": 0,
-        "iterations": 1
+        "warmup": 5,
+        "iterations": 30
       }
     },
     {
@@ -1968,121 +1970,84 @@
       ],
       "errors": [],
       "sample_parameters": {
-        "warmup": 0,
-        "iterations": 1
+        "warmup": 5,
+        "iterations": 30
       }
     },
     {
       "component": "UI",
       "case_id": "ui.render_board.compact",
-      "status": "profiled",
-      "artifact_paths": [
-        "ui.render_board.compact.pstats",
-        "ui.render_board.compact.txt"
-      ],
-      "errors": [],
+      "status": "unavailable",
+      "reason": "HTTP loopback server unavailable: PermissionError",
       "sample_parameters": {
-        "warmup": 0,
-        "iterations": 1
+        "warmup": 5,
+        "iterations": 30
       }
     },
     {
       "component": "HTTP",
       "case_id": "http.api_tickets",
-      "status": "failed",
-      "artifact_paths": [
-        "http.api_tickets.pstats",
-        "http.api_tickets.txt"
-      ],
-      "errors": [
-        {
-          "sample_index": 0,
-          "error": "ValueError(\"unknown url type: '/api/tickets'\")"
-        }
-      ],
+      "status": "unavailable",
+      "reason": "HTTP loopback server unavailable: PermissionError",
       "sample_parameters": {
-        "warmup": 0,
-        "iterations": 1
+        "warmup": 5,
+        "iterations": 30
       }
     }
   ],
   "artifacts": [
     {
       "path": "ticketstore.list.delivery.pstats",
-      "sha256": "3a97870aa114e430611a3251ea59d0f3ca770efd8a769f4c1a9c1d20cecb5d68",
+      "sha256": "cca239b53e6a890453c2884d8b8aa1d878fb6eb6ce36b7cbcdcd8c60a728c407",
       "size_bytes": 8160,
       "kind": "pstats"
     },
     {
       "path": "ticketstore.list.delivery.txt",
-      "sha256": "663e145917eaff3bd8d70249ee77b70347e118e4a3f57db29b9f6e705e5b726d",
+      "sha256": "256c15f4647bb06f10aea52c54309c407644347641abdf61806ca3d93ce83232",
       "size_bytes": 5892,
       "kind": "text"
     },
     {
       "path": "sessionstore.list.pstats",
-      "sha256": "4496d51cfbf0559f92b4f86abb253b4a87b886b7563afb9430ff1328838af890",
+      "sha256": "9c2b1c2cd66db2632c45f70af33a95092a7acbdcce7b070ab5ce4b586b540bc5",
       "size_bytes": 8943,
       "kind": "pstats"
     },
     {
       "path": "sessionstore.list.txt",
-      "sha256": "cc2d311a6dfe681521ebd6cc7bb77f77234bc1bc036de4d004ff28105baa0197",
-      "size_bytes": 6156,
+      "sha256": "9679b962c949e9636796562d8fd62aae2424556e5d764a56b9be4e9d28a8ce3e",
+      "size_bytes": 6185,
       "kind": "text"
     },
     {
       "path": "budgetledger.list_runs.pstats",
-      "sha256": "c7ec33724e47bcf84226e4710b39fff3b96dae03c6dc5b8b79cb7570ac733041",
+      "sha256": "d63b8d67df05aa214391b5c4869df95e2891856235627dbdd06c8c372d036d4a",
       "size_bytes": 5344,
       "kind": "pstats"
     },
     {
       "path": "budgetledger.list_runs.txt",
-      "sha256": "7520f41832d38f4c323fffa535c33ef9077879f30cd1a340755925409a0c0138",
-      "size_bytes": 5450,
+      "sha256": "249a02fa9f9f54802b8a76d54f9a446c911a09c45b1501e884faa02bcbb29951",
+      "size_bytes": 5452,
       "kind": "text"
     },
     {
       "path": "scheduler.select_candidates.pstats",
-      "sha256": "5920b76e321f2a03bbb73a5ce9414977b838ca6530a2f9ec27f58882d92ccbdd",
+      "sha256": "9a0de27b4bd7853a4608ebb9bb50a388bbd3d16ccfdb0c2442010861eb079e61",
       "size_bytes": 1724,
       "kind": "pstats"
     },
     {
       "path": "scheduler.select_candidates.txt",
-      "sha256": "d7d0efed32fa6df36e2a8813669fc6e8ecdbb6f75349a09ce3193774bdfd2f20",
-      "size_bytes": 2102,
-      "kind": "text"
-    },
-    {
-      "path": "ui.render_board.compact.pstats",
-      "sha256": "ab848d78bc61e5f1eaf3a4e3c99e251543668107d3bbc1b5da76299b5e1f6a36",
-      "size_bytes": 50831,
-      "kind": "pstats"
-    },
-    {
-      "path": "ui.render_board.compact.txt",
-      "sha256": "04a7be4ecf19ee7f8cb7a80ae52e8e1b4fc418ed98683f39ddbe85aa6f1ebe5c",
-      "size_bytes": 7100,
-      "kind": "text"
-    },
-    {
-      "path": "http.api_tickets.pstats",
-      "sha256": "b2e5ecc97b23aa5dae466e6b72f27fea20259908bca1f96a0ec6821ad4768f95",
-      "size_bytes": 12611,
-      "kind": "pstats"
-    },
-    {
-      "path": "http.api_tickets.txt",
-      "sha256": "5f40441eb1a60d1533a41daeede0390101e680f5c17aab57146821982fe505be",
-      "size_bytes": 6010,
+      "sha256": "65e8c762faf7613c4044867058a8163bc649943111f9e5c673737060d4e8a326",
+      "size_bytes": 2104,
       "kind": "text"
     },
     {
       "path": "profile-manifest.json",
-      "sha256": "fc6ea87e93c66cf26695379ff55ebdf12e988168dc4b3e13528316b50c073bf6",
-      "size_bytes": 54981,
+      "sha256": "59ebf5139954524287e32efcb89049358028f2748945cfd479494c9370c42280",
+      "size_bytes": 54034,
       "kind": "profile_manifest"
     }
   ]

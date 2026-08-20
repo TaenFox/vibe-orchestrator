@@ -118,6 +118,11 @@ def main() -> int:
                 coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
                                  "reason": "required case is unavailable in this runtime/storage mode"})
                 continue
+            limitations = list(match.limitations)
+            if limitations:
+                coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
+                                 "reason": "; ".join(limitations), "sample_parameters": {"warmup": args.warmup, "iterations": args.iterations}})
+                continue
             safe_id = case_id.replace("/", "_")
             path = args.output / f"{safe_id}.pstats"
             text_path = args.output / f"{safe_id}.txt"

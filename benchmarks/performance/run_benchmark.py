@@ -399,15 +399,21 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     ui_sessions = DeliverySessionStore(project) if storage == "sqlite" else sessions
     ui_worker = WorkerControl(project)
     server = None
-    base_url = ""
+    base_url = None
     http_limitation = None if storage == "sqlite" else "HTTP loopback cases are unavailable in YAML registry mode"
     if storage == "sqlite":
         try:
             server, _thread = start_server(project, port=0, open_browser=False)
-            base_url = f"http://127.0.0.1:{server.server_port}"
+            # ``start_server`` accepts port 0.  Read the address assigned by
+            # the socket rather than reconstructing it from the requested
+            # port; the latter produces ``http://127.0.0.1:0`` and can hide
+            # an unavailable endpoint behind a malformed relative URL.
+            base_url = f"http://{server.server_address[0]}:{server.server_address[1]}"
         except OSError as exc:
             http_limitation = f"HTTP loopback server unavailable: {type(exc).__name__}"
     def http(path: str) -> bytes:
+        if base_url is None:
+            raise RuntimeError(http_limitation or "HTTP loopback server unavailable")
         with urllib.request.urlopen(base_url + path, timeout=10) as response:
             return response.read()
     def http_error(path: str) -> bytes:
