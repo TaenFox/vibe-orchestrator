@@ -55,11 +55,24 @@ manifest hash. Hotspot считается подтверждённым толь�
 SQLite cases connection factory устанавливается только harness-ом и собирает
 `sqlite_queries`, `sqlite_transactions`, `sqlite_errors` и
 `sqlite_busy_errors` per sample. `sqlite_attribution` содержит источник
-instrumentation и версию контракта; `sqlite_explain_query_plan` остаётся
-привязанным к case. TicketStore, SessionStore и BudgetLedger используют один
-factory, поэтому counters не смешиваются между компонентами или итерациями.
-Для YAML/non-SQLite cases SQLite fields равны `null`, а
-`sqlite_attribution` содержит limitation, а не ложные нули.
+instrumentation и версию контракта. Для SQLite SQL cases benchmark сохраняет
+`sqlite_explain_query_plan` на уровне конкретного `case_id`: TicketStore покрывает
+process/full list и `ticket_id` lookup, SessionStore — list/get и case-specific
+lifecycle read families (ticket validation, existing-session lookup и ordered
+scan открытых sessions, где они выполняются). Validation-error cases получают только query families, достигнутые
+до ошибки; membership validation получает `tickets.ticket_id` lookup, а overlap
+в `SessionStore.create()` получает также `sessions.session_id` lookup и
+`sessions ordered list`, поскольку `save()` проверяет существующую session, а
+`_validate_session()` сканирует открытые sessions до записи. Записи lifecycle в `sessions`, `session_members` и `events` не
+подменяются выдуманными DML plans; case содержит typed limitation о том, что
+`EXPLAIN QUERY PLAN` не даёт portable write-plan contract.
+Это статическое audit evidence формы запроса, а не trace фактически выполненных
+statements. TicketStore, SessionStore и BudgetLedger используют один factory,
+поэтому counters не смешиваются между компонентами или итерациями. Для
+YAML/non-SQLite cases и SQLite-backed `load_path` SQLite fields равны `null`, а
+`sqlite_attribution` содержит limitation; `load_path` читает YAML и корректно имеет
+пустой plan. Остальные SQLite cases получают attribution и планы только для
+фактически используемых SQL query families.
 
 ## Lock/busy wait methodology
 
@@ -91,7 +104,9 @@ Regression tests используют отдельные SQLite databases и Thr
 
 `validate_result` требует ссылки ошибок на существующие sample indices и при
 наличии SQLite counters проверяет полный attribution набор, согласованность
-lock-wait fields и непустой source. Схема `performance-result.v2` остаётся
+lock-wait fields и непустой source. Если case содержит explain plans, проверяются
+строковые `query` и `detail: list[str]`; plans сериализуются в JSON без
+SQLite connection/cursor объектов. Схема `performance-result.v2` остаётся
 backward-compatible: старые artifacts без новых optional fields принимаются,
 новые instrumented samples обязаны содержать их. `BudgetDenied`,
 `ImmutableRunError` и validation errors остаются частью case outcome.
@@ -112,5 +127,8 @@ cache eviction и alternate filesystems capability-dependent; при недос�
 результат содержит причину и не формулирует portable comparison conclusion.
 Портативного точного busy-handler wait metric в Python 3.11 нет; для заполнения
 lock-wait fields потребуется explicit retry wrapper или platform-specific tracing.
-Сейчас выбран benchmark-only connection injection; production connection factory
-по умолчанию не меняется.
+EXPLAIN зависит от версии SQLite и индексов; для lifecycle DML фиксируются
+только фактически выполняемые связанные read/query families, поскольку explain
+detail для записи не является универсальным контрактом, а limitation сохраняет
+это различие явным. Сейчас выбран benchmark-only connection injection;
+production connection factory по умолчанию не меняется.

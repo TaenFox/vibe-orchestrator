@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import pytest
 
-from benchmarks.performance.run_benchmark import (SQLiteMetrics, _cold_capability, _cases,
+from benchmarks.performance.run_benchmark import (SQLiteMetrics, _cold_capability, _cases, _run_case,
                                                    instrumented_connection_factory, percentile,
                                                    statistics_for, validate_result)
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
@@ -119,6 +119,88 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
     }
     assert required <= ids
     assert {item[3] for item in cases}
+
+
+def test_sqlite_store_cases_have_attributed_query_plans(tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
+    case_ids = ("ticketstore.list.delivery", "ticketstore.list.all", "ticketstore.get.hit",
+                "ticketstore.get.miss", "ticketstore.children_of", "sessionstore.list",
+                "sessionstore.get", "sessionstore.create", "sessionstore.activate",
+                "sessionstore.complete", "sessionstore.cancel", "sessionstore.add_membership",
+                "sessionstore.remove_membership", "sessionstore.membership_validation.error",
+                "sessionstore.validation.overlap.error")
+    expected_labels = {
+        "ticketstore.list.delivery": {"tickets.process list"},
+        "ticketstore.list.all": {"tickets ordered list"},
+        "ticketstore.get.hit": {"tickets.ticket_id lookup"},
+        "ticketstore.get.miss": {"tickets.ticket_id lookup"},
+        "ticketstore.children_of": {"tickets ordered list"},
+        "sessionstore.list": {"sessions ordered list"},
+        "sessionstore.get": {"sessions.session_id lookup"},
+        "sessionstore.membership_validation.error": {"tickets.ticket_id lookup"},
+        "sessionstore.validation.overlap.error": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.create": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.activate": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.complete": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.cancel": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.add_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+        "sessionstore.remove_membership": {"tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"},
+    }
+    for case_id in case_ids:
+        plans = getattr(cases[case_id], "_sqlite_plans")
+        assert plans, case_id
+        assert all(isinstance(plan["query"], str) and isinstance(plan["detail"], list) for plan in plans)
+        assert all(all(isinstance(detail, str) for detail in plan["detail"]) for plan in plans)
+        assert {plan["query"] for plan in plans} == expected_labels[case_id]
+    assert any("USING INDEX" in detail or "USING INTEGER PRIMARY KEY" in detail
+               for detail in getattr(cases["ticketstore.get.hit"], "_sqlite_plans")[0]["detail"])
+    assert any("sessions" in plan["query"] for plan in getattr(cases["sessionstore.get"], "_sqlite_plans"))
+    for case_id in expected_labels:
+        if case_id.startswith("sessionstore.") and case_id not in {"sessionstore.list", "sessionstore.get"}:
+            if case_id.startswith("sessionstore.validation.") or case_id == "sessionstore.membership_validation.error":
+                assert not getattr(cases[case_id], "_limitations")
+            else:
+                assert any("lifecycle read families" in item for item in getattr(cases[case_id], "_limitations"))
+
+
+def test_session_validation_plan_attribution_matches_executed_query_family(tmp_path):
+    """Regression: overlap creation attributes both reads it actually reaches."""
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
+
+    overlap = getattr(cases["sessionstore.validation.overlap.error"], "_sqlite_plans")
+    missing_membership = getattr(cases["sessionstore.membership_validation.error"], "_sqlite_plans")
+    assert [plan["query"] for plan in overlap] == ["tickets.ticket_id lookup", "sessions.session_id lookup", "sessions ordered list"]
+    assert [plan["query"] for plan in missing_membership] == ["tickets.ticket_id lookup"]
+    assert any("sessions" in detail.lower() for plan in overlap for detail in plan["detail"])
+
+
+def test_yaml_load_path_has_no_sqlite_plans(tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="yaml")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="yaml")}
+    assert getattr(cases["ticketstore.load_path"], "_sqlite_plans") == []
+    assert getattr(cases["sessionstore.load_path"], "_sqlite_plans") == []
+
+
+def test_sqlite_load_path_is_explicitly_non_sqlite(tmp_path):
+    manifest = generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
+    for case_id in ("ticketstore.load_path", "sessionstore.load_path"):
+        fn = cases[case_id]
+        assert getattr(fn, "_sqlite_metrics") is None
+        assert getattr(fn, "_sqlite_plans") == []
+        result = _run_case(case_id, "TicketStore" if case_id.startswith("ticket") else "SessionStore",
+                           "load_path", fn, tmp_path, 0, 1, False,
+                           storage_mode="sqlite", manifest=manifest)
+        assert result["sqlite_explain_query_plan"] == []
+        assert any("case does not use SQLite" in item for item in result["limitations"])
+        sample = result["raw_samples"][0]
+        assert sample["sqlite_queries"] is None
+        assert sample["sqlite_attribution"]["source"] is None
+        validate_result({"schema_version": "performance-result.v2", "run_id": "r",
+                         "dataset_manifest": {}, "cases": [result],
+                         "source_checksum_before": "a", "source_checksum_after": "a"})
 
 
 def test_contention_case_observes_a_released_writer_lock(tmp_path):
