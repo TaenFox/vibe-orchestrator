@@ -151,7 +151,10 @@ class SQLiteMetrics:
 class InstrumentedLedger(BudgetLedger):
     def __init__(self, project: Path, metrics: SQLiteMetrics) -> None:
         self.metrics = metrics
-        super().__init__(project)
+        # Benchmark-only policy context: the registry exercises the supported
+        # decision operations, so it must not fail merely because the fixture
+        # ledger has no production authorizer configured.
+        super().__init__(project, authorizer=lambda **_: (True, "benchmark-policy/v1"))
 
     def _connect(self) -> sqlite3.Connection:
         connection = super()._connect()
@@ -218,6 +221,13 @@ def validate_result(result: dict[str, Any]) -> None:
         for sample in case["raw_samples"]:
             if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
                 raise ValueError("invalid sample schema")
+            sample_index = sample.get("sample_index")
+            has_error = sample.get("error") is not None
+            expected = case["expected_outcome"]
+            if expected == "success" and has_error:
+                raise ValueError(f"unexpected error for {case.get('case_id')} at sample_index {sample_index}")
+            if expected == "error" and not has_error:
+                raise ValueError(f"expected error missing for {case.get('case_id')} at sample_index {sample_index}")
             if kind == "read_only" and sample.get("isolation_clean") is not True:
                 raise ValueError(
                     f"unclean read-only sample {case.get('case_id')} "
@@ -226,6 +236,13 @@ def validate_result(result: dict[str, Any]) -> None:
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
+        error_indices = {error.get("sample_index") for error in case["errors"]}
+        if case["expected_outcome"] == "error":
+            for sample in case["raw_samples"]:
+                if sample["sample_index"] not in error_indices:
+                    raise ValueError(
+                        f"error missing for {case.get('case_id')} at sample_index {sample['sample_index']}"
+                    )
         if "isolation" in case:
             for key in ("before_hash", "after_hash", "leaked_entities", "leaked_paths", "cleanup_errors", "clean"):
                 if key not in case["isolation"]:
@@ -289,6 +306,10 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
     second_ticket_id = next(item.id for item in tickets if item.id != ticket_id)
     budget_id = f"ticket:{ticket_id}"
     session_id = sessions.list()[0].id
+    overlap_ticket_id = next(
+        (ticket for item in sessions.list() if item.status in {"draft", "active"} for ticket in item.ticket_ids),
+        ticket_id,
+    )
     ticket_yaml = project / ".vibe" / "benchmark-snapshots" / f"{ticket_id}.yaml"
     session_yaml = sessions.session_path(session_id)
     ticket_yaml.parent.mkdir(parents=True, exist_ok=True)
@@ -327,6 +348,23 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
                     db.execute("DELETE FROM sessions WHERE session_id=?", (session.id,))
             else:
                 sessions.session_path(session).unlink(missing_ok=True)
+
+    def isolated_session_creation(action: Callable[[], Any]) -> Any:
+        """Clean sessions that are persisted before a validation exception."""
+        existing = {item.id for item in sessions.list()}
+        try:
+            return action()
+        finally:
+            created = [item for item in sessions.list() if item.id not in existing]
+            if sessions.database_enabled:
+                with sessions._db() as db:
+                    for item in created:
+                        db.execute("DELETE FROM session_members WHERE session_id=?", (item.id,))
+                        db.execute("DELETE FROM events WHERE entity_kind='session' AND entity_id=?", (item.id,))
+                        db.execute("DELETE FROM sessions WHERE session_id=?", (item.id,))
+            else:
+                for item in created:
+                    sessions.session_path(item).unlink(missing_ok=True)
     def isolated_run(action: Callable[[str], Any]) -> Any:
         run_id = f"RUN-BENCH-ISOLATED-{uuid.uuid4().hex}"
         owner = f"BENCH-OWNER-{uuid.uuid4().hex}"
@@ -375,7 +413,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
         ("sessionstore.membership_validation.error", "SessionStore", "invalid membership", lambda: sessions.create(["FIX-MISSING"])),
         ("sessionstore.add_membership", "SessionStore", "add_ticket", lambda: isolated_session(lambda item: sessions.add_ticket(item, ticket_id))),
         ("sessionstore.remove_membership", "SessionStore", "remove_ticket", lambda: isolated_session(lambda item: sessions.remove_ticket(item, second_ticket_id))),
-        ("sessionstore.validation.overlap.error", "SessionStore", "overlap validation", lambda: sessions.create([ticket_id])),
+        ("sessionstore.validation.overlap.error", "SessionStore", "overlap validation", lambda: isolated_session_creation(lambda: sessions.create([overlap_ticket_id]))),
         ("budgetledger.read_budget", "BudgetLedger", "read_budget", lambda: ledger.read_budget(budget_id)),
         ("budgetledger.get_budget", "BudgetLedger", "get_budget", lambda: ledger.get_budget(budget_id)),
         ("budgetledger.get_run", "BudgetLedger", "get_run", lambda: ledger.get_run("RUN-FIX-00000")),
@@ -437,21 +475,21 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
     cases.extend([
         ("ticketstore.save", "TicketStore", "save", lambda: isolated_ticket(lambda item: store.save(item))),
         ("ticketstore.create", "TicketStore", "create", lambda: isolated_ticket(lambda item: item)),
-        ("ticketstore.record_run_event", "TicketStore", "record_run_event", lambda: isolated_ticket(lambda item: store.record_run_event(item.id, "benchmark", {"run_id": "BENCH"}))),
+        ("ticketstore.record_run_event", "TicketStore", "record_run_event", lambda: isolated_ticket(lambda item: store.record_run_event(item, run_id="BENCH", stage_id=None, event="benchmark"))),
         ("ticketstore.is_done", "TicketStore", "is_done", lambda: store.is_done(store.get(ticket_id))),
         ("ticketstore.run_path", "TicketStore", "run_path", lambda: store.run_path("RUN-FIX-00000")),
         ("sessionstore.effective_ticket_ids", "SessionStore", "effective_ticket_ids", lambda: sessions.effective_ticket_ids(sessions.get(session_id))),
         ("sessionstore.participants", "SessionStore", "participants", lambda: sessions.get(session_id).participants),
-        ("sessionstore.inherit_ticket", "SessionStore", "inherit_ticket", lambda: isolated_session(lambda item: sessions.inherit_ticket(item, second_ticket_id, source_ticket=ticket_id))),
-        ("sessionstore.override_ticket", "SessionStore", "override_ticket", lambda: isolated_session(lambda item: sessions.override_ticket(item, ticket_id, actor="benchmark", reason="coverage"))),
+        ("sessionstore.inherit_ticket", "SessionStore", "inherit_ticket", lambda: isolated_session(lambda item: (sessions.activate(item), sessions.inherit_ticket(sessions.get(item.id), ticket_id, source_ticket=second_ticket_id)))),
+        ("sessionstore.override_ticket", "SessionStore", "override_ticket", lambda: isolated_session(lambda item: (sessions.activate(item), sessions.override_ticket(sessions.get(item.id), ticket_id, actor="benchmark", reason="coverage")))),
         ("sessionstore.agent_add_ticket", "SessionStore", "agent_add_ticket", lambda: isolated_session(lambda item: sessions.agent_add_ticket(item.id, ticket_id, actor="benchmark", origin="benchmark"))),
         ("sessionstore.agent_remove_ticket", "SessionStore", "agent_remove_ticket", lambda: isolated_session(lambda item: sessions.agent_remove_ticket(item.id, second_ticket_id, actor="benchmark", origin="benchmark"))),
         ("sessionstore.agent_update_membership", "SessionStore", "agent_update_membership", lambda: isolated_session(lambda item: sessions.agent_update_membership(item.id, [{"ticket_id": second_ticket_id, "priority": 10}], actor="benchmark", origin="benchmark"))),
         ("budgetledger.create_budget", "BudgetLedger", "create_budget", lambda: isolated_budget(lambda owner, budget_id: ledger.get_budget(budget_id))),
         ("budgetledger.set_status", "BudgetLedger", "set_status", lambda: isolated_budget(lambda owner, _: ledger.set_status(f"ticket:{owner}", "active"))),
         ("budgetledger.reserve", "BudgetLedger", "reserve", lambda: isolated_run(lambda run_id: ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}))),
-        ("budgetledger.increase_limit", "BudgetLedger", "increase_limit", lambda: ledger.increase_limit(actor="benchmark", target_scope="ticket", target_id=budget_id, dimension="tokens", delta=1, reason="coverage", reference="BENCH", one_shot=True)),
-        ("budgetledger.allow_overrun", "BudgetLedger", "allow_overrun", lambda: ledger.allow_overrun(actor="benchmark", target_scope="ticket", target_id=budget_id, dimensions=["tokens"], reason="coverage", reference="BENCH", one_shot=True)),
+        ("budgetledger.increase_limit", "BudgetLedger", "increase_limit", lambda: isolated_budget(lambda owner, _budget_id: ledger.increase_limit(actor="benchmark", target_scope="ticket", target_id=owner, dimension="tokens", delta=1, reason="coverage", reference="BENCH", one_shot=True))),
+        ("budgetledger.allow_overrun", "BudgetLedger", "allow_overrun", lambda: isolated_budget(lambda owner, _budget_id: ledger.allow_overrun(actor="benchmark", target_scope="ticket", target_id=owner, dimensions=["tokens"], reason="coverage", reference="BENCH", one_shot=True))),
         ("budgetledger.resolve_unknown", "BudgetLedger", "resolve_unknown", lambda: ledger.resolve_unknown(actor="benchmark", run_id="RUN-MISSING", reason="coverage", reference="BENCH", one_shot=True)),
         ("budgetledger.adjustment", "BudgetLedger", "adjustment", lambda: isolated_run(lambda run_id: ledger.adjustment(run_id, {"tokens": 0, "points": 0, "runs": 0}, reason="coverage", author="benchmark"))),
         ("budgetledger.list_decisions", "BudgetLedger", "list_decisions", lambda: ledger.list_decisions()),
@@ -515,6 +553,13 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
         if http_limitation and component in {"HTTP", "UI"}:
             setattr(fn, "_limitations", list(getattr(fn, "_limitations", [])) + [http_limitation])
         expected = "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id or "expected_4xx" in case_id or "transport" in case_id else "success"
+        network_case = (component == "HTTP" and not case_id.startswith("http.handler")) or component == "UI" and (
+            case_id.startswith(("ui.GET_", "ui.POST_", "ui.PATCH_")) or case_id == "ui.expected_4xx"
+        )
+        if network_case and http_limitation:
+            expected = "error"
+        if case_id.startswith(("ui.POST_", "ui.PATCH_")):
+            expected = "error"
         modes = ("sqlite",) if component in {"HTTP", "UI"} and not case_id.startswith("http.handler") else ("sqlite", "yaml")
         specs.append(CaseSpec(case_id, component, operation, fn, case_kinds[case_id], storage_modes=modes, expected_outcome=expected,
                               limitations=list(getattr(fn, "_limitations", []))))
@@ -530,30 +575,46 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
 
 def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy: bool, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
     case_id, component, operation, fn = spec.case_id, spec.component, spec.operation, spec.run
-    for _ in range(warmup):
-        try: fn()
-        except Exception: pass
-    samples = []; errors = []; cleanup_errors: list[dict[str, Any]] = []; fs_root = project / ".vibe"; before_snapshot = _logical_snapshot(project)
-    metrics = getattr(fn, "_sqlite_metrics", None)
-    for index in range(iterations):
-        if metrics is not None:
-            metrics.reset()
-        before = _fs_snapshot(fs_root); sample_snapshot = _logical_snapshot(project); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
+    fs_root = project / ".vibe"
+    warmup_before = _logical_snapshot(project)
+    warmup_cleanup_errors: list[dict[str, Any]] = []
+
+    def execute_iteration() -> Exception | None:
+        error = None
         try:
             if spec.setup:
                 spec.setup()
             fn()
         except Exception as exc:
-            error = type(exc).__name__
-            if metrics is not None:
-                metrics.errors += 1
-            errors.append({"sample_index": index, "type": error})
+            error = exc
         finally:
             if spec.teardown:
                 try:
                     spec.teardown()
                 except Exception as exc:
-                    cleanup_errors.append({"sample_index": index, "type": type(exc).__name__})
+                    warmup_cleanup_errors.append({"type": type(exc).__name__})
+        return error
+
+    for _ in range(warmup):
+        execute_iteration()
+        if warmup_cleanup_errors or _logical_snapshot(project)["hash"] != warmup_before["hash"]:
+            raise ValueError(f"warmup isolation failed for {case_id}")
+
+    samples = []; errors = []; cleanup_errors: list[dict[str, Any]] = []; before_snapshot = _logical_snapshot(project)
+    metrics = getattr(fn, "_sqlite_metrics", None)
+    for index in range(iterations):
+        if metrics is not None:
+            metrics.reset()
+        before = _fs_snapshot(fs_root); sample_snapshot = _logical_snapshot(project); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
+        callback_error = execute_iteration()
+        if callback_error is not None:
+            error = type(callback_error).__name__
+            if metrics is not None:
+                metrics.errors += 1
+            errors.append({"sample_index": index, "type": error})
+        if warmup_cleanup_errors:
+            cleanup_errors.extend({"sample_index": index, **item} for item in warmup_cleanup_errors)
+            warmup_cleanup_errors.clear()
         wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root); after_snapshot = _logical_snapshot(project)
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,

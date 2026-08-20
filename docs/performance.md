@@ -53,6 +53,18 @@ snapshot/hash восстанавливается, утечки отсутств�
 идентификаторами case и sample. `CaseRegistry` владеет ресурсами до конца `run()` и
 освобождает их в `finally`; cleanup идемпотентен, а loopback HTTP server закрывается через
 `shutdown()` и `server_close()` даже при ошибке sampling, profiling, validation или записи.
+Warmup использует тот же lifecycle `setup -> callback -> teardown`, что и measured
+sample. До warmup фиксируется logical snapshot, после каждой итерации проверяется
+его восстановление; ошибка callback допускается только для case с
+`expected_outcome=error`, а ошибка teardown или утечка завершает case явно. Warmup
+не меняет baseline и не попадает в raw samples, errors или statistics.
+
+Операции `budgetledger.increase_limit` и `budgetledger.allow_overrun` выполняются на
+уникальном synthetic budget с доступным benchmark authorizer. Cleanup удаляет
+связанные decisions, runs, reconciliation facts, adjustments и сам budget, поэтому
+fixture budget и decisions не используются как target и не загрязняются.
+`validate_result()` сопоставляет каждый measured sample с `expected_outcome`: success
+требует `error=null`, а error — непустую ошибку с тем же `sample_index` в `errors`.
 
 ## Методика
 
@@ -60,13 +72,14 @@ CLI: `python3 benchmarks/performance/run_benchmark.py --project . --profile smok
 --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527
 --output /tmp/performance.json`. Доступны размеры `small=100`, `medium=1000`,
 `large=5000`, `xlarge=10000`, а также `--dataset manifest.json`. Seed влияет на
-порядок, статусы, parent/blocked связи и run histories. Warmup не попадает в raw
+порядок, статусы, parent/blocked связи и run histories. Warmup проходит полный
+isolated lifecycle, но не попадает в raw
 samples и агрегаты. `--cold` сообщает capability; если OS cache eviction недоступен,
 samples помечены descriptive-only и не используются для cold conclusion.
 
 Каждый case содержит стабильный `case_id`, component/operation/kind/storage
 applicability/dimensions, raw timings, expected outcome, errors, sample count,
-aggregates и isolation evidence. Warmup проходит callback, но не попадает в
+aggregates и isolation evidence. Warmup проходит полный lifecycle, но не попадает в
 samples; исходный проект не изменяется.
 
 ## Baseline results и hotspots
