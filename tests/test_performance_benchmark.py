@@ -36,6 +36,9 @@ def test_sqlite_metrics_reset_and_classify_busy_errors(tmp_path):
     db.execute("INSERT INTO items DEFAULT VALUES")
     assert metrics.queries >= 1
     assert metrics.errors == 0
+    db.commit()
+    assert metrics.transactions == 1
+    assert metrics.transaction_ms >= 0
     assert metrics.lock_wait_ms is None
     assert metrics.lock_wait_count is None
     assert metrics.attribution["contract_version"] == "sqlite-attribution.v1"
@@ -49,6 +52,19 @@ def test_sqlite_result_validation_requires_new_fields_when_present():
                           "sample_count": 1, "raw_samples": [{"sample_index": 0, "wall_ms": 1, "error": None,
                             "sqlite_queries": 1}]}], "source_checksum_before": "a", "source_checksum_after": "a"}
     with pytest.raises(ValueError, match="attribution"):
+        validate_result(result)
+
+
+def test_sqlite_result_validation_requires_transaction_duration():
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
+                          "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
+                          "sample_count": 1, "raw_samples": [{"sample_index": 0, "wall_ms": 1, "error": None,
+                            "sqlite_queries": 1, "sqlite_transactions": 1, "sqlite_errors": 0,
+                            "sqlite_busy_errors": 0, "sqlite_lock_wait_ms": None, "sqlite_lock_wait_count": None,
+                            "sqlite_attribution": {"source": "test"}}]}],
+              "source_checksum_before": "a", "source_checksum_after": "a"}
+    with pytest.raises(ValueError, match="attribution field"):
         validate_result(result)
 
 
