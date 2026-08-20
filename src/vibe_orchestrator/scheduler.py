@@ -87,7 +87,10 @@ def effective_blockers(ticket: Ticket, tickets: list[Ticket], workflow: Workflow
         root_blockers = _root_blockers(parent.id, parent_blockers, by_id)
         # A direct resolver must remain runnable. Its descendants also skip
         # their own ancestor blocker, while inheriting sibling gates.
-        if ticket.id not in root_blockers:
+        resolver_branch = ticket.id in root_blockers or any(
+            _is_ancestor(blocker_id, ticket, by_id) for blocker_id in root_blockers
+        )
+        if not resolver_branch:
             blockers.update(
                 blocker_id
                 for blocker_id in root_blockers

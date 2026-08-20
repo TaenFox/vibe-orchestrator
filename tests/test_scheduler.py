@@ -75,6 +75,25 @@ def test_blocked_tickets_do_not_consume_wip_for_their_resolver():
     assert [candidate.ticket.id for candidate in candidates] == [gate.id]
 
 
+def test_resolver_branch_ignores_sibling_parent_gates():
+    workflow = load_workflow("delivery")
+    root = ticket("ROOT", "review")
+    gate = ticket("GATE", "ready_for_review")
+    gate.parent = root.id
+    sibling_gate = ticket("SIBLING-GATE", "ready_for_review")
+    sibling_gate.parent = root.id
+    sibling_dependency = ticket("SIBLING-DEPENDENCY", "todo")
+    sibling_gate.blocked_by = [sibling_dependency.id]
+    resolver = ticket("RESOLVER", "selected_for_session")
+    resolver.parent = gate.id
+    root.blocked_by = [gate.id, sibling_gate.id]
+    gate.blocked_by = [resolver.id]
+
+    all_tickets = [root, gate, sibling_gate, resolver, sibling_dependency]
+    assert effective_blockers(resolver, all_tickets, workflow) == set()
+    assert [candidate.ticket.id for candidate in select_candidates(workflow, all_tickets, set())] == [resolver.id]
+
+
 def test_parent_retries_same_agent_stage_after_correction():
     workflow=load_workflow("discovery"); parent=Ticket(id="DISC-1",process="discovery",type="idea",title="Idea",status="analysis",last_outcome="needs_correction",created_at="2026-01-01T00:00:00+00:00"); assert select_candidates(workflow,[parent],set())[0].target_status=="analysis"
 
