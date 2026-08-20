@@ -278,11 +278,27 @@ def test_run_case_warmup_teardown_runs_after_exception(tmp_path):
     assert result["isolation"]["clean"] is True
 
 
+def test_run_case_rejects_unexpected_warmup_error(tmp_path):
+    root = tmp_path / ".vibe"
+    root.mkdir()
+
+    def run_callback():
+        raise RuntimeError("unexpected")
+
+    with pytest.raises(ValueError, match="warmup execution failed.*RuntimeError"):
+        _run_case(CaseSpec("test.warmup.unexpected", "test", "mutation", run_callback,
+                           kind="mutation"), tmp_path, warmup=1, iterations=1,
+                  noisy=False, storage_mode="sqlite",
+                  manifest={"dimensions": {}, "fixture_files_sha256": "test"})
+
+
 def test_budget_override_cases_use_isolated_budget(tmp_path):
     generate_fixture(tmp_path, seed=12, size="small", storage_mode="sqlite")
     cases = _cases(tmp_path, storage="sqlite")
     try:
-        for case_id in ("budgetledger.increase_limit", "budgetledger.allow_overrun"):
+        for case_id in ("budgetledger.increase_limit", "budgetledger.allow_overrun",
+                        "budgetledger.set_status", "budgetledger.resolve_unknown",
+                        "budgetledger.adjustment"):
             case = next(case for case in cases if case.case_id == case_id)
             result = _run_case(case, tmp_path, warmup=1, iterations=1, noisy=False,
                                storage_mode="sqlite", manifest={"dimensions": {}, "fixture_files_sha256": "test"})

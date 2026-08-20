@@ -63,6 +63,10 @@ sample. До warmup фиксируется logical snapshot, после кажд
 уникальном synthetic budget с доступным benchmark authorizer. Cleanup удаляет
 связанные decisions, runs, reconciliation facts, adjustments и сам budget, поэтому
 fixture budget и decisions не используются как target и не загрязняются.
+Аналогично lifecycle cases `set_status`, `resolve_unknown` и `adjustment` используют
+валидные synthetic состояния: terminal status, unknown run и завершённый run
+соответственно. Это сохраняет заявленный success outcome и исключает KeyError/ValueError
+из smoke-матрицы без изменения production API.
 `validate_result()` сопоставляет каждый measured sample с `expected_outcome`: success
 требует `error=null`, а error — непустую ошибку с тем же `sample_index` в `errors`.
 

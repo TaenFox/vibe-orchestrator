@@ -377,6 +377,9 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
             if current and current.get("state") not in {"released", "finalized", "unknown"}:
                 ledger.release(run_id)
             with ledger._connect() as db:
+                db.execute("DELETE FROM reconciliation_facts WHERE run_id=?", (run_id,))
+                db.execute("DELETE FROM adjustments WHERE adjusts_run_id=?", (run_id,))
+                db.execute("DELETE FROM budget_decisions WHERE target_id IN (?, ?)", (owner, run_id))
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
     def concurrent_reservation() -> dict[str, Any]:
@@ -486,12 +489,12 @@ def _cases(project: Path, *, storage: str = "sqlite") -> CaseRegistry:
         ("sessionstore.agent_remove_ticket", "SessionStore", "agent_remove_ticket", lambda: isolated_session(lambda item: sessions.agent_remove_ticket(item.id, second_ticket_id, actor="benchmark", origin="benchmark"))),
         ("sessionstore.agent_update_membership", "SessionStore", "agent_update_membership", lambda: isolated_session(lambda item: sessions.agent_update_membership(item.id, [{"ticket_id": second_ticket_id, "priority": 10}], actor="benchmark", origin="benchmark"))),
         ("budgetledger.create_budget", "BudgetLedger", "create_budget", lambda: isolated_budget(lambda owner, budget_id: ledger.get_budget(budget_id))),
-        ("budgetledger.set_status", "BudgetLedger", "set_status", lambda: isolated_budget(lambda owner, _: ledger.set_status(f"ticket:{owner}", "active"))),
+        ("budgetledger.set_status", "BudgetLedger", "set_status", lambda: isolated_budget(lambda owner, budget_id: ledger.set_status(budget_id, "stop_new_runs"))),
         ("budgetledger.reserve", "BudgetLedger", "reserve", lambda: isolated_run(lambda run_id: ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1}))),
         ("budgetledger.increase_limit", "BudgetLedger", "increase_limit", lambda: isolated_budget(lambda owner, _budget_id: ledger.increase_limit(actor="benchmark", target_scope="ticket", target_id=owner, dimension="tokens", delta=1, reason="coverage", reference="BENCH", one_shot=True))),
         ("budgetledger.allow_overrun", "BudgetLedger", "allow_overrun", lambda: isolated_budget(lambda owner, _budget_id: ledger.allow_overrun(actor="benchmark", target_scope="ticket", target_id=owner, dimensions=["tokens"], reason="coverage", reference="BENCH", one_shot=True))),
-        ("budgetledger.resolve_unknown", "BudgetLedger", "resolve_unknown", lambda: ledger.resolve_unknown(actor="benchmark", run_id="RUN-MISSING", reason="coverage", reference="BENCH", one_shot=True)),
-        ("budgetledger.adjustment", "BudgetLedger", "adjustment", lambda: isolated_run(lambda run_id: ledger.adjustment(run_id, {"tokens": 0, "points": 0, "runs": 0}, reason="coverage", author="benchmark"))),
+        ("budgetledger.resolve_unknown", "BudgetLedger", "resolve_unknown", lambda: isolated_run(lambda run_id: (ledger.start(run_id), ledger.finalize(run_id, "unknown", {"points": None}), ledger.resolve_unknown(actor="benchmark", run_id=run_id, reason="coverage", reference="BENCH", estimate={"points": 1}, confidence=0.8, one_shot=True)))),
+        ("budgetledger.adjustment", "BudgetLedger", "adjustment", lambda: isolated_run(lambda run_id: (ledger.start(run_id), ledger.finalize(run_id, "unknown", {"points": None}), ledger.adjustment(run_id, {"tokens": 0, "points": 0, "runs": 0}, reason="coverage", author="benchmark")))),
         ("budgetledger.list_decisions", "BudgetLedger", "list_decisions", lambda: ledger.list_decisions()),
         ("budgetledger.list_reconciliation_facts", "BudgetLedger", "list_reconciliation_facts", lambda: ledger.list_reconciliation_facts()),
         ("scheduler.wip_count", "Scheduler", "wip_count", lambda: __import__("vibe_orchestrator.scheduler", fromlist=["wip_count"]).wip_count(tickets, "active")),
@@ -577,10 +580,10 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
     case_id, component, operation, fn = spec.case_id, spec.component, spec.operation, spec.run
     fs_root = project / ".vibe"
     warmup_before = _logical_snapshot(project)
-    warmup_cleanup_errors: list[dict[str, Any]] = []
 
-    def execute_iteration() -> Exception | None:
+    def execute_iteration() -> tuple[Exception | None, list[Exception]]:
         error = None
+        teardown_errors: list[Exception] = []
         try:
             if spec.setup:
                 spec.setup()
@@ -592,12 +595,15 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
                 try:
                     spec.teardown()
                 except Exception as exc:
-                    warmup_cleanup_errors.append({"type": type(exc).__name__})
-        return error
+                    teardown_errors.append(exc)
+        return error, teardown_errors
 
     for _ in range(warmup):
-        execute_iteration()
-        if warmup_cleanup_errors or _logical_snapshot(project)["hash"] != warmup_before["hash"]:
+        warmup_error, teardown_errors = execute_iteration()
+        if (spec.expected_outcome == "success" and warmup_error is not None) or teardown_errors:
+            details = type(warmup_error).__name__ if warmup_error else type(teardown_errors[0]).__name__
+            raise ValueError(f"warmup execution failed for {case_id}: {details}")
+        if _logical_snapshot(project)["hash"] != warmup_before["hash"]:
             raise ValueError(f"warmup isolation failed for {case_id}")
 
     samples = []; errors = []; cleanup_errors: list[dict[str, Any]] = []; before_snapshot = _logical_snapshot(project)
@@ -606,15 +612,15 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
         if metrics is not None:
             metrics.reset()
         before = _fs_snapshot(fs_root); sample_snapshot = _logical_snapshot(project); start_wall = time.perf_counter_ns(); start_cpu = time.process_time_ns(); error = None
-        callback_error = execute_iteration()
+        callback_error, teardown_errors = execute_iteration()
         if callback_error is not None:
             error = type(callback_error).__name__
             if metrics is not None:
                 metrics.errors += 1
             errors.append({"sample_index": index, "type": error})
-        if warmup_cleanup_errors:
-            cleanup_errors.extend({"sample_index": index, **item} for item in warmup_cleanup_errors)
-            warmup_cleanup_errors.clear()
+        cleanup_errors.extend(
+            {"sample_index": index, "type": type(item).__name__} for item in teardown_errors
+        )
         wall = (time.perf_counter_ns() - start_wall) / 1_000_000; cpu = (time.process_time_ns() - start_cpu) / 1_000_000; after = _fs_snapshot(fs_root); after_snapshot = _logical_snapshot(project)
         samples.append({"sample_index": index, "wall_ms": wall, "cpu_ms": cpu, "fs_ops": abs(after[0] - before[0]), "fs_bytes": abs(after[1] - before[1]),
                         "sqlite_queries": metrics.queries if metrics is not None else None,
