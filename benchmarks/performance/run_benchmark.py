@@ -158,7 +158,7 @@ def statistics_for(samples: list[float]) -> dict[str, float]:
             "max": max(samples), "mean": statistics.mean(samples), "stdev": statistics.stdev(samples) if len(samples) > 1 else 0.0}
 
 
-def validate_result(result: dict[str, Any]) -> None:
+def validate_result(result: dict[str, Any], artifact_root: Path | None = None) -> None:
     """Check result integrity invariants used by CI and reviewers."""
     for key in ("schema_version", "run_id", "dataset_manifest", "cases", "source_checksum_before", "source_checksum_after"):
         if key not in result:
@@ -222,6 +222,10 @@ def validate_result(result: dict[str, Any]) -> None:
             raise ValueError("error references an absent sample")
         if case.get("dataset_manifest_hash") != result.get("dataset_manifest_hash"):
             raise ValueError("case dataset identity mismatch")
+    artifacts = profiling.get("artifacts", [])
+    if artifact_root is not None and artifacts and all(isinstance(item, dict) for item in artifacts):
+        from benchmarks.performance.profile import validate_artifacts
+        validate_artifacts(artifacts, artifact_root)
 
 
 def _fs_snapshot(root: Path) -> tuple[int, int]:
@@ -635,18 +639,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 record = {"component": component, "case_id": case_id, "status": "failed", "reason": repr(exc)}
             coverage.append(record)
         profile_manifest = profile_dir / "profile-manifest.json"
+        from benchmarks.performance.profile import artifact_descriptor, validate_artifacts
+        profile_artifacts = []
+        for record in coverage:
+            if record.get("status") == "profiled":
+                profile_artifacts.extend([
+                    artifact_descriptor(Path(record["pstats"]), "pstats", profile_dir),
+                    artifact_descriptor(Path(record["text"]), "text", profile_dir),
+                ])
         profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
             "case_ids": [item["case_id"] for item in coverage], "manifest_hash": manifest["hashes"]["manifest_sha256"],
             "warmup": args.warmup, "iterations": iterations, "coverage": coverage,
-            "artifacts": artifact_records}, indent=2), encoding="utf-8")
-        result["profiling"].update({"artifacts": artifact_records + [str(profile_manifest)], "coverage": coverage,
-                                    "manifest": str(profile_manifest)})
+            "artifacts": profile_artifacts}, indent=2), encoding="utf-8")
+        profile_artifacts.append(artifact_descriptor(profile_manifest, "profile_manifest", profile_dir))
+        validate_artifacts(profile_artifacts, profile_dir)
+        result["profiling"].update({"artifacts": profile_artifacts, "coverage": coverage,
+                                    "manifest": str(profile_manifest), "artifact_root": str(profile_dir)})
         for case in result["cases"]:
             record = next((item for item in coverage if item["case_id"] == case["case_id"]), None)
             if record is None:
                 continue
             if record["status"] == "profiled":
-                case["profile_artifacts"] = [record["pstats"], record["text"], str(profile_manifest)]
+                case["profile_artifacts"] = [item for item in profile_artifacts
+                                              if item["kind"] in {"pstats", "text"}]
 
         alternate = "yaml" if fixture_storage == "sqlite" else "sqlite"
         comparison_project = Path(temp) / "comparison-project"
@@ -679,7 +694,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                                "cold_available": cold["available"], "cold_strategy": cold["strategy"],
                                "cold_limitation": cold["limitation"]}
         result["source_checksum_after"] = _hash_tree(source)
-        validate_result(result)
+        validate_result(result, artifact_root=profile_dir)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 

@@ -24,6 +24,34 @@ ledger остаётся SQLite, поскольку это его authoritative p
 обязан совпадать с `SIZES[size]`. Reservation/concurrency cases используют отдельные
 synthetic budget IDs и удаляются после sample.
 
+## Contract validation and completeness
+
+Публикуемый `performance-result.v2` проверяется до `output.write_text()`. Validator
+требует точную схему run metadata/parameters/manifest/registry, сверяет manifest с
+его logical SHA-256 и materialized counts, проверяет полный уникальный registry для
+режима storage, последовательность `sample_index == 0..iterations-1`, типы и
+неотрицательность метрик, а также `min/p50/p95/p99/max/mean/stdev` по raw
+`wall_ms`. Ошибка обязана иметь typed evidence (`sample_index`, `type`), совпадать
+с `raw_samples[index].error`; отсутствие case, duplicate/out-of-range sample,
+malformed error или silently ignored dataset делает run невалидным.
+
+## Profiling artifacts and linkage
+
+`profile-manifest.v1` связывает `run_id`, `case_id` и `dataset_manifest_hash`.
+Каждый обязательный pstats/text/profile-manifest artifact описывается как
+`{path, sha256, size_bytes, kind}`. Перед публикацией проверяются regular file,
+безопасный относительный path внутри artifact root, размер и повторно вычисленный
+SHA-256; profile evidence не входит в samples или iteration statistics.
+
+## Warm/cold semantics and comparison eligibility
+
+Warmup выполняется вне raw samples. В обычном режиме case имеет `mode=warm`. При
+`--cold` mode `cold` разрешён только после успешной OS cache eviction capability;
+при unavailable/failed preparation сохраняются limitation и descriptive evidence,
+но cold conclusion запрещён. SQLite после полной валидации получает
+`comparison_eligibility=eligible`; YAML остаётся допустимым legacy execution/archive
+режимом с `historical_only` и не является обязательной comparison pair.
+
 ## States and errors
 
 Фикстура материализует ticket statuses, draft/active/completed/cancelled sessions и

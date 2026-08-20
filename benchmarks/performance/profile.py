@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pstats
 import platform
@@ -21,6 +22,43 @@ import cProfile
 from benchmarks.performance.workloads import (assert_manifest_identity, generate_fixture,
                                               load_dataset, materialize_dataset)
 from benchmarks.performance.run_benchmark import _cases
+
+PROFILE_SCHEMA_VERSION = "performance-profile.v1"
+
+
+def artifact_descriptor(path: Path, kind: str, artifact_root: Path) -> dict[str, object]:
+    """Describe a profiling artifact relative to its controlled output root."""
+    path = path.resolve()
+    root = artifact_root.resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"profile artifact path escapes artifact root: {path}") from exc
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"profile artifact is not a regular file: {relative}")
+    data = path.read_bytes()
+    return {"path": relative.as_posix(), "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data), "kind": kind}
+
+
+def validate_artifacts(artifacts: list[dict[str, object]], artifact_root: Path) -> None:
+    required = {"pstats", "text", "profile_manifest"}
+    seen: list[str] = []
+    root = artifact_root.resolve()
+    for artifact in artifacts:
+        if set(artifact) != {"path", "sha256", "size_bytes", "kind"}:
+            raise ValueError("profiling artifact descriptor has an invalid schema")
+        kind = str(artifact["kind"])
+        if kind not in required or (kind == "profile_manifest" and kind in seen):
+            raise ValueError(f"invalid or duplicate profiling artifact kind: {kind}")
+        seen.append(kind)
+        descriptor = artifact_descriptor((root / str(artifact["path"])).resolve(), kind, root)
+        if descriptor["sha256"] != artifact["sha256"] or descriptor["size_bytes"] != artifact["size_bytes"]:
+            raise ValueError(f"profiling artifact checksum/size mismatch: {artifact['path']}")
+    if seen == ["profile_manifest"]:
+        return
+    if not {"pstats", "text", "profile_manifest"}.issubset(seen):
+        raise ValueError("profiling artifacts incomplete")
 
 
 def main() -> int:
@@ -89,12 +127,18 @@ def main() -> int:
             coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
                              "reason": "standalone invocation selected a different scenario"})
     profile_manifest.write_text(json.dumps({
-        "schema_version": "performance-profile.v1", "run_id": args.run_id,
-        "case_id": args.scenario, "manifest_hash": manifest_hash, "storage": storage,
-        "warmup": args.warmup, "iterations": args.iterations, "tool": "cProfile",
-        "tool_version": platform.python_version(), "coverage": coverage,
-        "artifacts": [str(path), str(text_path)],
+        "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
+        "case_id": args.scenario, "manifest_hash": manifest_hash,
     }, indent=2), encoding="utf-8")
+    artifacts = [artifact_descriptor(path, "pstats", args.output),
+                 artifact_descriptor(text_path, "text", args.output),
+                 artifact_descriptor(profile_manifest, "profile_manifest", args.output)]
+    profile_manifest.write_text(json.dumps({
+        "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
+        "case_id": args.scenario, "manifest_hash": manifest_hash,
+        "artifacts": artifacts,
+    }, indent=2), encoding="utf-8")
+    validate_artifacts(artifacts, args.output)
     return 0
 
 
