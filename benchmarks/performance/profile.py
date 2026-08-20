@@ -20,7 +20,7 @@ sys.path.insert(1, str(_repo_root))
 import cProfile
 
 from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
-from benchmarks.performance.run_benchmark import REQUIRED_PROFILE_CASES, _cases
+from benchmarks.performance.run_benchmark import REQUIRED_PROFILE_CASES, _cases, parse_seed
 
 PROFILE_SCHEMA_VERSION = "performance-profile.v1"
 
@@ -75,7 +75,7 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--size", choices=("small", "medium", "large", "xlarge"))
-    parser.add_argument("--seed", type=int, default=35527)
+    parser.add_argument("--seed", type=parse_seed, default=35527)
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations <= 0:
         parser.error("warmup must be non-negative and iterations must be positive")

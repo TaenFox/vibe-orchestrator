@@ -4,7 +4,7 @@
 
 ```bash
 python3 benchmarks/performance/run_benchmark.py --project . --profile smoke \
-  --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 \
+  --size small --storage sqlite --warmup 5 --iterations 30 --seed 355F27 \
   --output /tmp/performance-smoke.json
 ```
 

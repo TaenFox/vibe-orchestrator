@@ -53,6 +53,21 @@ except ImportError:  # direct script execution
 
 SCHEMA_VERSION = "performance-result.v2"
 
+
+def parse_seed(value: str) -> int:
+    """Accept decimal seeds and ticket-style hexadecimal suffixes."""
+    try:
+        return int(value, 10)
+    except ValueError:
+        normalized = value.strip().upper()
+        if normalized.startswith("0X"):
+            normalized = normalized[2:]
+        if normalized and all(char in "0123456789ABCDEF" for char in normalized):
+            return int(normalized, 16)
+        raise argparse.ArgumentTypeError(
+            "seed must be a decimal integer or hexadecimal ticket suffix"
+        )
+
 # Kept here as the single registry used by the benchmark and standalone profiler.
 REQUIRED_PROFILE_CASES = {
     "TicketStore": "ticketstore.list.delivery",
@@ -718,7 +733,7 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=int, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=35527); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

@@ -7,13 +7,18 @@ import pytest
 
 from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold_capability, _cases,
                                                    _unavailable_case, instrumented_connection_factory, percentile,
-                                                   statistics_for, validate_result)
+                                                   parse_seed, statistics_for, validate_result)
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 
 def test_percentile_is_deterministic_and_interpolated():
     assert percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.5
     assert statistics_for([1.0, 2.0, 3.0, 4.0])["p95"] == 3.85
+
+
+def test_seed_accepts_decimal_and_ticket_style_hex_suffix():
+    assert parse_seed("35527") == 35527
+    assert parse_seed("355F27") == int("355F27", 16)
 
 
 def test_manifest_privacy_contract_is_explicit():
