@@ -37,14 +37,17 @@ def resume_rework(store: TicketStore, ticket_id: str) -> Ticket:
         raise ValueError("Возобновить можно только Delivery rework")
     if ticket.blocked_reason != "rework_cycle_stopped":
         raise ValueError("Тикет не ожидает ручного разрешения реворка")
-    ticket.status = "ready_for_development"
+    # A resumed rework must be re-analyzed before implementation. This keeps
+    # the corrective scope explicit instead of sending review findings straight
+    # back to development.
+    ticket.status = "selected_for_session"
     ticket.blocked_reason = None
     ticket.last_outcome = "manual_rework_resumed"
     ticket.last_summary = "Ручное разрешение: запущен дополнительный проход реворка"
     store.record_run_event(
         ticket,
         run_id=None,
-        stage_id="ready_for_development",
+        stage_id=ticket.status,
         event="manual_rework_resumed",
         reason="rework_cycle_stopped",
         to_status=ticket.status,
@@ -460,7 +463,9 @@ class Orchestrator:
                 and event.get("outcome") == "needs_rework"
             ) + 1
             if attempts < MAX_REWORK_REVIEW_ATTEMPTS:
-                target_status = "ready_for_development"
+                # Rework findings can change the scope. Always pass them through
+                # system analysis before another implementation attempt.
+                target_status = "selected_for_session"
             else:
                 target_status = "selected_for_session"
                 ticket.blocked_reason = "rework_cycle_stopped"

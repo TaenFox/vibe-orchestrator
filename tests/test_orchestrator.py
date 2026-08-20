@@ -446,7 +446,7 @@ def test_rework_needs_rework_allows_three_review_attempts_then_stops(tmp_path: P
         )
         updated = orchestrator.store.get(ticket.id)
         if attempt < 3:
-            assert updated.status == "ready_for_development"
+            assert updated.status == "selected_for_session"
             assert updated.blocked_reason is None
         else:
             assert updated.status == "selected_for_session"
@@ -458,7 +458,7 @@ def test_rework_needs_rework_allows_three_review_attempts_then_stops(tmp_path: P
     assert select_candidates(workflow, [updated], set()) == []
 
 
-def test_manual_resume_rework_returns_to_development_queue(tmp_path: Path):
+def test_manual_resume_rework_returns_to_analysis_queue(tmp_path: Path):
     store = TicketStore(tmp_path)
     store.init()
     ticket = store.create("delivery", "rework", "Resume rework", status="selected_for_session", rework_stage="review")
@@ -467,7 +467,7 @@ def test_manual_resume_rework_returns_to_development_queue(tmp_path: Path):
 
     resumed = resume_rework(store, ticket.id)
 
-    assert resumed.status == "ready_for_development"
+    assert resumed.status == "selected_for_session"
     assert resumed.blocked_reason is None
     assert resumed.last_outcome == "manual_rework_resumed"
     assert resumed.run_history[-1]["event"] == "manual_rework_resumed"
