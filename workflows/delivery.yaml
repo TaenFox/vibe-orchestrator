@@ -11,7 +11,7 @@ stages:
     prompt: delivery/system_analysis.md
     model: gpt-5.6-luna
     reasoning_effort: medium
-    outcomes: {completed: ready_for_development}
+    outcomes: {completed: ready_for_development, needs_human_decision: system_analysis}
   - {id: ready_for_development, title: Готово к разработке, kind: queue, pull_to: development}
   - id: development
     title: Разработка
@@ -20,7 +20,7 @@ stages:
     prompt: delivery/development.md
     model: gpt-5.6-luna
     reasoning_effort: medium
-    outcomes: {completed: ready_for_review}
+    outcomes: {completed: ready_for_review, needs_human_decision: development}
   - {id: ready_for_review, title: Готово к ревью, kind: queue, pull_to: review}
   - id: review
     title: Ревью
@@ -29,7 +29,7 @@ stages:
     prompt: delivery/review.md
     model: gpt-5.6-luna
     reasoning_effort: low
-    outcomes: {completed: ready_for_acceptance, needs_rework: review}
+    outcomes: {completed: ready_for_acceptance, needs_rework: review, needs_human_decision: review}
   - {id: ready_for_acceptance, title: Готово к приемке, kind: queue, pull_to: acceptance}
   - id: acceptance
     title: Приемка
@@ -38,7 +38,7 @@ stages:
     prompt: delivery/acceptance.md
     model: gpt-5.6-luna
     reasoning_effort: low
-    outcomes: {completed: ready_for_release, needs_rework: acceptance}
+    outcomes: {completed: ready_for_release, needs_rework: acceptance, needs_human_decision: acceptance}
   - {id: ready_for_release, title: Готово к релизу, kind: queue}
   - {id: release, title: Релиз, kind: done}
   - {id: done, title: Готово, kind: done}

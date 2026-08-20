@@ -18,7 +18,7 @@ from starlette.routing import Mount, Route
 from .config import load_all_workflows
 from .control_db import ControlPlaneReader
 from .control import DeliverySessionStore, SessionError, WorkerControl
-from .orchestrator import recover_stale_run, resume_rework, STALE_RUN_TIMEOUT
+from .orchestrator import decide_human_gate, recover_stale_run, resume_rework, STALE_RUN_TIMEOUT
 from .run_store import RunStore
 from .tickets import TicketStore, next_status_for_ticket
 
@@ -38,6 +38,7 @@ input, select, textarea { width: 100%; border: 1px solid #344454; border-radius:
 """
 
 STYLE += "\n.blocked-badge { display: inline-block; margin-left: 6px; padding: 2px 5px; border-radius: 999px; font-size: 10px; color: #ffd0c5; background: #713b35; white-space: nowrap; }"
+STYLE += "\n.human-gate { margin: 16px 0; padding: 14px; border: 1px solid #c49a4a; border-radius: 10px; background: #3a3020; } .human-gate strong { color: #ffe2a0; } .human-gate .actions { margin-top: 12px; }"
 
 
 def _escape(value: Any) -> str:
@@ -110,6 +111,28 @@ def _blocker_badge(store: TicketStore, blocker_ids: list[str]) -> str:
     title = "Ожидает: " + "; ".join(items)
     label = f"ждёт {len(blocker_ids)} завис." if len(blocker_ids) > 1 else "ждёт зависимость"
     return f'<span class=blocked-badge title="{_escape(title)}">{_escape(label)}</span>'
+
+
+def _human_gate(ticket: Any) -> dict[str, Any] | None:
+    gate = ticket.context.get("human_gate") if isinstance(getattr(ticket, "context", None), dict) else None
+    return gate if isinstance(gate, dict) and gate.get("status") == "pending" else None
+
+
+def _human_gate_html(ticket: Any) -> str:
+    gate = _human_gate(ticket)
+    if not gate:
+        return ""
+    question = _escape(gate.get("question", "Решение владельца"))
+    proposal = _escape(gate.get("proposal", ""))
+    agree = _escape(gate.get("agree_label", "Согласиться"))
+    disagree = _escape(gate.get("disagree_label", "Не согласиться"))
+    return (
+        f'<div class="human-gate"><strong>Требуется решение владельца</strong>'
+        f'<div class="details-row"><span class="meta">Вопрос</span>{question}</div>'
+        f'<div class="details-row"><span class="meta">Предложение агента</span>{proposal}</div>'
+        f'<div class="actions"><form method=post action="/ticket/{_escape(ticket.id)}/human-decision"><button name=decision value=agree>{agree}</button></form>'
+        f'<form method=post action="/ticket/{_escape(ticket.id)}/human-decision"><button name=decision value=disagree>{disagree}</button></form></div></div>'
+    )
 
 
 def _board_html(store: TicketStore, workflows: dict, process: str, search: str = "", reader: ControlPlaneReader | None = None,
@@ -192,6 +215,8 @@ def _ticket_html(store: TicketStore, workflows: dict, ticket_id: str, reader: Co
 
 def _ticket_actions_html(store: TicketStore, workflows: dict, ticket: Any, *, stale: bool | None = None,
                          allow_fresh_recovery: bool = False) -> str:
+    if _human_gate(ticket):
+        return _human_gate_html(ticket)
     workflow = workflows[ticket.process]
     next_status = next_status_for_ticket(store, ticket)
     action = f'<form method=post action="/ticket/{_escape(ticket.id)}/move"><input type=hidden name=target value="{_escape(next_status)}"><button>Перевести в {_escape(workflow.by_id[next_status].title)}</button></form>' if next_status else ""
@@ -341,6 +366,14 @@ def create_app(project: str | Path) -> Starlette:
             return Response(str(exc), status_code=400)
         return RedirectResponse(f"/ticket/{urllib.parse.quote(ticket.id)}", status_code=303)
 
+    async def human_decision_ticket(request):
+        try:
+            decision = _parse_body(await request.body()).get("decision", "")
+            ticket = decide_human_gate(store, request.path_params["ticket_id"], decision)
+        except (KeyError, ValueError) as exc:
+            return Response(str(exc), status_code=400)
+        return RedirectResponse(f"/ticket/{urllib.parse.quote(ticket.id)}", status_code=303)
+
     async def recover_stale_run_ticket(request):
         try:
             ticket = recover_stale_run(store, request.path_params["ticket_id"], force=True)
@@ -385,7 +418,7 @@ def create_app(project: str | Path) -> Starlette:
         Route("/", board), Route("/healthz", health), Route("/ticket/{ticket_id}", ticket),
         Route("/new", new_ticket), Route("/sessions", sessions_page, methods=["GET", "POST"]), Route("/sessions/new", new_session), Route("/sessions/{session_id}", session_detail), Route("/sessions/{session_id}/{action}", session_action, methods=["POST"]),
         Route("/tickets/reorder", reorder_tickets, methods=["POST"]), Route("/tickets", create_ticket, methods=["POST"]),
-        Route("/ticket/{ticket_id}/move", move_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/resume-rework", resume_rework_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/recover-stale-run", recover_stale_run_ticket, methods=["POST"]),
+        Route("/ticket/{ticket_id}/move", move_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/resume-rework", resume_rework_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/human-decision", human_decision_ticket, methods=["POST"]), Route("/ticket/{ticket_id}/recover-stale-run", recover_stale_run_ticket, methods=["POST"]),
         Route("/workers", workers_page, methods=["GET", "POST"]),
     ])
 

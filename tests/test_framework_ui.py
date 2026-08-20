@@ -29,7 +29,24 @@ def test_framework_ui_builds_board_and_ticket_detail(tmp_path: Path):
 def test_framework_ui_exposes_expected_routes(tmp_path: Path):
     paths = {route.path for route in create_app(tmp_path).routes}
 
-    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/ticket/{ticket_id}/recover-stale-run", "/workers"}
+    assert paths == {"/", "/healthz", "/ticket/{ticket_id}", "/new", "/sessions", "/sessions/new", "/sessions/{session_id}", "/sessions/{session_id}/{action}", "/tickets", "/tickets/reorder", "/ticket/{ticket_id}/move", "/ticket/{ticket_id}/resume-rework", "/ticket/{ticket_id}/human-decision", "/ticket/{ticket_id}/recover-stale-run", "/workers"}
+
+
+def test_framework_ui_renders_binary_human_gate(tmp_path: Path):
+    store = TicketStore(tmp_path)
+    store.init()
+    ticket = store.create("delivery", "task", "Decision ticket", status="review")
+    ticket.blocked_reason = "human_decision_required"
+    ticket.context = {"human_gate": {"status": "pending", "stage": "review", "question": "Принять решение?", "proposal": "Использовать no-SLO"}}
+    store.save(ticket)
+
+    detail = _ticket_html(store, load_all_workflows(), ticket.id)
+
+    assert "Принять решение?" in detail
+    assert "Использовать no-SLO" in detail
+    assert f'/ticket/{ticket.id}/human-decision' in detail
+    assert 'value=agree' in detail
+    assert 'value=disagree' in detail
 
 
 def test_framework_ui_attention_only_marks_explicit_human_action(tmp_path: Path):
