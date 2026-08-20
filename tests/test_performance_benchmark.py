@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
-import json
 import pytest
+import yaml
 
 from benchmarks.performance.run_benchmark import _cold_capability, _cases, percentile, statistics_for, validate_result
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
@@ -105,3 +106,38 @@ def test_fixture_profile_counts_are_materialized(tmp_path):
     assert manifest["counts"]["sessions"] == manifest["dimensions"]["profile_counts"]["sessions"]
     assert manifest["counts"]["ledger_runs"] == manifest["dimensions"]["profile_counts"]["ledger_runs"]
     validate_manifest(manifest)
+
+
+def test_readback_rejects_yaml_store_status_tampering(tmp_path):
+    root = tmp_path / "fixture"
+    manifest = generate_fixture(root, seed=31, storage_mode="yaml")
+    path = next((root / ".vibe" / "tickets" / "delivery").glob("*.yaml"))
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["status"] = "done" if payload["status"] != "done" else "todo"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="materialized (ticket_status|checksum)"):
+        validate_manifest(manifest, materialized_root=root)
+
+
+def test_readback_rejects_sqlite_store_mutation(tmp_path):
+    root = tmp_path / "fixture"
+    manifest = generate_fixture(root, seed=32, storage_mode="sqlite")
+    database = root / ".vibe" / "control.sqlite3"
+    with sqlite3.connect(database) as db:
+        row = db.execute("SELECT ticket_id, payload_json FROM tickets LIMIT 1").fetchone()
+        payload = json.loads(row[1])
+        payload["status"] = "done" if payload["status"] != "done" else "todo"
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        db.execute("UPDATE tickets SET status=?, payload_json=? WHERE ticket_id=?",
+                   (payload["status"], encoded, row[0]))
+        db.commit()
+    with pytest.raises(ValueError, match="materialized (ticket_status|checksum)"):
+        validate_manifest(manifest, materialized_root=root)
+
+
+def test_readback_rejects_deleted_yaml_record(tmp_path):
+    root = tmp_path / "fixture"
+    manifest = generate_fixture(root, seed=33, storage_mode="yaml")
+    next((root / ".vibe" / "tickets" / "delivery").glob("*.yaml")).unlink()
+    with pytest.raises(ValueError, match="materialized (counts|checksum)"):
+        validate_manifest(manifest, materialized_root=root)
