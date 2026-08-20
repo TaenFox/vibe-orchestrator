@@ -114,10 +114,32 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
         "sessionstore.create", "sessionstore.activate", "sessionstore.complete", "sessionstore.cancel",
         "budgetledger.reserve.idempotent", "budgetledger.start", "budgetledger.finalize",
         "budgetledger.release", "budgetledger.reconcile", "budgetledger.concurrency.atomic_reserve",
+        "budgetledger.concurrency.write_contention",
         "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
     }
     assert required <= ids
     assert {item[3] for item in cases}
+
+
+def test_contention_case_observes_a_released_writer_lock(tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
+    result = cases["budgetledger.concurrency.write_contention"]()
+    assert result["state"] == "reserved_pending_start"
+    assert result["lock_wait_ms"] >= 15
+
+
+def test_result_validation_rejects_invalid_sqlite_metric_types():
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
+                          "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
+                          "sample_count": 1, "raw_samples": [{"sample_index": 0, "wall_ms": 1, "error": None,
+                            "sqlite_queries": 1, "sqlite_transactions": 1, "sqlite_errors": 0,
+                            "sqlite_busy_errors": 0, "sqlite_lock_wait_ms": "slow", "sqlite_lock_wait_count": 1,
+                            "sqlite_attribution": {"source": "test"}}]}],
+              "source_checksum_before": "a", "source_checksum_after": "a"}
+    with pytest.raises(ValueError, match="lock wait"):
+        validate_result(result)
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):

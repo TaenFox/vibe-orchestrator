@@ -648,6 +648,7 @@ class BudgetLedger:
             row = db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if not row: raise KeyError(run_id)
             if row["state"] == "reserved_pending_start": db.execute("UPDATE runs SET state='started',started_at=? WHERE run_id=?", (_now(), run_id))
+            elif row["state"] == "started": return self.get_run(run_id)
             elif row["state"] in TERMINAL: return self.get_run(run_id)
             else: raise ValueError(f"invalid transition: {row['state']} -> started")
         return self.get_run(run_id)

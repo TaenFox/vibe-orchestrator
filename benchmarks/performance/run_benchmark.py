@@ -70,7 +70,8 @@ class SQLiteMetrics:
         self._transaction_started = None
         self.attribution = {"source": "sqlite3.trace_callback+connection_factory",
                             "contract_version": "sqlite-attribution.v1",
-                            "lock_wait": "unavailable: sqlite3 exposes no portable busy handler"}
+                            "lock_wait": "end_to_end_only: controlled contention case",
+                            "lock_wait_limit": "sqlite3 exposes no portable busy handler"}
 
     def record_error(self, error: sqlite3.Error) -> None:
         text = str(error).lower()
@@ -189,6 +190,23 @@ def validate_result(result: dict[str, Any]) -> None:
                     raise ValueError("invalid SQLite attribution")
                 if sample["sqlite_lock_wait_ms"] is not None and sample["sqlite_lock_wait_count"] is None:
                     raise ValueError("lock wait duration requires lock wait count")
+                integer_fields = ("sqlite_queries", "sqlite_transactions", "sqlite_errors", "sqlite_busy_errors",
+                                  "sqlite_lock_wait_count")
+                for field in integer_fields:
+                    value = sample.get(field)
+                    if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                        raise ValueError(f"invalid SQLite metric: {field}")
+                wait_ms = sample.get("sqlite_lock_wait_ms")
+                if wait_ms is not None and (not isinstance(wait_ms, (int, float)) or isinstance(wait_ms, bool) or wait_ms < 0):
+                    raise ValueError("invalid SQLite lock wait duration")
+                if sample["sqlite_busy_errors"] is not None and sample["sqlite_errors"] is not None and sample["sqlite_busy_errors"] > sample["sqlite_errors"]:
+                    raise ValueError("busy errors exceed SQLite errors")
+            else:
+                if any(sample.get(field) is not None for field in ("sqlite_transactions", "sqlite_errors", "sqlite_busy_errors", "sqlite_lock_wait_ms", "sqlite_lock_wait_count")):
+                    raise ValueError("non-SQLite sample has SQLite metrics")
+                attribution = sample.get("sqlite_attribution")
+                if not isinstance(attribution, dict) or attribution.get("source") is not None:
+                    raise ValueError("non-SQLite sample must declare unavailable attribution")
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
@@ -319,6 +337,41 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
             with ledger._connect() as db:
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
+
+    contention_owner = f"BENCH-CONTENTION-{uuid.uuid4().hex}"
+    ledger.create_budget("ticket", contention_owner, limits={"tokens": 10000, "points": 10000, "runs": 1000})
+
+    def concurrent_write_contention() -> dict[str, Any]:
+        """Hold a writer lock on one connection while another writer waits."""
+        run_id = f"RUN-BENCH-CONTENTION-{uuid.uuid4().hex}"
+        holder = sqlite3.connect(ledger.path, timeout=10, isolation_level=None)
+        holder.execute("PRAGMA journal_mode=WAL")
+        holder.execute("BEGIN IMMEDIATE")
+        contender_started = threading.Event()
+
+        def contend() -> dict[str, Any]:
+            contender_started.set()
+            started = time.perf_counter_ns()
+            reservation = ledger.reserve(run_id, ticket_id, None, {"tokens": 1, "points": 1, "runs": 1},
+                                         budget_owner_ticket_id=contention_owner)
+            waited_ms = (time.perf_counter_ns() - started) / 1_000_000
+            sqlite_metrics.lock_wait_ms = waited_ms
+            sqlite_metrics.lock_wait_count = 1
+            return {"state": reservation.state, "lock_wait_ms": waited_ms}
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(contend)
+                if not contender_started.wait(timeout=2):
+                    raise RuntimeError("contention contender did not start")
+                time.sleep(0.03)
+                holder.commit()
+                return future.result(timeout=10)
+        finally:
+            holder.close()
+            with ledger._connect() as db:
+                db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+
     # A repeated reserve uses a prepared run id and is therefore idempotent and
     # read-only after setup; it cannot contaminate subsequent samples.
     prepared_run = f"RUN-BENCH-PREPARED-{ticket_id}"
@@ -354,6 +407,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.get_missing", "BudgetLedger", "get_run(missing)", lambda: ledger.get_run("RUN-MISSING")),
         ("budgetledger.reconcile", "BudgetLedger", "reconcile", lambda: ledger.reconcile()),
         ("budgetledger.concurrency.atomic_reserve", "BudgetLedger", "concurrent atomic reservation", concurrent_reservation),
+        ("budgetledger.concurrency.write_contention", "BudgetLedger", "controlled SQLite writer contention", concurrent_write_contention),
         ("budgetledger.release", "BudgetLedger", "release (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.release(run_id))),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="compact")),
@@ -420,7 +474,7 @@ def _run_case(case_id: str, component: str, operation: str, fn: Callable[[], Any
             "expected_outcome": "error" if ".error" in case_id or ".miss" in case_id or "validation" in case_id else "success",
             "dataset_dimensions": manifest["dimensions"],
             "sqlite_explain_query_plan": getattr(fn, "_sqlite_plans", []),
-            "limitations": getattr(fn, "_limitations", []) + (["sqlite busy_timeout wait is not observable via portable Python sqlite3 API"] if metrics is not None else []),
+            "limitations": getattr(fn, "_limitations", []) + (["SQLite busy handler callback is unavailable; lock wait is end-to-end timing"] if metrics is not None else []),
             "workload": {"project": "isolated", "noisy_filesystem": noisy, "fixture_checksum": manifest["fixture_files_sha256"]},
             "mode": "cold" if noisy else "warm", "sample_count": len(samples), "statistics": statistics_for(walls), "errors": errors, "raw_samples": samples}
 
