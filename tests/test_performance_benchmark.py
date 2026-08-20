@@ -121,6 +121,30 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
     assert {item[3] for item in cases}
 
 
+def test_sqlite_store_cases_have_attributed_query_plans(tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}
+    case_ids = ("ticketstore.list.delivery", "ticketstore.list.all", "ticketstore.get.hit",
+                "ticketstore.get.miss", "ticketstore.children_of", "sessionstore.list",
+                "sessionstore.get", "sessionstore.create", "sessionstore.activate",
+                "sessionstore.complete", "sessionstore.cancel", "sessionstore.add_membership",
+                "sessionstore.remove_membership")
+    for case_id in case_ids:
+        plans = getattr(cases[case_id], "_sqlite_plans")
+        assert plans, case_id
+        assert all(isinstance(plan["query"], str) and isinstance(plan["detail"], list) for plan in plans)
+        assert all(all(isinstance(detail, str) for detail in plan["detail"]) for plan in plans)
+    assert any("tickets" in plan["query"] for plan in getattr(cases["ticketstore.get.hit"], "_sqlite_plans"))
+    assert any("sessions" in plan["query"] for plan in getattr(cases["sessionstore.get"], "_sqlite_plans"))
+
+
+def test_yaml_load_path_has_no_sqlite_plans(tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="yaml")
+    cases = {item[0]: item[3] for item in _cases(tmp_path, storage="yaml")}
+    assert getattr(cases["ticketstore.load_path"], "_sqlite_plans") == []
+    assert getattr(cases["sessionstore.load_path"], "_sqlite_plans") == []
+
+
 def test_contention_case_observes_a_released_writer_lock(tmp_path):
     generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
     cases = {item[0]: item[3] for item in _cases(tmp_path, storage="sqlite")}

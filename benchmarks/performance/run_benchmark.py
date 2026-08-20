@@ -138,17 +138,52 @@ class InstrumentedLedger(BudgetLedger):
         return connection
 
 
-def _explain_plans(ledger: BudgetLedger) -> list[dict[str, Any]]:
-    """Capture plans for the two hot read queries without changing semantics."""
-    if not ledger.path.exists():
+def _explain_query_plans(database: Path, specs: list[tuple[str, str, tuple[Any, ...]]]) -> list[dict[str, Any]]:
+    """Capture stable, case-specific plans without executing production queries."""
+    if not database.exists():
         return []
     plans = []
-    with sqlite3.connect(ledger.path) as db:
-        for label, query in (("budget", "SELECT * FROM budgets WHERE budget_id=?"),
-                             ("runs", "SELECT * FROM runs WHERE ticket_budget_id=? ORDER BY reserved_at")):
-            rows = db.execute("EXPLAIN QUERY PLAN " + query, ("ticket:missing",)).fetchall()
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+        for label, query, params in specs:
+            rows = db.execute("EXPLAIN QUERY PLAN " + query, params).fetchall()
             plans.append({"query": label, "detail": [row[3] for row in rows]})
     return plans
+
+
+def _explain_plans(ledger: BudgetLedger) -> list[dict[str, Any]]:
+    """Capture plans for the two hot BudgetLedger read queries."""
+    return _explain_query_plans(ledger.path, [
+        ("budget", "SELECT * FROM budgets WHERE budget_id=?", ("ticket:missing",)),
+        ("runs", "SELECT * FROM runs WHERE ticket_budget_id=? ORDER BY reserved_at", ("ticket:missing",)),
+    ])
+
+
+def _store_explain_specs(case_id: str) -> list[tuple[str, str, tuple[Any, ...]]]:
+    """Return only query families used by this benchmark case."""
+    ticket_lookup = ("tickets.ticket_id lookup", "SELECT payload_json FROM tickets WHERE ticket_id = ?", ("FIX-MISSING",))
+    ticket_process = ("tickets.process list", "SELECT payload_json FROM tickets WHERE process = ? ORDER BY ticket_id", ("delivery",))
+    ticket_all = ("tickets ordered list", "SELECT payload_json FROM tickets ORDER BY ticket_id", ())
+    session_lookup = ("sessions.session_id lookup", "SELECT payload_json FROM sessions WHERE session_id = ?", ("SESSION-MISSING",))
+    session_list = ("sessions ordered list", "SELECT payload_json FROM sessions ORDER BY session_id", ())
+    session_members = ("session_members.session_id membership", "SELECT ticket_id FROM session_members WHERE session_id = ?", ("SESSION-MISSING",))
+    session_events = ("events.session audit", "SELECT event_type FROM events WHERE entity_kind = 'session' AND entity_id = ? ORDER BY event_index", ("SESSION-MISSING",))
+    if case_id == "ticketstore.list.delivery":
+        return [ticket_process]
+    if case_id in {"ticketstore.list.all", "ticketstore.children_of"}:
+        return [ticket_all]
+    if case_id in {"ticketstore.get.hit", "ticketstore.get.miss"}:
+        return [ticket_lookup]
+    if case_id == "sessionstore.list":
+        return [session_list]
+    if case_id == "sessionstore.get":
+        return [session_lookup]
+    if case_id == "sessionstore.membership_validation.error":
+        return [ticket_lookup]
+    if case_id == "sessionstore.validation.overlap.error":
+        return [session_list, ticket_lookup]
+    if case_id.startswith("sessionstore.") and case_id != "sessionstore.load_path":
+        return [session_lookup, session_members, session_events, ticket_lookup]
+    return []
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -177,6 +212,15 @@ def validate_result(result: dict[str, Any]) -> None:
                 raise ValueError(f"case missing {key}")
         if case["sample_count"] != len(case["raw_samples"]):
             raise ValueError(f"sample count mismatch for {case.get('case_id')}")
+        plans = case.get("sqlite_explain_query_plan", [])
+        if not isinstance(plans, list):
+            raise ValueError("sqlite explain plans must be a list")
+        for plan in plans:
+            if (not isinstance(plan, dict) or not isinstance(plan.get("query"), str)
+                    or not isinstance(plan.get("detail"), list)
+                    or not plan["detail"]
+                    or any(not isinstance(detail, str) for detail in plan["detail"])):
+                raise ValueError("invalid SQLite explain plan")
         for sample in case["raw_samples"]:
             if sample.get("sample_index", -1) < 0 or "wall_ms" not in sample or "error" not in sample:
                 raise ValueError("invalid sample schema")
@@ -433,12 +477,18 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
     # Keep endpoint/transport cases in the registry even when binding a local
     # server is forbidden. Their samples then carry the limitation and error
     # accounting instead of silently shrinking the claimed case matrix.
-    for _, component, _, fn in cases:
+    for case_id, component, _, fn in cases:
         # BudgetLedger owns the instrumented connection. Ticket/session stores
         # deliberately retain their internal connection lifecycle and report a
         # typed unavailable reason instead of pretending the counters are zero.
         setattr(fn, "_sqlite_metrics", sqlite_metrics if use_database and component in {"TicketStore", "SessionStore", "BudgetLedger"} else None)
-        setattr(fn, "_sqlite_plans", _explain_plans(ledger) if use_database and component == "BudgetLedger" else [])
+        if use_database and component == "BudgetLedger":
+            plans = _explain_plans(ledger)
+        elif use_database and component in {"TicketStore", "SessionStore"}:
+            plans = _explain_query_plans(store.database, _store_explain_specs(case_id))
+        else:
+            plans = []
+        setattr(fn, "_sqlite_plans", plans)
         setattr(fn, "_limitations", [http_limitation] if http_limitation and component == "HTTP" else [])
     return cases
 
