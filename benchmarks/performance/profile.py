@@ -25,6 +25,19 @@ from benchmarks.performance.run_benchmark import DEFAULT_SEED, REQUIRED_PROFILE_
 PROFILE_SCHEMA_VERSION = "performance-profile.v1"
 
 
+def prepare_output(output: Path) -> None:
+    """Remove only artifacts owned by this profiler before a rerun.
+
+    Reusing an output directory must not retain a pstats/text pair for a case
+    that is unavailable in the current environment (for example, loopback
+    binding may be denied by a sandbox). Keep unrelated files intact.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    for path in output.iterdir():
+        if path.is_file() and (path.suffix in {".pstats", ".txt"} or path.name == "profile-manifest.json"):
+            path.unlink()
+
+
 def artifact_descriptor(path: Path, kind: str, artifact_root: Path) -> dict[str, object]:
     """Describe a profiling artifact relative to its controlled output root."""
     path = path.resolve()
@@ -96,7 +109,7 @@ def main() -> int:
         storage = args.storage or "sqlite"
         manifest = None
         manifest_hash = None
-    args.output.mkdir(parents=True, exist_ok=True)
+    prepare_output(args.output)
     with tempfile.TemporaryDirectory(prefix="vibe-profile-") as temp:
         project = Path(temp) / "project"
         shutil.copytree(args.project, project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))

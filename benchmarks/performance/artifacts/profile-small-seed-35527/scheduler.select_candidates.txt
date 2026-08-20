@@ -1,14 +1,14 @@
-         21736 function calls in 0.009 seconds
+         21736 function calls in 0.025 seconds
 
    Ordered by: cumulative time
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-       35    0.000    0.000    0.009    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:496(<lambda>)
-       35    0.002    0.000    0.009    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/scheduler.py:26(select_candidates)
-     1505    0.000    0.000    0.007    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/scheduler.py:22(wip_count)
-     1505    0.001    0.000    0.006    0.000 {built-in method builtins.sum}
-    13020    0.006    0.000    0.006    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/scheduler.py:23(<genexpr>)
-     1015    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/tickets.py:680(automatic_retry_due)
+       35    0.000    0.000    0.025    0.001 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/benchmarks/performance/run_benchmark.py:496(<lambda>)
+       35    0.004    0.000    0.025    0.001 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/scheduler.py:26(select_candidates)
+     1505    0.001    0.000    0.021    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/scheduler.py:22(wip_count)
+     1505    0.008    0.000    0.020    0.000 {built-in method builtins.sum}
+    13020    0.012    0.000    0.012    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/scheduler.py:23(<genexpr>)
+     1015    0.000    0.000    0.001    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/tickets.py:680(automatic_retry_due)
      3465    0.000    0.000    0.000    0.000 {method 'get' of 'dict' objects}
      1015    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/tickets.py:676(automatic_retry_available)
        35    0.000    0.000    0.000    0.000 /Users/pmokeev/Desktop/Projects/vibe-orchestrator/.vibe/tmp/worktrees/DEL-F15BD9/src/vibe_orchestrator/config.py:39(by_id)

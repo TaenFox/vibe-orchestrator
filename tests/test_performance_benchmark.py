@@ -8,6 +8,7 @@ import pytest
 from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold_capability, _cases,
                                                    _unavailable_case, instrumented_connection_factory, percentile,
                                                    parse_seed, statistics_for, validate_result)
+from benchmarks.performance.profile import prepare_output
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
 PROVENANCE = {"source_kind": "synthetic", "synthetic_only": True, "seed": 35527, "manifest_hash": "a"}
@@ -214,6 +215,22 @@ def test_inapplicable_storage_case_is_retained_as_unavailable(tmp_path):
     assert result["unavailable"] is True
     assert result["sample_count"] == 0
     assert "yaml" in result["limitations"][0]
+
+
+def test_profile_output_removes_stale_owned_artifacts(tmp_path):
+    output = tmp_path / "profile"
+    output.mkdir()
+    (output / "http.api_tickets.pstats").write_bytes(b"stale")
+    (output / "http.api_tickets.txt").write_text("stale", encoding="utf-8")
+    (output / "profile-manifest.json").write_text("stale", encoding="utf-8")
+    (output / "keep.me").write_text("unrelated", encoding="utf-8")
+
+    prepare_output(output)
+
+    assert not (output / "http.api_tickets.pstats").exists()
+    assert not (output / "http.api_tickets.txt").exists()
+    assert not (output / "profile-manifest.json").exists()
+    assert (output / "keep.me").exists()
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):
