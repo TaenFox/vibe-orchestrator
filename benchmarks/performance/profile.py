@@ -19,9 +19,8 @@ sys.path.insert(0, str(_repo_root / "src"))
 sys.path.insert(1, str(_repo_root))
 import cProfile
 
-from benchmarks.performance.workloads import (assert_manifest_identity, generate_fixture,
-                                              load_dataset, materialize_dataset)
-from benchmarks.performance.run_benchmark import _cases
+from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
+from benchmarks.performance.run_benchmark import REQUIRED_PROFILE_CASES, _cases
 
 PROFILE_SCHEMA_VERSION = "performance-profile.v1"
 
@@ -53,7 +52,10 @@ def validate_artifacts(artifacts: list[dict[str, object]], artifact_root: Path) 
             raise ValueError(f"invalid or duplicate profiling artifact kind: {kind}")
         seen.append(kind)
         descriptor = artifact_descriptor((root / str(artifact["path"])).resolve(), kind, root)
-        if descriptor["sha256"] != artifact["sha256"] or descriptor["size_bytes"] != artifact["size_bytes"]:
+        # The manifest contains its own descriptor, so its final digest cannot
+        # be embedded without a recursive checksum.  Path/schema are still
+        # checked; data artifacts retain strict checksum validation.
+        if kind != "profile_manifest" and (descriptor["sha256"] != artifact["sha256"] or descriptor["size_bytes"] != artifact["size_bytes"]):
             raise ValueError(f"profiling artifact checksum/size mismatch: {artifact['path']}")
     if seen == ["profile_manifest"]:
         return
@@ -73,69 +75,82 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--size", choices=("small", "medium", "large", "xlarge"))
+    parser.add_argument("--seed", type=int, default=35527)
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations <= 0:
         parser.error("warmup must be non-negative and iterations must be positive")
-    if not args.dataset or not args.manifest_hash:
-        parser.error("--dataset and --manifest-hash are required for provenance-safe profiling")
-    manifest_path = args.dataset / "manifest.json" if args.dataset.is_dir() else args.dataset
-    manifest = load_dataset(manifest_path)
-    manifest_hash = manifest["hashes"]["manifest_sha256"]
-    if args.manifest_hash != manifest_hash:
-        parser.error("manifest hash does not match dataset")
-    if args.size and args.size != manifest["dimensions"]["size"]:
-        parser.error("--size must match dataset manifest profile")
-    storage = args.storage or manifest["storage_mode"]
-    if args.storage and args.storage != manifest["storage_mode"]:
-        parser.error("--storage must match dataset manifest storage_mode")
+    if args.dataset:
+        manifest_path = args.dataset / "manifest.json" if args.dataset.is_dir() else args.dataset
+        manifest = load_dataset(manifest_path)
+        manifest_hash = manifest["hashes"]["manifest_sha256"]
+        if not args.manifest_hash:
+            parser.error("--manifest-hash is required with --dataset")
+        if args.manifest_hash != manifest_hash:
+            parser.error("manifest hash does not match dataset")
+        if args.size and args.size != manifest["dimensions"]["size"]:
+            parser.error("--size must match dataset manifest profile")
+        storage = args.storage or manifest["storage_mode"]
+        if args.storage and args.storage != manifest["storage_mode"]:
+            parser.error("--storage must match dataset manifest storage_mode")
+    else:
+        storage = args.storage or "sqlite"
+        manifest = None
+        manifest_hash = None
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="vibe-profile-") as temp:
         project = Path(temp) / "project"
         shutil.copytree(args.project, project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
-        if args.dataset.is_dir():
+        if args.dataset:
             materialized = materialize_dataset(project, args.dataset, manifest, storage_mode=storage)
         else:
-            materialized = generate_fixture(project, seed=manifest["seed"], size=manifest["dimensions"]["size"], storage_mode=storage)
-            assert_manifest_identity(manifest, materialized)
-        match = next((case for case in _cases(project, storage=storage) if case[0] == args.scenario), None)
-        if match is None:
+            materialized = generate_fixture(project, seed=args.seed, size=args.size or "small", storage_mode=storage)
+            manifest = materialized
+            manifest_hash = materialized["hashes"]["manifest_sha256"]
+        registry_cases = _cases(project, storage=storage)
+        registry = {case[0]: case for case in registry_cases}
+        if args.scenario not in registry:
             parser.error(f"unknown scenario: {args.scenario}")
-        path = args.output / f"{args.scenario}.pstats"
-        text_path = args.output / f"{args.scenario}.txt"
-        profiler = cProfile.Profile(); profiler.enable()
-        errors = []
-        for _ in range(args.warmup):
-            match[3]()
-        for index in range(args.iterations):
-            try:
-                match[3]()
-            except Exception as exc:
-                errors.append({"sample_index": index, "error": repr(exc)})
-        profiler.disable(); profiler.dump_stats(path)
-        with text_path.open("w", encoding="utf-8") as handle:
-            pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
+        coverage = []
+        artifacts = []
+        for component, case_id in REQUIRED_PROFILE_CASES.items():
+            match = registry.get(case_id)
+            if match is None:
+                coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
+                                 "reason": "required case is unavailable in this runtime/storage mode"})
+                continue
+            safe_id = case_id.replace("/", "_")
+            path = args.output / f"{safe_id}.pstats"
+            text_path = args.output / f"{safe_id}.txt"
+            profiler = cProfile.Profile(); profiler.enable(); errors = []
+            for _ in range(args.warmup):
+                try: match[3]()
+                except Exception: pass
+            for index in range(args.iterations):
+                try: match[3]()
+                except Exception as exc: errors.append({"sample_index": index, "error": repr(exc)})
+            profiler.disable(); profiler.dump_stats(path)
+            with text_path.open("w", encoding="utf-8") as handle:
+                pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
+            artifacts.extend([artifact_descriptor(path, "pstats", args.output), artifact_descriptor(text_path, "text", args.output)])
+            coverage.append({"component": component, "case_id": case_id,
+                             "status": "failed" if errors else "profiled",
+                             "artifact_paths": [str(path.relative_to(args.output)), str(text_path.relative_to(args.output))],
+                             "errors": errors, "sample_parameters": {"warmup": args.warmup, "iterations": args.iterations}})
+        registry_cases.cleanup()
     profile_manifest = args.output / "profile-manifest.json"
-    components = {"TicketStore": "ticketstore.list.delivery", "SessionStore": "sessionstore.list",
-                  "BudgetLedger": "budgetledger.list_runs", "Orchestrator": "orchestrator.scan_sort_cycle",
-                  "Scheduler": "scheduler.select_candidates", "UI": "ui.render_board.compact", "HTTP": "http.api_tickets"}
-    coverage = []
-    for component, case_id in components.items():
-        if case_id == args.scenario:
-            coverage.append({"component": component, "case_id": case_id, "status": "failed" if errors else "profiled",
-                             "pstats": str(path), "text": str(text_path), "errors": errors})
-        else:
-            coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
-                             "reason": "standalone invocation selected a different scenario"})
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
-        "case_id": args.scenario, "manifest_hash": manifest_hash,
+        "case_id": args.scenario, "requested_scenario": args.scenario,
+        "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
+        "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
-    artifacts = [artifact_descriptor(path, "pstats", args.output),
-                 artifact_descriptor(text_path, "text", args.output),
-                 artifact_descriptor(profile_manifest, "profile_manifest", args.output)]
+    artifacts.append(artifact_descriptor(profile_manifest, "profile_manifest", args.output))
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
-        "case_id": args.scenario, "manifest_hash": manifest_hash,
+        "case_id": args.scenario, "requested_scenario": args.scenario,
+        "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
     validate_artifacts(artifacts, args.output)

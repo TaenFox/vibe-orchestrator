@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold_capability, _cases,
-                                                   instrumented_connection_factory, percentile,
+                                                   _unavailable_case, instrumented_connection_factory, percentile,
                                                    statistics_for, validate_result)
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
@@ -150,6 +150,16 @@ def test_result_validation_requires_clean_isolation_for_mutation():
 def test_case_spec_teardown_is_a_first_class_callback():
     spec = CaseSpec("x", "X", "operation", lambda: None, kind="mutation", teardown=lambda: None)
     assert spec[0] == "x" and spec[3] is spec.run
+
+
+def test_inapplicable_storage_case_is_retained_as_unavailable(tmp_path):
+    manifest = generate_fixture(tmp_path, seed=6, size="small", storage_mode="sqlite")
+    spec = CaseSpec("http.loopback", "HTTP", "loopback", lambda: None,
+                    storage_modes=("sqlite",), kind="read_only")
+    result = _unavailable_case(spec, storage_mode="yaml", manifest=manifest)
+    assert result["unavailable"] is True
+    assert result["sample_count"] == 0
+    assert "yaml" in result["limitations"][0]
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):

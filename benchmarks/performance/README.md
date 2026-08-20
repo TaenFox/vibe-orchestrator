@@ -32,15 +32,28 @@ Profiling обязательно создаёт coverage record для кажд�
 aggregates и полный read-back proof; отдельного opt-in флага нет. Смотрите
 [каноническую методику](../../docs/performance.md).
 
-Standalone profiling использует тот же проверенный dataset identity и требует
-`--dataset` вместе с точным `--manifest-hash`; storage по умолчанию берётся из
-manifest:
+Standalone profiling поддерживает synthetic запуск без dataset (минимум —
+`--project`, `--scenario`, `--output`) и approved запуск с обязательным точным
+`--manifest-hash`. В обоих случаях создаётся полная coverage matrix; `--scenario`
+фиксирует фокус, но не сокращает matrix. Synthetic пример:
+
+```bash
+python benchmarks/performance/profile.py --project . \
+  --scenario ticketstore.list.delivery --output /tmp/performance-profile \
+  --warmup 5 --iterations 30
+```
+
+Для approved dataset storage по умолчанию берётся из manifest:
 
 ```bash
 python benchmarks/performance/profile.py --project . --dataset /path/to/approved \
   --scenario ticketstore.list.delivery --output /tmp/performance-profile \
   --run-id profile-smoke --manifest-hash <validated-hash> --warmup 5 --iterations 30
 ```
+
+Smoke/full автоматически выполняют baseline и alternate storage. В результате
+`storage_comparison` содержит оба manifest hash, logical/read-back equivalence и
+индекс сопоставления `case_id`; `alternate_run` сохраняет второй набор samples.
 
 Для `--storage yaml` tickets и sessions materialize legacy YAML documents через
 `use_database=False`; BudgetLedger остаётся SQLite authoritative backend и явно

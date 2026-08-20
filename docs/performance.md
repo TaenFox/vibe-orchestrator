@@ -67,6 +67,32 @@ Numerical baseline создаётся только командой CLI и со�
 создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
 manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
 
+## Approved dataset и storage comparison
+
+`--dataset` принимает directory bundle с материализованным `.vibe` и
+`manifest.json` либо путь к manifest внутри такого bundle. В approved режиме
+harness копирует фактическое дерево через `materialize_dataset()` и не вызывает
+`generate_fixture()`. Проверяются schema/version, manifest hash, tree checksum,
+storage identity и read-back proof; несовместимый bundle завершается ошибкой до
+измерения. Result сохраняет `source_kind=approved_dataset`, provenance,
+`dataset_manifest_hash`, `dataset_tree_sha256` и измеренный manifest.
+
+Каждый smoke/full запуск автоматически выполняет два изолированных прохода:
+`--storage` — baseline, противоположный режим — alternate. Поле `cases`
+сохраняет совместимый baseline result, `alternate_run` содержит второй проход,
+а `storage_comparison` сопоставляет case IDs и logical/read-back proof. Cases,
+недоступные в alternate режиме, остаются в registry с явным limitation.
+
+## Standalone profiling и coverage manifest
+
+Standalone profiling допускает synthetic команду с `--project`, `--scenario` и
+`--output`; approved dataset требует точного `--manifest-hash`. Обязательная
+матрица централизована в benchmark registry и включает TicketStore, SessionStore,
+BudgetLedger, Orchestrator, Scheduler, UI и HTTP. Для каждой записи сохраняется
+`profiled`, `failed` или `unavailable`, sample parameters, errors и descriptors
+отдельных pstats/text artifacts в финальном `profile-manifest.json`. Requested
+scenario валидируется и сохраняется как focus, но не отключает остальные записи.
+
 ## SQLite attribution schema
 
 `fs_ops`/`fs_bytes` — наблюдаемые deltas файлового дерева, не syscall trace. Для

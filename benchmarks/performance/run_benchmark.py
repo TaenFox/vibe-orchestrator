@@ -46,12 +46,23 @@ from vibe_orchestrator.ui import render_board, render_board_fragment
 from vibe_orchestrator.ui import start_server
 from vibe_orchestrator.control import DeliverySessionStore, WorkerControl
 try:
-    from .workloads import generate_fixture, load_dataset
+    from .workloads import generate_fixture, load_dataset, materialize_dataset
 except ImportError:  # direct script execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from benchmarks.performance.workloads import generate_fixture, load_dataset
+    from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
 
 SCHEMA_VERSION = "performance-result.v2"
+
+# Kept here as the single registry used by the benchmark and standalone profiler.
+REQUIRED_PROFILE_CASES = {
+    "TicketStore": "ticketstore.list.delivery",
+    "SessionStore": "sessionstore.list",
+    "BudgetLedger": "budgetledger.list_runs",
+    "Orchestrator": "orchestrator.scan_sort_cycle",
+    "Scheduler": "scheduler.select_candidates",
+    "UI": "ui.render_board.compact",
+    "HTTP": "http.api_tickets",
+}
 
 
 @dataclass
@@ -587,6 +598,21 @@ def _run_case(spec: CaseSpec, project: Path, warmup: int, iterations: int, noisy
             "isolation": isolation}
 
 
+def _unavailable_case(spec: CaseSpec, *, storage_mode: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Keep a registry case visible when its storage mode is not applicable."""
+    return {
+        "case_id": spec.case_id, "component": spec.component, "operation": spec.operation,
+        "kind": spec.kind, "storage_mode": storage_mode,
+        "storage_modes": list(spec.storage_modes), "dataset_dimensions": manifest["dimensions"],
+        "expected_outcome": spec.expected_outcome, "errors": [], "raw_samples": [],
+        "sample_count": 0, "statistics": {},
+        "limitations": [f"case is unavailable for storage mode {storage_mode}"],
+        "unavailable": True,
+        "isolation": {"before_hash": None, "after_hash": None, "leaked_entities": [],
+                      "leaked_paths": [], "cleanup_errors": [], "clean": True},
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.warmup < 0 or args.iterations <= 0:
         raise ValueError("warmup must be non-negative and iterations must be positive")
@@ -594,57 +620,76 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="vibe-performance-") as temp:
         isolated = Path(temp) / "project"; shutil.copytree(source, isolated, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
         size = args.size or ("small" if args.profile == "smoke" else "medium")
-        dataset = load_dataset(args.dataset) if args.dataset else None
+        dataset = load_dataset(args.dataset / "manifest.json" if args.dataset and args.dataset.is_dir() else args.dataset) if args.dataset else None
         if dataset:
             size = dataset.get("dimensions", {}).get("size", size)
         fixture_seed = int(dataset["seed"]) if dataset else args.seed
         fixture_storage = dataset.get("storage_mode", args.storage) if dataset else args.storage
         if dataset and fixture_storage != args.storage:
             raise ValueError("--storage must match the dataset manifest storage_mode")
-        manifest = generate_fixture(isolated, seed=fixture_seed, size=size, storage_mode=fixture_storage)
-        cases = _cases(isolated, storage=args.storage); atexit.register(cases.cleanup); iterations = args.iterations
+        iterations = args.iterations
+        storage_modes = (args.storage, "yaml" if args.storage == "sqlite" else "sqlite")
+        passes: dict[str, tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]] = {}
+        for storage_mode in storage_modes:
+            pass_project = isolated if storage_mode == args.storage else Path(temp) / f"project-{storage_mode}"
+            if pass_project != isolated:
+                shutil.copytree(source, pass_project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
+            if dataset:
+                manifest = materialize_dataset(pass_project, args.dataset, dataset, storage_mode=storage_mode)
+            else:
+                manifest = generate_fixture(pass_project, seed=fixture_seed, size=size, storage_mode=storage_mode)
+            cases = _cases(pass_project, storage=storage_mode)
+            atexit.register(cases.cleanup)
+            pass_cases = []
+            cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
+            effective_cold = bool(args.cold and cold["available"])
+            for item in cases:
+                if storage_mode not in item.storage_modes:
+                    pass_cases.append(_unavailable_case(item, storage_mode=storage_mode, manifest=manifest))
+                    continue
+                if effective_cold:
+                    _prepare_cold(cold)
+                case_result = _run_case(item, pass_project, args.warmup, iterations, effective_cold,
+                                        storage_mode=storage_mode, manifest=manifest)
+                if args.cold and not effective_cold:
+                    case_result["limitations"].append(cold["limitation"])
+                case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
+                pass_cases.append(case_result)
+            passes[storage_mode] = (manifest, pass_cases, {"available": True, "limitation": cold["limitation"]})
+            cases.cleanup()
+        manifest, primary_cases, _ = passes[args.storage]
+        alternate_storage = storage_modes[1]
+        alternate_manifest, alternate_cases, alternate_state = passes[alternate_storage]
+        primary_logical = _normalize_logical(manifest.get("logical", {}))
+        alternate_logical = _normalize_logical(alternate_manifest.get("logical", {}))
+        primary_logical.pop("storage_mode", None); alternate_logical.pop("storage_mode", None)
+        comparison = {"baseline_storage": args.storage, "alternate_storage": alternate_storage,
+                      "baseline_manifest_hash": manifest["hashes"]["manifest_sha256"],
+                      "alternate_manifest_hash": alternate_manifest["hashes"]["manifest_sha256"],
+                      "logical_equivalent": primary_logical == alternate_logical,
+                      "readback_equivalent": manifest["readback"].get("digest") == alternate_manifest["readback"].get("digest"),
+                      "cases": {}, "limitations": []}
+        if not comparison["logical_equivalent"] or not comparison["readback_equivalent"]:
+            comparison["limitations"].append("storage conversion/read-back is not logically equivalent")
+        alternate_by_id = {case["case_id"]: case for case in alternate_cases}
+        for case in primary_cases:
+            other = alternate_by_id.get(case["case_id"])
+            comparison["cases"][case["case_id"]] = {"baseline": case["storage_mode"],
+                "alternate": other["storage_mode"] if other else None,
+                "alternate_available": other is not None,
+                "limitation": None if other else "case is not registered for alternate storage"}
         result = {"schema_version": SCHEMA_VERSION, "run_id": f"benchmark-{uuid.uuid4().hex}", "git_commit": _git_commit(source),
                   "package_version": "0.1.0", "python_version": sys.version, "platform": platform.platform(), "filesystem": str(isolated.anchor),
                   "parameters": {"profile": args.profile, "seed": fixture_seed, "size": size, "storage": fixture_storage,
                                  "warmup": args.warmup, "iterations": iterations, "cold_warm": "cold" if args.cold else "warm",
                                  "dataset_source": str(args.dataset) if args.dataset else "synthetic"},
-                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": [], "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
-        cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
-        effective_cold = bool(args.cold and cold["available"])
-        for item in cases:
-            if effective_cold:
-                _prepare_cold(cold)
-            case_result = _run_case(item, isolated, args.warmup, iterations, effective_cold, storage_mode=args.storage, manifest=manifest)
-            if args.cold and not effective_cold:
-                case_result["limitations"].append(cold["limitation"])
-            case_result["dataset_manifest_hash"] = manifest["hashes"]["manifest_sha256"]
-            result["cases"].append(case_result)
-        selected = next((item for item in cases if item[0] == "scheduler.select_candidates"), None)
-        if selected:
-            profile_dir = output.parent / f"{output.stem}.profiles"; profile_dir.mkdir(parents=True, exist_ok=True)
-            profile_path = profile_dir / f"{selected[0]}.pstats"; text_path = profile_dir / f"{selected[0]}.txt"
-            profiler = cProfile.Profile(); profiler.enable(); selected[3](); profiler.disable(); profiler.dump_stats(profile_path)
-            with text_path.open("w", encoding="utf-8") as handle:
-                pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
-            profile_manifest = profile_dir / "profile-manifest.json"
-            from benchmarks.performance.profile import artifact_descriptor, validate_artifacts
-            profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-                "artifacts": []}, indent=2), encoding="utf-8")
-            profile_artifacts = [artifact_descriptor(profile_path, "pstats", profile_dir),
-                                 artifact_descriptor(text_path, "text", profile_dir),
-                                 artifact_descriptor(profile_manifest, "profile_manifest", profile_dir)]
-            profile_manifest.write_text(json.dumps({"schema_version": "performance-profile.v1", "run_id": result["run_id"],
-                "case_id": selected[0], "manifest_hash": manifest["hashes"]["manifest_sha256"],
-                "artifacts": profile_artifacts}, indent=2), encoding="utf-8")
-            validate_artifacts(profile_artifacts, profile_dir)
-            result["profiling"]["artifacts"] = profile_artifacts
-            for case in result["cases"]:
-                if case["case_id"] == selected[0]:
-                    case["profile_artifacts"] = result["profiling"]["artifacts"]
+                  "source_checksum_before": _hash_tree(source), "dataset_manifest": manifest, "cases": primary_cases,
+                  "storage_comparison": comparison, "alternate_run": {"storage_mode": alternate_storage,
+                      "manifest": alternate_manifest, "cases": alternate_cases, "available": alternate_state["available"]},
+                  "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
         result["integrity"] = {"warmup_excluded": True, "expected_sample_count": iterations,
-                               "cold_available": cold["available"], "cold_strategy": cold["strategy"],
-                               "cold_limitation": cold["limitation"]}
+                               "cold_available": None, "cold_strategy": "per-storage-pass",
+                               "cold_limitation": "cold capability is recorded per storage pass"}
         result["source_checksum_after"] = _hash_tree(source)
         validate_result(result)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
