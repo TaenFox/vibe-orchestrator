@@ -354,6 +354,8 @@ def validate_result(result: dict[str, Any]) -> None:
                 if not isinstance(sample["sqlite_transaction_ms"], (int, float)) or sample["sqlite_transaction_ms"] < 0:
                     raise ValueError("transaction duration must be a non-negative number")
         sample_indices = {sample["sample_index"] for sample in case["raw_samples"]}
+        if sample_indices and sample_indices != set(range(case["sample_count"])):
+            raise ValueError("sample indices must form a contiguous range from zero")
         if any(error.get("sample_index") not in sample_indices for error in case["errors"]):
             raise ValueError("error references an absent sample")
         if "isolation" in case:

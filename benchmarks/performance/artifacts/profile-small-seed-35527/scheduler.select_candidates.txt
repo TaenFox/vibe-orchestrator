@@ -3,7 +3,7 @@
    Ordered by: cumulative time
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-       35    0.000    0.000    0.009    0.000 <project-path>:517(<lambda>)
+       35    0.000    0.000    0.009    0.000 <project-path>:529(<lambda>)
        35    0.002    0.000    0.009    0.000 <project-path>:26(select_candidates)
      1505    0.000    0.000    0.007    0.000 <project-path>:22(wip_count)
      1505    0.001    0.000    0.006    0.000 {built-in method builtins.sum}

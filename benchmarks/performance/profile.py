@@ -163,6 +163,10 @@ def main() -> int:
                 try: match[3]()
                 except Exception as exc: errors.append({"sample_index": index, "error": repr(exc)})
             profiler.disable(); profiler.dump_stats(path)
+            # cProfile stores the temporary checkout's absolute filenames in
+            # the binary stats file too.  Strip directory components before
+            # committing the artifact so it remains portable across worktrees.
+            pstats.Stats(str(path)).strip_dirs().dump_stats(str(path))
             with text_path.open("w", encoding="utf-8") as handle:
                 pstats.Stats(profiler, stream=handle).sort_stats("cumulative").print_stats(40)
             text = text_path.read_text(encoding="utf-8")

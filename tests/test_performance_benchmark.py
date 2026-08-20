@@ -52,6 +52,16 @@ def test_profile_linkage_descriptors_are_portable_and_complete():
         assert ".." not in Path(descriptor["path"]).parts
 
 
+def test_committed_profile_artifacts_have_no_absolute_worktree_paths():
+    root = Path("benchmarks/performance/artifacts/profile-small-seed-35527")
+    for path in root.iterdir():
+        if path.is_file() and path.suffix in {".pstats", ".txt", ".json"}:
+            content = path.read_bytes()
+            assert b"DEL-F15BD9" not in content
+            assert b"/Users/" not in content
+            assert b"/private/" not in content
+
+
 def test_provenance_contract_requires_synthetic_marker_and_manifest_hash():
     result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
               "cases": [], "source_checksum_before": "a", "source_checksum_after": "a",
