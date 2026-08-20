@@ -20,9 +20,22 @@ sys.path.insert(1, str(_repo_root))
 import cProfile
 
 from benchmarks.performance.workloads import generate_fixture, load_dataset, materialize_dataset
-from benchmarks.performance.run_benchmark import REQUIRED_PROFILE_CASES, _cases
+from benchmarks.performance.run_benchmark import DEFAULT_SEED, REQUIRED_PROFILE_CASES, _cases, parse_seed
 
 PROFILE_SCHEMA_VERSION = "performance-profile.v1"
+
+
+def prepare_output(output: Path) -> None:
+    """Remove only artifacts owned by this profiler before a rerun.
+
+    Reusing an output directory must not retain a pstats/text pair for a case
+    that is unavailable in the current environment (for example, loopback
+    binding may be denied by a sandbox). Keep unrelated files intact.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    for path in output.iterdir():
+        if path.is_file() and (path.suffix in {".pstats", ".txt"} or path.name == "profile-manifest.json"):
+            path.unlink()
 
 
 def artifact_descriptor(path: Path, kind: str, artifact_root: Path) -> dict[str, object]:
@@ -75,7 +88,7 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--size", choices=("small", "medium", "large", "xlarge"))
-    parser.add_argument("--seed", type=int, default=35527)
+    parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED)
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations <= 0:
         parser.error("warmup must be non-negative and iterations must be positive")
@@ -96,7 +109,7 @@ def main() -> int:
         storage = args.storage or "sqlite"
         manifest = None
         manifest_hash = None
-    args.output.mkdir(parents=True, exist_ok=True)
+    prepare_output(args.output)
     with tempfile.TemporaryDirectory(prefix="vibe-profile-") as temp:
         project = Path(temp) / "project"
         shutil.copytree(args.project, project, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "results"))
@@ -118,6 +131,11 @@ def main() -> int:
                 coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
                                  "reason": "required case is unavailable in this runtime/storage mode"})
                 continue
+            limitations = list(match.limitations)
+            if limitations:
+                coverage.append({"component": component, "case_id": case_id, "status": "unavailable",
+                                 "reason": "; ".join(limitations), "sample_parameters": {"warmup": args.warmup, "iterations": args.iterations}})
+                continue
             safe_id = case_id.replace("/", "_")
             path = args.output / f"{safe_id}.pstats"
             text_path = args.output / f"{safe_id}.txt"
@@ -138,10 +156,16 @@ def main() -> int:
                              "errors": errors, "sample_parameters": {"warmup": args.warmup, "iterations": args.iterations}})
         registry_cases.cleanup()
     profile_manifest = args.output / "profile-manifest.json"
+    provenance = {"source_kind": manifest["source_kind"],
+                  "synthetic_only": manifest["source_kind"] == "synthetic",
+                  "seed": manifest["seed"], "manifest_hash": manifest_hash,
+                  "dataset_tree_sha256": manifest["dataset_tree_sha256"],
+                  "command": list(sys.argv)}
     profile_manifest.write_text(json.dumps({
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,
         "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "provenance": provenance,
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")
@@ -150,6 +174,7 @@ def main() -> int:
         "schema_version": PROFILE_SCHEMA_VERSION, "run_id": args.run_id,
         "case_id": args.scenario, "requested_scenario": args.scenario,
         "manifest": manifest, "dataset_manifest": manifest, "manifest_hash": manifest_hash, "storage": storage,
+        "provenance": provenance,
         "warmup": args.warmup, "iterations": args.iterations, "coverage": coverage,
         "artifacts": artifacts,
     }, indent=2), encoding="utf-8")

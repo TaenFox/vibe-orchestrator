@@ -7,13 +7,36 @@ import pytest
 
 from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold_capability, _cases,
                                                    _unavailable_case, instrumented_connection_factory, percentile,
-                                                   statistics_for, validate_result)
+                                                   parse_seed, statistics_for, validate_result)
+from benchmarks.performance.profile import prepare_output
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
+
+PROVENANCE = {"source_kind": "synthetic", "synthetic_only": True, "seed": 35527, "manifest_hash": "a"}
 
 
 def test_percentile_is_deterministic_and_interpolated():
     assert percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.5
     assert statistics_for([1.0, 2.0, 3.0, 4.0])["p95"] == 3.85
+
+
+def test_seed_accepts_decimal_and_ticket_style_hex_suffix():
+    assert parse_seed("35527") == 35527
+    assert parse_seed("355F27") == int("355F27", 16)
+
+
+def test_benchmark_docs_use_required_decimal_seed():
+    for path in (Path("benchmarks/performance/README.md"), Path("docs/performance.md")):
+        text = path.read_text(encoding="utf-8")
+        assert "--seed 35527" in text
+        assert "--seed 355F27" not in text
+
+
+def test_provenance_contract_requires_synthetic_marker_and_manifest_hash():
+    result = {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+              "cases": [], "source_checksum_before": "a", "source_checksum_after": "a",
+              "provenance": {"source_kind": "synthetic", "synthetic_only": True,
+                             "seed": 35527, "manifest_hash": "a"}}
+    validate_result(result)
 
 
 def test_manifest_privacy_contract_is_explicit():
@@ -50,7 +73,7 @@ def test_sqlite_result_validation_requires_new_fields_when_present():
               "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
                           "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
                           "sample_count": 1, "raw_samples": [{"sample_index": 0, "wall_ms": 1, "error": None,
-                            "sqlite_queries": 1}]}], "source_checksum_before": "a", "source_checksum_after": "a"}
+                            "sqlite_queries": 1}]}], "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     with pytest.raises(ValueError, match="attribution"):
         validate_result(result)
 
@@ -63,7 +86,7 @@ def test_sqlite_result_validation_requires_transaction_duration():
                             "sqlite_queries": 1, "sqlite_transactions": 1, "sqlite_errors": 0,
                             "sqlite_busy_errors": 0, "sqlite_lock_wait_ms": None, "sqlite_lock_wait_count": None,
                             "sqlite_attribution": {"source": "test"}}]}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+              "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     with pytest.raises(ValueError, match="attribution field"):
         validate_result(result)
 
@@ -99,7 +122,7 @@ def test_result_validation_rejects_mutated_source_and_sample_mismatch():
               "cases": [{"case_id": "c", "component": "x", "operation": "y", "storage_mode": "sqlite",
                           "dataset_dimensions": {}, "expected_outcome": "success", "errors": [], "statistics": {},
                           "sample_count": 0, "raw_samples": []}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+              "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     validate_result(result)
     result["cases"][0]["sample_count"] = 1
     with pytest.raises(ValueError):
@@ -135,6 +158,22 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
     assert {item[3] for item in cases}
 
 
+def test_http_registry_reports_unavailable_loopback_without_relative_url(monkeypatch, tmp_path):
+    generate_fixture(tmp_path, seed=4, size="small", storage_mode="sqlite")
+
+    def unavailable_server(*args, **kwargs):
+        raise OSError("loopback disabled")
+
+    monkeypatch.setattr("benchmarks.performance.run_benchmark.start_server", unavailable_server)
+    cases = _cases(tmp_path, storage="sqlite")
+    http_case = next(case for case in cases if case.case_id == "http.api_tickets")
+
+    assert http_case.limitations == ["HTTP loopback server unavailable: OSError"]
+    with pytest.raises(RuntimeError, match="HTTP loopback server unavailable"):
+        http_case.run()
+    cases.cleanup()
+
+
 def test_case_registry_has_stable_kinds_and_required_matrix(tmp_path):
     generate_fixture(tmp_path, seed=8, size="small", storage_mode="sqlite")
     cases = _cases(tmp_path, storage="sqlite")
@@ -158,7 +197,7 @@ def test_result_validation_requires_clean_isolation_for_mutation():
                           "errors": [], "statistics": {}, "sample_count": 0, "raw_samples": [],
                           "isolation": {"before_hash": "a", "after_hash": "b", "leaked_entities": ["x"],
                                         "leaked_paths": [], "cleanup_errors": [], "clean": False}}],
-              "source_checksum_before": "a", "source_checksum_after": "a"}
+              "source_checksum_before": "a", "source_checksum_after": "a", "provenance": PROVENANCE}
     with pytest.raises(ValueError, match="unclean mutation"):
         validate_result(result)
 
@@ -176,6 +215,22 @@ def test_inapplicable_storage_case_is_retained_as_unavailable(tmp_path):
     assert result["unavailable"] is True
     assert result["sample_count"] == 0
     assert "yaml" in result["limitations"][0]
+
+
+def test_profile_output_removes_stale_owned_artifacts(tmp_path):
+    output = tmp_path / "profile"
+    output.mkdir()
+    (output / "http.api_tickets.pstats").write_bytes(b"stale")
+    (output / "http.api_tickets.txt").write_text("stale", encoding="utf-8")
+    (output / "profile-manifest.json").write_text("stale", encoding="utf-8")
+    (output / "keep.me").write_text("unrelated", encoding="utf-8")
+
+    prepare_output(output)
+
+    assert not (output / "http.api_tickets.pstats").exists()
+    assert not (output / "http.api_tickets.txt").exists()
+    assert not (output / "profile-manifest.json").exists()
+    assert (output / "keep.me").exists()
 
 
 def test_fixture_profile_counts_are_materialized(tmp_path):

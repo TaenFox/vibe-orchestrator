@@ -28,7 +28,7 @@ active/exhausted/blocked_unknown/over_budget budgets. В error cases прове�
 missing entities, malformed dataset, membership/validation failures, budget denial и
 HTTP 4xx. В result ошибки ссылаются на конкретный `sample_index`.
 
-## Изменения DEL-FDFFF6: registry и isolation
+## Изменения DEL-355F27: registry и isolation
 
 Каждый registry item — именованный `CaseSpec` с `case_id`, component, operation,
 `kind` (`read_only` или `mutation`), `expected_outcome`, `storage_modes` и
@@ -62,10 +62,14 @@ samples; исходный проект не изменяется.
 
 ## Baseline results и hotspots
 
-Numerical baseline создаётся только командой CLI и сохраняется в указанном JSON;
-репозиторий не подменяет machine-specific timings. Выбранные profiling cases
+Numerical baseline сохраняется в committed artifact
+`benchmarks/performance/artifacts/baseline-small-seed-35527.json`, а CLI остаётся
+источником machine-specific повторных измерений. Выбранные profiling cases
 создают pstats, text report и profile manifest, связанные по `run_id`, `case_id` и
 manifest hash. Hotspot считается подтверждённым только при наличии такого artifact.
+Committed baseline использует synthetic-only fixture (`seed=35527`, `warmup=0`,
+`iterations=1`); result и profile manifest содержат provenance, manifest hash,
+raw samples/aggregates и checksum descriptors фактически сохранённых artifacts.
 
 ## Approved dataset и storage comparison
 
