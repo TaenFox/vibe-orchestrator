@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from vibe_orchestrator.config import load_workflow
-from vibe_orchestrator.scheduler import select_candidates
+from vibe_orchestrator.scheduler import effective_blockers, select_candidates
 from vibe_orchestrator.tickets import Ticket
 
 
@@ -31,6 +31,24 @@ def test_blocked_ticket_is_not_scheduled():
     blocked.blocked_reason = "rework_cycle_stopped"
 
     assert select_candidates(workflow, [blocked], set()) == []
+
+
+def test_child_inherits_parent_gate_but_resolver_branch_stays_runnable():
+    workflow = load_workflow("delivery")
+    root = ticket("ROOT", "review")
+    gate = ticket("GATE", "ready_for_review")
+    gate.parent = root.id
+    other = ticket("OTHER", "development")
+    other.parent = root.id
+    child = ticket("CHILD", "development")
+    child.parent = other.id
+    tickets = [root, gate, other, child]
+    root.blocked_by = [gate.id]
+
+    assert effective_blockers(child, tickets, workflow) == {gate.id}
+    assert effective_blockers(gate, tickets, workflow) == set()
+    candidates = select_candidates(workflow, tickets, set())
+    assert {candidate.ticket.id for candidate in candidates} == {gate.id}
 
 
 def test_parent_retries_same_agent_stage_after_correction():
