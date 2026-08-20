@@ -127,7 +127,17 @@ busy-handler callback для измерения скрытого ожидани�
 
 ## Optimization criteria and regression policy
 
-**Owner-approved SLO decision for DEL-355F27:** no absolute latency SLO is
+**Decision record (DEL-355F27, acceptance revision 3)** — **Owner-approved SLO decision.**
+
+- **Decision:** owner-approved no-SLO baseline; no absolute latency target is
+  approved for this audit.
+- **Authority/reference:** product-owner decision recorded in the DEL-355F27
+  acceptance decision, revision 3.
+- **Scope:** this committed artifact is a reproducibility baseline, not an SLO
+  pass/fail result. Future per-case or case-group targets must be recorded here
+  before SLO claims are made.
+
+The owner-approved decision is that no absolute latency SLO is
 approved for the current audit. The owner decision is to keep this artifact as
 a reproducibility baseline until product owners provide per-case or case-group
 latency targets; therefore this baseline must not be reported as an SLO
