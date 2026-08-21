@@ -180,15 +180,39 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     browser_page.set_viewport_size({"width": 390, "height": 844})
     assert browser_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert browser_page.get_by_role("button", name="Новый тикет").is_visible()
-    browser_page.get_by_label("Поиск").fill("mobile")
+    search = browser_page.get_by_label("Поиск")
+    search.fill("mobile")
     assert browser_page.evaluate("document.querySelector('[data-board-search]').value === 'mobile'")
-    browser_page.evaluate("document.querySelector('[data-board-search]').blur()")
-    # A blur may produce the controlled refresh(true); let it settle before
-    # measuring the timer-driven request, while keeping the production guard.
-    browser_page.wait_for_timeout(300)
+    fragment_requests = []
+    browser_page.on(
+        "request",
+        lambda request: fragment_requests.append(request)
+        if request.url.split("?", 1)[0].endswith("/fragment")
+        else None,
+    )
+    browser_page.evaluate(
+        """() => {
+            const search = document.querySelector('[data-board-search]');
+            search.blur();
+            document.body.tabIndex = -1;
+            document.body.focus();
+        }"""
+    )
+    assert browser_page.evaluate(
+        "() => !document.activeElement?.matches('input, select, textarea')"
+    )
+    # The guard interval rules out a controlled refresh before the timer can fire.
+    browser_page.wait_for_timeout(1300)
+    assert fragment_requests == []
     cadence_started = time.monotonic()
-    with browser_page.expect_response(lambda response: "/fragment?" in response.url, timeout=9500) as response_info:
+    with browser_page.expect_response(
+        lambda response: response.url.split("?", 1)[0].endswith("/fragment")
+        and response.request.method == "GET"
+        and response.request.resource_type == "fetch",
+        timeout=8500,
+    ) as response_info:
         pass
     assert time.monotonic() - cadence_started >= 6.0
+    assert response_info.value.request.method == "GET"
     assert response_info.value.request.resource_type == "fetch"
     assert "частичное автообновление 8с" in browser_page.locator("body").inner_text()

@@ -365,7 +365,7 @@ UI проверяется регрессионными тестами для Dis
 | `BROWSER-SMOKE-04` | production-triggered `/fragment` replacement preserves multiline values, details, selection and focus |
 | `BROWSER-SMOKE-05` | UI create, reload identity and asserted move/retry state transition |
 | `BROWSER-SMOKE-06` | escaped script-like text and bounded multiline rendering |
-| `BROWSER-SMOKE-07` | mobile overflow bound and eight-second fragment cadence after form focus is removed |
+| `BROWSER-SMOKE-07` | mobile overflow bound; no controlled refresh during the post-blur guard window; then an interval-driven eight-second `/fragment` fetch after form focus is removed |
 
 Static tests in `tests/test_ui.py`, API tests and JavaScript checks remain independent
 and do not constitute browser evidence. The current worker environment may lack
