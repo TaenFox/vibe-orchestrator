@@ -150,11 +150,15 @@ class Orchestrator:
         global_candidates = []
         running_ids = set(self.running)
         active_delivery_sessions = [session for session in self.session_store.list() if session.status == "active"]
-        delivery_session_participants = {
-            ticket_id
-            for session in active_delivery_sessions
-            for ticket_id in self.session_store.effective_ticket_ids(session)
-        }
+        # Materialize membership once per polling snapshot.  The same lookup
+        # is needed for candidate filtering and for selecting the run's
+        # session; keeping this map also preserves the existing session order
+        # when a ticket is present in more than one active session.
+        session_by_ticket: dict[str, Any] = {}
+        for session in active_delivery_sessions:
+            for ticket_id in self.session_store.effective_ticket_ids(session):
+                session_by_ticket.setdefault(ticket_id, session)
+        delivery_session_participants = set(session_by_ticket)
         if not active_delivery_sessions:
             delivery_session_participants = None
         for process, workflow in self.workflows.items():
@@ -180,8 +184,7 @@ class Orchestrator:
             if ticket.active_run or ticket.blocked_by or ticket.status != candidate.source_status:
                 continue
             stage = self._stage_for_ticket(workflow, workflow.by_id[candidate.target_status], ticket)
-            active_sessions = [s for s in active_delivery_sessions if ticket.id in self.session_store.effective_ticket_ids(s)]
-            session = active_sessions[0] if active_sessions else None
+            session = session_by_ticket.get(ticket.id)
             if workflow.id == "delivery" and active_delivery_sessions and session is None:
                 ticket.blocked_reason = "session_membership_required"
                 ticket.last_outcome = "blocked_budget"
