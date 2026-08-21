@@ -233,10 +233,11 @@ Browser cache/profile/state paths задаются на уровне run, а tea
 ограничен собственной POSIX process group.
 Для каждого run используются каталоги `state/browser-cache`,
 `state/browser-profile` и `state/browser-state`; Playwright запускается через
-отдельный persistent context с этим profile path. Исполняемый opt-in тест
-запускает два fixture с overlapping lifetime, проверяет разные run/artifact/data/
+отдельный persistent context с этим profile path и получает cache/config/state
+пути через явные environment options. Исполняемый opt-in тест запускает два
+fixture одновременно с overlapping lifetime, проверяет разные run/artifact/data/
 state roots и ports, отвечает по двум разным marker URL и выполняет отрицательную
-проверку cross-read/cross-write для state roots.
+проверку cross-read/cross-write через state endpoint каждого run.
 
 ### Verification commands and environment limitations
 

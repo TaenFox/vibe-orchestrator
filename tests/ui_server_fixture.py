@@ -44,6 +44,7 @@ class UiServerDiagnostics:
     host: str = "127.0.0.1"
     requested_port: int = 0
     assigned_port: int | None = None
+    last_attempt_port: int | None = None
     base_url: str | None = None
     readiness_url: str | None = None
     expected_readiness_status: int = 200
@@ -92,6 +93,7 @@ class UiServerDiagnostics:
             "host": self.host,
             "requested_port": self.requested_port,
             "assigned_port": self.assigned_port,
+            "last_attempt_port": self.last_attempt_port,
             "base_url": self.base_url,
             "readiness_url": self.readiness_url,
             "expected_readiness_status": self.expected_readiness_status,
@@ -338,7 +340,12 @@ class UiServerFixture:
             # on the host's default profile/state directories.
             self._context = browser_type.launch_persistent_context(
                 user_data_dir=str(profile_path),
-                env={"XDG_CACHE_HOME": str(cache_path)},
+                env={
+                    "XDG_CACHE_HOME": str(cache_path),
+                    "XDG_CONFIG_HOME": str(browser_state_path),
+                    "XDG_STATE_HOME": str(browser_state_path),
+                    "VIBE_UI_BROWSER_STATE_ROOT": str(browser_state_path),
+                },
             )
             self._page = self._context.new_page()
             self._context.tracing.start(screenshots=True, snapshots=True, sources=False)
@@ -423,6 +430,14 @@ class UiServerFixture:
         text = self.diagnostics.stderr_path.read_text(encoding="utf-8", errors="replace").lower()
         return "eaddrinuse" in text or "address already in use" in text
 
+    def _record_bind_conflict(self, attempt: int) -> None:
+        """Persist every failed bind attempt, including the terminal one."""
+        text = self.diagnostics.stderr_path.read_text(encoding="utf-8", errors="replace").lower()
+        detail = "EADDRINUSE" if "eaddrinuse" in text else "Address already in use"
+        entry = f"attempt {attempt}: {detail}"
+        if entry not in self.diagnostics.port_errors:
+            self.diagnostics.port_errors.append(entry)
+
     def _cleanup_owned_process(self) -> None:
         """Stop only the process group belonging to the current attempt."""
         if self.process is None:
@@ -477,7 +492,10 @@ class UiServerFixture:
                 raise UiServerError("Unable to allocate an ephemeral UI port", classification=CAPABILITY_FAILURE,
                                     diagnostics=self.diagnostics, cause=exc) from exc
             self.diagnostics.port_attempts = attempt
-            self.diagnostics.assigned_port = port
+            # A probe only produces a candidate.  It becomes assigned after
+            # this subprocess has bound and passed readiness.
+            self.diagnostics.assigned_port = None
+            self.diagnostics.last_attempt_port = port
             self.diagnostics.base_url = f"http://{self._host}:{port}"
             self.diagnostics.readiness_url = f"{self.diagnostics.base_url}{self.readiness_path}"
             self.diagnostics.command = self._argv(port)
@@ -489,6 +507,9 @@ class UiServerFixture:
                 self._stderr = self.diagnostics.stderr_path.open("wb")
                 child_env = os.environ.copy()
                 child_env.update(self.env_overrides)
+                # Expose the run-owned state root to cooperative test runners;
+                # production commands may ignore this capability variable.
+                child_env["VIBE_UI_STATE_ROOT"] = str(self.diagnostics.state_root)
                 self.process = subprocess.Popen(self.diagnostics.command, cwd=self.diagnostics.data_root, env=child_env,
                                                  stdout=self._stdout, stderr=self._stderr, start_new_session=True)
                 self.diagnostics.pid = self.process.pid
@@ -497,6 +518,8 @@ class UiServerFixture:
                 self.diagnostics.started_at = _now()
                 self.diagnostics.save()
                 self._wait_ready()
+                self.diagnostics.assigned_port = port
+                self.diagnostics.save()
                 return self
             except (OSError, ValueError) as exc:
                 last_error = exc
@@ -504,15 +527,25 @@ class UiServerFixture:
                 last_error = exc
                 if not self._is_bind_conflict():
                     self._cleanup_owned_process()
+                    self.diagnostics.assigned_port = None
+                    self.diagnostics.base_url = None
+                    self.diagnostics.readiness_url = None
+                    self.diagnostics.command = []
                     self._finalize_artifacts("failure")
                     raise
-            if not self._is_bind_conflict() or attempt == self.port_attempts:
+            bind_conflict = self._is_bind_conflict()
+            if bind_conflict:
+                self._record_bind_conflict(attempt)
+            if not bind_conflict or attempt == self.port_attempts:
                 self._cleanup_owned_process()
+                self.diagnostics.assigned_port = None
+                self.diagnostics.base_url = None
+                self.diagnostics.readiness_url = None
+                self.diagnostics.command = []
                 self._finalize_artifacts("failure")
                 raise UiServerError("UI runner failed to bind after port attempts", classification=CAPABILITY_FAILURE,
                                     diagnostics=self.diagnostics, cause=last_error) from last_error
             self.diagnostics.port_retries += 1
-            self.diagnostics.port_errors.append(f"attempt {attempt}: EADDRINUSE")
             self._cleanup_owned_process()
             self.process = None
             self._stdout = self._stderr = None

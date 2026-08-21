@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tomllib
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -50,29 +51,29 @@ def test_browser_marker_and_chromium_setup_are_documented():
 def test_explicit_parallel_runs_prove_server_and_negative_state_isolation(tmp_path: Path):
     first = UiServerFixture(command(marker="first"), project_root=tmp_path, test_id="isolation")
     second = UiServerFixture(command(marker="second"), project_root=tmp_path, test_id="isolation")
-    first_marker = first.diagnostics.state_root / "marker.txt"
-    second_marker = second.diagnostics.state_root / "marker.txt"
+    first_marker = first.diagnostics.state_root / "state-marker.txt"
+    second_marker = second.diagnostics.state_root / "state-marker.txt"
+    first_marker.write_text("first-state", encoding="utf-8")
+    second_marker.write_text("second-state", encoding="utf-8")
     try:
-        first.start()
-        second.start()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run.start) for run in (first, second)]
+            for future in futures:
+                future.result()
         assert first.diagnostics.run_id != second.diagnostics.run_id
         assert first.diagnostics.artifact_dir.resolve() != second.diagnostics.artifact_dir.resolve()
         assert first.data_root.resolve() != second.data_root.resolve()
         assert first.diagnostics.state_root.resolve() != second.diagnostics.state_root.resolve()
         assert first.port != second.port
-        assert urllib.request.urlopen(first.base_url).read() == b"first"
-        assert urllib.request.urlopen(second.base_url).read() == b"second"
+        assert urllib.request.urlopen(f"{first.base_url}/state").read() == b"first-state"
+        assert urllib.request.urlopen(f"{second.base_url}/state").read() == b"second-state"
 
-        first_marker.write_text(first.diagnostics.run_id, encoding="utf-8")
-        second_marker.write_text(second.diagnostics.run_id, encoding="utf-8")
-        assert not (first.diagnostics.state_root / "../marker.txt").resolve().exists()
-        assert second_marker.read_text(encoding="utf-8") != first_marker.read_text(encoding="utf-8")
-        second_before = second_marker.read_text(encoding="utf-8")
-        attempted_cross_write = first.diagnostics.state_root / second_marker.name
-        attempted_cross_write.write_text("cross-run", encoding="utf-8")
-        assert attempted_cross_write.resolve().is_relative_to(first.diagnostics.state_root.resolve())
-        assert not attempted_cross_write.resolve().is_relative_to(second.diagnostics.state_root.resolve())
-        assert second_marker.read_text(encoding="utf-8") == second_before
+        # The first run mutates only its own state; the second run's read is
+        # an independent negative cross-read assertion.
+        first_marker.write_text("first-state-updated", encoding="utf-8")
+        assert urllib.request.urlopen(f"{first.base_url}/state").read() == b"first-state-updated"
+        assert urllib.request.urlopen(f"{second.base_url}/state").read() == b"second-state"
+        assert second_marker.read_text(encoding="utf-8") == "second-state"
     finally:
         second.teardown()
         first.teardown()

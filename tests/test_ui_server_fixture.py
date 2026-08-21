@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(not _local_bind_available(), reason="local loopb
 
 RUNNER = textwrap.dedent(
     """
-    import http.server, signal, sys, time
+    import http.server, os, signal, sys, time
     root, host, port, delay, ignore, status, marker, conflict = sys.argv[1:]
     if ignore == '1': signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if delay == 'exit': raise SystemExit(7)
@@ -35,7 +35,11 @@ RUNNER = textwrap.dedent(
         raise OSError(98, 'Address already in use')
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(int(status)); self.end_headers(); self.wfile.write(marker.encode())
+            body = marker.encode()
+            if self.path == '/state':
+                with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), encoding='utf-8') as state:
+                    body = state.read().encode()
+            self.send_response(int(status)); self.end_headers(); self.wfile.write(body)
         def log_message(self, *args): pass
     server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
@@ -61,6 +65,7 @@ def test_starts_on_ephemeral_port_and_persists_metadata(tmp_path: Path):
     metadata = json.loads(server.diagnostics.metadata_path.read_text())
     assert metadata["requested_port"] == 0
     assert metadata["assigned_port"] == server.port
+    assert metadata["last_attempt_port"] == server.port
     assert metadata["pid"] and metadata["pgid"]
     assert metadata["process_alive_after"] is False
     assert metadata["process_group_alive_after"] is False
@@ -153,6 +158,9 @@ def test_exhausted_bind_retries_persist_diagnostics(tmp_path: Path):
     assert caught.value.classification == CAPABILITY_FAILURE
     assert fixture.diagnostics.port_attempts == 2
     assert fixture.diagnostics.port_retries == 1
-    assert len(fixture.diagnostics.port_errors) == 1
+    assert len(fixture.diagnostics.port_errors) == 2
+    assert fixture.diagnostics.port_errors == ["attempt 1: EADDRINUSE", "attempt 2: EADDRINUSE"]
+    assert fixture.diagnostics.assigned_port is None
+    assert fixture.diagnostics.last_attempt_port is not None
     assert "Address already in use" in fixture.diagnostics.stderr_path.read_text()
     assert fixture.diagnostics.metadata_path.exists()
