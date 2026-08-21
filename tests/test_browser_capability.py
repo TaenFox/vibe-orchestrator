@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -68,12 +69,33 @@ def test_explicit_parallel_runs_prove_server_and_negative_state_isolation(tmp_pa
         assert urllib.request.urlopen(f"{first.base_url}/state").read() == b"first-state"
         assert urllib.request.urlopen(f"{second.base_url}/state").read() == b"second-state"
 
-        # The first run mutates only its own state; the second run's read is
-        # an independent negative cross-read assertion.
-        first_marker.write_text("first-state-updated", encoding="utf-8")
-        assert urllib.request.urlopen(f"{first.base_url}/state").read() == b"first-state-updated"
+        def assert_forbidden(request: urllib.request.Request) -> None:
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request)
+            assert caught.value.code == 403
+
+        # Addressed cross-read: each server receives the other run's namespace.
+        assert_forbidden(urllib.request.Request(
+            f"{first.base_url}/state?namespace={second.diagnostics.run_id}"
+        ))
+        assert_forbidden(urllib.request.Request(
+            f"{second.base_url}/state?namespace={first.diagnostics.run_id}"
+        ))
+
+        # Addressed cross-write: rejected POSTs must not mutate either owner.
+        assert_forbidden(urllib.request.Request(
+            f"{first.base_url}/state?namespace={second.diagnostics.run_id}",
+            data=b"attacker-write", method="POST",
+        ))
+        assert_forbidden(urllib.request.Request(
+            f"{second.base_url}/state?namespace={first.diagnostics.run_id}",
+            data=b"attacker-write", method="POST",
+        ))
+
+        assert urllib.request.urlopen(f"{first.base_url}/state").read() == b"first-state"
         assert urllib.request.urlopen(f"{second.base_url}/state").read() == b"second-state"
         assert second_marker.read_text(encoding="utf-8") == "second-state"
+        assert first_marker.read_text(encoding="utf-8") == "first-state"
     finally:
         second.teardown()
         first.teardown()

@@ -510,6 +510,7 @@ class UiServerFixture:
                 # Expose the run-owned state root to cooperative test runners;
                 # production commands may ignore this capability variable.
                 child_env["VIBE_UI_STATE_ROOT"] = str(self.diagnostics.state_root)
+                child_env["VIBE_UI_STATE_NAMESPACE"] = self.diagnostics.run_id
                 self.process = subprocess.Popen(self.diagnostics.command, cwd=self.diagnostics.data_root, env=child_env,
                                                  stdout=self._stdout, stderr=self._stderr, start_new_session=True)
                 self.diagnostics.pid = self.process.pid

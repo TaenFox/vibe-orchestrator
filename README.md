@@ -229,6 +229,10 @@ exit, readiness timeout и teardown failure имеют классификаци�
 Для двух явно созданных fixtures проверяются разные run/artifact roots, state
 roots, browser contexts и ports; state одного run не виден другому. Это отдельное
 opt-in доказательство и не включает parallel mode в обычный pytest запуск.
+Проверка изоляции использует test-only state contract: endpoint принимает только
+namespace собственного run, а GET/POST с namespace другого run отклоняются до
+чтения или записи marker-файла; после обеих попыток markers проверяются на
+неизменность.
 Browser cache/profile/state paths задаются на уровне run, а teardown idempotent и
 ограничен собственной POSIX process group.
 Для каждого run используются каталоги `state/browser-cache`,

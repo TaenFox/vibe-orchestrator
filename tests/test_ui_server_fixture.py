@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(not _local_bind_available(), reason="local loopb
 RUNNER = textwrap.dedent(
     """
     import http.server, os, signal, sys, time
+    from urllib.parse import parse_qs, urlparse
     root, host, port, delay, ignore, status, marker, conflict = sys.argv[1:]
     if ignore == '1': signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if delay == 'exit': raise SystemExit(7)
@@ -34,12 +35,31 @@ RUNNER = textwrap.dedent(
     if conflict == '1':
         raise OSError(98, 'Address already in use')
     class Handler(http.server.BaseHTTPRequestHandler):
+        def _state_namespace_allowed(self):
+            query = parse_qs(urlparse(self.path).query)
+            requested = query.get('namespace', [os.environ['VIBE_UI_STATE_NAMESPACE']])[0]
+            return requested == os.environ['VIBE_UI_STATE_NAMESPACE']
+
         def do_GET(self):
             body = marker.encode()
             if self.path == '/state':
                 with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), encoding='utf-8') as state:
                     body = state.read().encode()
+            elif urlparse(self.path).path == '/state':
+                if not self._state_namespace_allowed():
+                    self.send_response(403); self.end_headers(); return
+                with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), encoding='utf-8') as state:
+                    body = state.read().encode()
             self.send_response(int(status)); self.end_headers(); self.wfile.write(body)
+
+        def do_POST(self):
+            if urlparse(self.path).path != '/state' or not self._state_namespace_allowed():
+                self.send_response(403); self.end_headers(); return
+            length = int(self.headers.get('Content-Length', '0'))
+            value = self.rfile.read(length)
+            with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), 'wb') as state:
+                state.write(value)
+            self.send_response(204); self.end_headers()
         def log_message(self, *args): pass
     server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
