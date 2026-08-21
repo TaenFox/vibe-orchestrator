@@ -204,6 +204,58 @@ Regression tests используют отдельные SQLite databases и Thr
 Операционные ошибки, ожидаемые case-сценарием, остаются в raw sample `error`
 и одновременно учитываются как SQLite errors, если это `sqlite3.Error`.
 
+### DEL-784959: before/after и snapshot consistency
+
+Сравнение фиксируется в `benchmarks/performance/artifacts/DEL-784959-comparison.json`:
+оба результата используют один synthetic manifest, seed, SQLite storage, warmup
+и iterations. Обязательные cases — `scheduler.select_candidates` и
+`orchestrator.scan_sort_cycle`; для каждого записаны commit, manifest hash,
+dataset dimensions, p50/p95, sample count и delta по p50. Delta положительна,
+если after быстрее; >=20% — optimization signal, >5% degradation — regression
+signal. Это descriptive-only policy, не latency SLO. Недоступный case содержит
+limitation и исключается из claims.
+
+В rework artifact before получен из parent commit
+`24c55cb5f0bcf2bf1733340d797fe4b00459ae14`, after — из результата
+`135ee3d461394c36e14febe0ef5b333407d87d81`; source checksums также различаются.
+При одинаковых manifest, seed, SQLite storage, warmup=5 и iterations=30 результаты
+составили: `scheduler.select_candidates` — p50 0.023750/0.023896 ms,
+delta -0.613%; `orchestrator.scan_sort_cycle` — p50 0.484292/0.480667 ms,
+delta +0.749% (before/after). Regression signal не обнаружен, но improvement
+signal >=20% также не достигнут; policy остаётся descriptive-only и не утверждает
+production latency improvement. Validator теперь отклоняет artifact, если обе
+стороны указывают один commit и один source checksum.
+
+Admission использует тот же `sessions.lock`, что и session writer: initial
+materialization active sessions, `session_by_ticket` и membership token происходит
+в одной критической секции, а revalidation перед reservation повторяет это как
+один materialized read. Поэтому membership update/removal не может смешать версии
+внутри одного snapshot; изменение, опубликованное до admission boundary, вызывает
+skip без reservation, started event, task или partial budget state. Duplicate
+admission сохраняется idempotent budget/run contract.
+
+Детерминированные regression-сценарии закреплены в тестах: `consistent_snapshot`
+проверяет одинаковый membership snapshot для параллельных readers,
+`membership_removal_before_admission` — отсутствие reservation/started/task при
+удалении membership до boundary, `membership_update_between_snapshot_and_admission`
+— блокировку writer до snapshot boundary и skip stale admission, а `parallel_admission` — ровно один
+`active_run`, started event и ledger reservation. Сценарии используют barriers и
+events, без time-based sleeps; active session removal проверяется через
+допустимый lifecycle transition в `cancelled`.
+
+Воспроизводимое сравнение выполняется двумя smoke-проходами и CLI comparison:
+
+```text
+python benchmarks/performance/run_benchmark.py --project <before-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/DEL-784959-before.json
+python benchmarks/performance/run_benchmark.py --project <after-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/DEL-784959-after.json
+python benchmarks/performance/run_benchmark.py --compare-before <output-dir>/DEL-784959-before.json --compare-after <output-dir>/DEL-784959-after.json --comparison-output benchmarks/performance/artifacts/DEL-784959-comparison.json
+python -m pytest tests/test_scheduler.py tests/test_orchestrator.py tests/test_performance_benchmark.py -q
+```
+
+Validator проверяет schema, required cases, provenance, equivalent parameters и
+пересчитывает delta; artifact не содержит production payloads или абсолютных
+путей.
+
 ## Expected errors and result validation
 
 `validate_result` требует ссылки ошибок на существующие sample indices и при

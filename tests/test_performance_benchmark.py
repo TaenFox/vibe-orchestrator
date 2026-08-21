@@ -8,7 +8,8 @@ import pytest
 
 from benchmarks.performance.run_benchmark import (CaseSpec, SQLiteMetrics, _cold_capability, _cases,
                                                    _unavailable_case, instrumented_connection_factory, percentile,
-                                                   parse_seed, statistics_for, validate_result)
+                                                   parse_seed, statistics_for, validate_comparison_artifact,
+                                                   build_comparison_artifact, validate_result)
 from benchmarks.performance.profile import prepare_output
 from benchmarks.performance.workloads import BUDGET_STATES, RUNS_PER_TICKET, generate_fixture, load_dataset, validate_manifest
 
@@ -18,6 +19,49 @@ PROVENANCE = {"source_kind": "synthetic", "synthetic_only": True, "seed": 35527,
 def test_percentile_is_deterministic_and_interpolated():
     assert percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.5
     assert statistics_for([1.0, 2.0, 3.0, 4.0])["p95"] == 3.85
+
+
+def test_comparison_artifact_has_required_cases_and_reproducible_delta():
+    def result(commit, p50):
+        return {"schema_version": "performance-result.v2", "run_id": commit,
+                "dataset_manifest": {"dimensions": {"size": "small", "tickets": 2}},
+                "parameters": {"storage": "sqlite", "warmup": 5, "iterations": 30, "seed": 35527, "size": "small"},
+                "cases": [{"case_id": case, "component": case.split(".")[0], "operation": case,
+                           "storage_mode": "sqlite", "dataset_dimensions": {"size": "small"},
+                           "expected_outcome": "success", "errors": [], "statistics": {"p50": p50, "p95": p50 * 1.2},
+                           "sample_count": 30, "raw_samples": [{"sample_index": i, "wall_ms": p50, "error": None} for i in range(30)]}
+                          for case in ("scheduler.select_candidates", "orchestrator.scan_sort_cycle")],
+                "source_checksum_before": "same", "source_checksum_after": "same",
+                "provenance": {"source_kind": "synthetic", "synthetic_only": True, "seed": 35527, "manifest_hash": "manifest"},
+                "git_commit": commit}
+    artifact = build_comparison_artifact(result("before", 10), result("after", 8), ticket_id="DEL-784959")
+    validate_comparison_artifact(artifact)
+    assert artifact["cases"]["scheduler.select_candidates"]["delta_percent"] == 20.0
+    assert artifact["before"]["manifest_hash"] == artifact["after"]["manifest_hash"] == "manifest"
+    assert artifact["before"]["seed"] == artifact["after"]["seed"] == 35527
+
+
+def test_comparison_rejects_non_identical_measurement_parameters():
+    artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
+    artifact["after"]["seed"] = artifact["before"]["seed"] + 1
+    with pytest.raises(ValueError, match="parameters are not identical"):
+        validate_comparison_artifact(artifact)
+
+
+def test_comparison_rejects_same_source_revision():
+    artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
+    artifact["after"]["commit"] = artifact["before"]["commit"]
+    artifact["after"]["source_checksum"] = artifact["before"]["source_checksum"]
+    with pytest.raises(ValueError, match="different source revisions"):
+        validate_comparison_artifact(artifact)
+
+
+def test_committed_comparison_has_no_regression_signal():
+    artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
+    validate_comparison_artifact(artifact)
+    threshold = artifact["policy"]["regression_signal_percent"]
+    assert all(case["status"] == "measured" and case["delta_percent"] >= -threshold
+               for case in artifact["cases"].values())
 
 
 def test_seed_accepts_decimal_and_ticket_style_hex_suffix():
@@ -253,6 +297,7 @@ def test_case_registry_covers_storage_and_lifecycle_contract(tmp_path):
         "budgetledger.reserve.idempotent", "budgetledger.start", "budgetledger.finalize",
         "budgetledger.release", "budgetledger.reconcile", "budgetledger.concurrency.atomic_reserve",
         "http.handler.fragment", "http.api_tickets", "http.error.missing_session",
+        "orchestrator.scan_sort_cycle",
     }
     assert required <= ids
     assert {item[3] for item in cases}
