@@ -5,6 +5,7 @@ import socket
 import sys
 import textwrap
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import pytest
@@ -26,14 +27,40 @@ pytestmark = pytest.mark.skipif(not _local_bind_available(), reason="local loopb
 
 RUNNER = textwrap.dedent(
     """
-    import http.server, signal, sys, time
-    root, host, port, delay, ignore, status = sys.argv[1:]
+    import http.server, os, signal, sys, time
+    from urllib.parse import parse_qs, urlparse
+    root, host, port, delay, ignore, status, marker, conflict = sys.argv[1:]
     if ignore == '1': signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if delay == 'exit': raise SystemExit(7)
     time.sleep(float(delay))
+    if conflict == '1':
+        raise OSError(98, 'Address already in use')
     class Handler(http.server.BaseHTTPRequestHandler):
+        def _state_namespace_allowed(self):
+            query = parse_qs(urlparse(self.path).query)
+            requested = query.get('namespace', [os.environ['VIBE_UI_STATE_NAMESPACE']])[0]
+            return requested == os.environ['VIBE_UI_STATE_NAMESPACE']
+
         def do_GET(self):
-            self.send_response(int(status)); self.end_headers(); self.wfile.write(b'ready')
+            body = marker.encode()
+            if self.path == '/state':
+                with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), encoding='utf-8') as state:
+                    body = state.read().encode()
+            elif urlparse(self.path).path == '/state':
+                if not self._state_namespace_allowed():
+                    self.send_response(403); self.end_headers(); return
+                with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), encoding='utf-8') as state:
+                    body = state.read().encode()
+            self.send_response(int(status)); self.end_headers(); self.wfile.write(body)
+
+        def do_POST(self):
+            if urlparse(self.path).path != '/state' or not self._state_namespace_allowed():
+                self.send_response(403); self.end_headers(); return
+            length = int(self.headers.get('Content-Length', '0'))
+            value = self.rfile.read(length)
+            with open(os.path.join(os.environ['VIBE_UI_STATE_ROOT'], 'state-marker.txt'), 'wb') as state:
+                state.write(value)
+            self.send_response(204); self.end_headers()
         def log_message(self, *args): pass
     server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
@@ -44,8 +71,8 @@ RUNNER = textwrap.dedent(
 )
 
 
-def command(delay="0", ignore="0", status="200"):
-    return [sys.executable, "-c", RUNNER, "{project_root}", "{host}", "{port}", delay, ignore, status]
+def command(delay="0", ignore="0", status="200", marker="ready", conflict="0"):
+    return [sys.executable, "-c", RUNNER, "{project_root}", "{host}", "{port}", delay, ignore, status, marker, conflict]
 
 
 def test_starts_on_ephemeral_port_and_persists_metadata(tmp_path: Path):
@@ -59,6 +86,10 @@ def test_starts_on_ephemeral_port_and_persists_metadata(tmp_path: Path):
     metadata = json.loads(server.diagnostics.metadata_path.read_text())
     assert metadata["requested_port"] == 0
     assert metadata["assigned_port"] == server.port
+    assert urlsplit(metadata["base_url"]).port == server.port
+    with socket.create_connection((server.host, server.port), timeout=1):
+        pass
+    assert metadata["last_attempt_port"] == server.port
     assert metadata["pid"] and metadata["pgid"]
     assert metadata["process_alive_after"] is False
     assert metadata["process_group_alive_after"] is False
@@ -120,3 +151,43 @@ def test_sigkill_fallback_is_limited_to_owned_group(tmp_path: Path):
     finally:
         unrelated.terminate()
         unrelated.wait()
+
+
+def test_bind_conflict_retries_with_new_factually_ready_port(tmp_path: Path):
+    attempts = 0
+
+    def runner(project, host, port):
+        nonlocal attempts
+        attempts += 1
+        return command(marker="retry-ok", conflict="1" if attempts == 1 else "0")
+
+    fixture = UiServerFixture(runner, project_root=tmp_path, port_attempts=2, readiness_timeout=1)
+    with fixture as server:
+        assert urllib.request.urlopen(server.base_url).read() == b"retry-ok"
+    metadata = json.loads(fixture.diagnostics.manifest_path.read_text())
+    assert attempts == 2
+    assert metadata["port_attempts"] == 2
+    assert metadata["port_retries"] == 1
+    assert metadata["port_errors"] == ["attempt 1: EADDRINUSE"]
+    assert metadata["assigned_port"] == server.port
+    assert metadata["base_url"].endswith(f":{server.port}")
+    assert metadata["readiness"]["observed_status"] == 200
+    with socket.create_connection((server.host, server.port), timeout=1):
+        pass
+    assert metadata["process_alive_after"] is False
+    assert metadata["process_group_alive_after"] is False
+
+
+def test_exhausted_bind_retries_persist_diagnostics(tmp_path: Path):
+    fixture = UiServerFixture(command(conflict="1"), project_root=tmp_path, port_attempts=2, readiness_timeout=1)
+    with pytest.raises(UiServerError) as caught:
+        fixture.start()
+    assert caught.value.classification == CAPABILITY_FAILURE
+    assert fixture.diagnostics.port_attempts == 2
+    assert fixture.diagnostics.port_retries == 1
+    assert len(fixture.diagnostics.port_errors) == 2
+    assert fixture.diagnostics.port_errors == ["attempt 1: EADDRINUSE", "attempt 2: EADDRINUSE"]
+    assert fixture.diagnostics.assigned_port is None
+    assert fixture.diagnostics.last_attempt_port is not None
+    assert "Address already in use" in fixture.diagnostics.stderr_path.read_text()
+    assert fixture.diagnostics.metadata_path.exists()
