@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,208 @@ CONFIRMED_USAGE = {
 
 def run_events(ticket):
     return [entry for entry in ticket.run_history if entry["event"] != "created"]
+
+
+def test_session_admission_boundary_serializes_membership_writer_without_sleep(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path, max_agents=1)
+    entered = threading.Event()
+    release = threading.Event()
+    writer_entered = threading.Event()
+
+    def holder():
+        with orchestrator.session_store.admission_lock():
+            entered.set()
+            release.wait(timeout=2)
+
+    def writer():
+        entered.wait(timeout=2)
+        with orchestrator.session_store.admission_lock():
+            writer_entered.set()
+
+    first = threading.Thread(target=holder)
+    second = threading.Thread(target=writer)
+    first.start()
+    assert entered.wait(timeout=2)
+    second.start()
+    assert not writer_entered.is_set()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert writer_entered.is_set()
+
+
+def test_membership_removal_before_admission_skips_run_and_reservation(tmp_path: Path, monkeypatch):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = CapturingRunner()
+        orchestrator.runner = runner
+        ticket = orchestrator.store.create("delivery", "task", "Race removal", status="selected_for_session")
+        session = orchestrator.session_store.create([ticket.id])
+        orchestrator.session_store.activate(session)
+
+        original_effective = orchestrator.session_store.effective_ticket_id_sequence
+        first_snapshot_ready = threading.Event()
+        release_snapshot = threading.Event()
+        contract_started = threading.Event()
+        release_contract = threading.Event()
+        calls = 0
+
+        def controlled_effective(current):
+            nonlocal calls
+            calls += 1
+            result = original_effective(current)
+            if calls == 1:
+                first_snapshot_ready.set()
+                assert release_snapshot.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_id_sequence", controlled_effective)
+        original_prepare = runner.prepare_execution_contract
+
+        def controlled_prepare(stage, run_id=None):
+            contract_started.set()
+            assert release_contract.wait(timeout=2)
+            return original_prepare(stage, run_id)
+
+        monkeypatch.setattr(runner, "prepare_execution_contract", controlled_prepare)
+        scheduling = threading.Thread(target=lambda: asyncio.run(orchestrator._schedule_once()))
+        scheduling.start()
+        assert first_snapshot_ready.wait(timeout=2)
+
+        removal_done = threading.Event()
+        removal_started = threading.Event()
+
+        def remove_session():
+            removal_started.set()
+            current = orchestrator.session_store.get(session.id)
+            orchestrator.session_store.cancel(current)
+            removal_done.set()
+
+        removal = threading.Thread(target=remove_session)
+        removal.start()
+        assert removal_started.wait(timeout=2)
+        assert not removal_done.is_set()
+        release_snapshot.set()
+        assert contract_started.wait(timeout=2)
+        assert removal_done.wait(timeout=2)
+        release_contract.set()
+        scheduling.join(timeout=3)
+        removal.join(timeout=3)
+        assert not scheduling.is_alive()
+        assert removal_done.is_set()
+
+        persisted = orchestrator.store.get(ticket.id)
+        assert persisted.active_run is None
+        assert [event["event"] for event in run_events(persisted)] == []
+        assert runner.contracts == []
+        assert not orchestrator.running
+        assert orchestrator.ledger.list_runs(f"ticket:{ticket.id}") == []
+
+    asyncio.run(scenario())
+
+
+def test_membership_update_between_snapshot_and_admission_is_skipped(tmp_path: Path, monkeypatch):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = CapturingRunner()
+        orchestrator.runner = runner
+        ticket = orchestrator.store.create("delivery", "task", "Race update", status="selected_for_session")
+        added = orchestrator.store.create("delivery", "task", "Updated member", status="selected_for_session")
+        session = orchestrator.session_store.create([ticket.id])
+        orchestrator.session_store.activate(session)
+
+        original_effective = orchestrator.session_store.effective_ticket_id_sequence
+        first_snapshot_ready = threading.Event()
+        release_snapshot = threading.Event()
+        contract_started = threading.Event()
+        release_contract = threading.Event()
+        calls = 0
+
+        def controlled_effective(current):
+            nonlocal calls
+            calls += 1
+            result = original_effective(current)
+            if calls == 1:
+                first_snapshot_ready.set()
+                assert release_snapshot.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_id_sequence", controlled_effective)
+        original_prepare = runner.prepare_execution_contract
+
+        def controlled_prepare(stage, run_id=None):
+            contract_started.set()
+            assert release_contract.wait(timeout=2)
+            return original_prepare(stage, run_id)
+
+        monkeypatch.setattr(runner, "prepare_execution_contract", controlled_prepare)
+        scheduling = threading.Thread(target=lambda: asyncio.run(orchestrator._schedule_once()))
+        scheduling.start()
+        assert first_snapshot_ready.wait(timeout=2)
+
+        update_done = threading.Event()
+        update_started = threading.Event()
+
+        def update_membership():
+            update_started.set()
+            current = orchestrator.session_store.get(session.id)
+            orchestrator.session_store.override_ticket(current, added.id, actor="race-test", reason="boundary")
+            update_done.set()
+
+        updater = threading.Thread(target=update_membership)
+        updater.start()
+        assert update_started.wait(timeout=2)
+        assert not update_done.is_set()
+        release_snapshot.set()
+        assert contract_started.wait(timeout=2)
+        assert update_done.wait(timeout=2)
+        release_contract.set()
+        scheduling.join(timeout=3)
+        updater.join(timeout=3)
+
+        assert not scheduling.is_alive()
+        assert update_done.is_set()
+        persisted = orchestrator.store.get(ticket.id)
+        assert persisted.active_run is None
+        assert run_events(persisted) == []
+        assert runner.contracts == []
+        assert orchestrator.ledger.list_runs(f"ticket:{ticket.id}") == []
+
+    asyncio.run(scenario())
+
+
+def test_parallel_admission_creates_one_run_and_one_started_event(tmp_path: Path):
+    first_read = threading.Barrier(2)
+    orchestrators = [Orchestrator(tmp_path, max_agents=1), Orchestrator(tmp_path, max_agents=1)]
+    runners = [CapturingRunner(), CapturingRunner()]
+    for orchestrator, runner in zip(orchestrators, runners):
+        orchestrator.runner = runner
+
+    ticket = orchestrators[0].store.create("delivery", "task", "Duplicate admission", status="ready_for_review")
+    orchestrators[0].ledger.create_budget("ticket", ticket.id, limits={"tokens": 10, "points": 10, "runs": 2})
+    for orchestrator in orchestrators:
+        original = orchestrator.store.list
+
+        def synchronized_list(process=None, *, _original=original, _calls=[0]):
+            if process == "delivery" and _calls[0] == 0:
+                _calls[0] += 1
+                first_read.wait(timeout=2)
+            return _original(process)
+
+        orchestrator.store.list = synchronized_list
+
+    threads = [threading.Thread(target=lambda item=item: asyncio.run(item._schedule_once())) for item in orchestrators]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=4)
+    assert all(not thread.is_alive() for thread in threads)
+
+    persisted = orchestrators[0].store.get(ticket.id)
+    started = [event for event in run_events(persisted) if event["event"] == "started"]
+    assert len(started) == 1
+    assert len(orchestrators[0].ledger.list_runs(f"ticket:{ticket.id}")) == 1
+    assert sum(len(runner.contracts) for runner in runners) == 1
 
 
 class SuccessfulRunner:

@@ -1,0 +1,180 @@
+{
+  "schema_version": "performance-comparison.v1",
+  "ticket_id": "DEL-784959",
+  "before": {
+    "commit": "24c55cb5f0bcf2bf1733340d797fe4b00459ae14",
+    "revision_kind": "git-archive",
+    "source_checksum": "3706bb7c55e56c6dccb1ece894231644c98fd9f29a32466355b93c0541523d9b",
+    "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
+    "dataset_dimensions": {
+      "size": "small",
+      "sizes": {
+        "small": 100,
+        "medium": 1000,
+        "large": 5000,
+        "xlarge": 10000
+      },
+      "ticket_status": {
+        "todo": 7,
+        "selected_for_session": 10,
+        "system_analysis": 5,
+        "ready_for_development": 8,
+        "development": 7,
+        "ready_for_review": 13,
+        "review": 7,
+        "ready_for_acceptance": 12,
+        "acceptance": 11,
+        "ready_for_release": 8,
+        "release": 10,
+        "done": 2
+      },
+      "runs_per_ticket": [
+        0,
+        1,
+        10
+      ],
+      "runs_per_ticket_counts": {
+        "0": 40,
+        "1": 24,
+        "10": 36
+      },
+      "session_counts": [
+        1,
+        10,
+        100
+      ],
+      "ledger_run_counts": [
+        100,
+        1000,
+        10000
+      ],
+      "session_states": {
+        "draft": 1,
+        "active": 1,
+        "completed": 1,
+        "cancelled": 1
+      },
+      "profile_counts": {
+        "sessions": 4,
+        "ledger_runs": 100
+      },
+      "budget_states": {
+        "active": 97,
+        "exhausted": 1,
+        "blocked_unknown": 1,
+        "over_budget": 1
+      }
+    },
+    "storage": "sqlite",
+    "warmup": 5,
+    "iterations": 30,
+    "seed": 35527
+  },
+  "after": {
+    "commit": "135ee3d461394c36e14febe0ef5b333407d87d81",
+    "revision_kind": "working-tree",
+    "source_checksum": "81dff3d66bf2ed7a6aa148be8b2213afe278dcdd374a8418eee85c4562fc2123",
+    "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
+    "dataset_dimensions": {
+      "size": "small",
+      "sizes": {
+        "small": 100,
+        "medium": 1000,
+        "large": 5000,
+        "xlarge": 10000
+      },
+      "ticket_status": {
+        "todo": 7,
+        "selected_for_session": 10,
+        "system_analysis": 5,
+        "ready_for_development": 8,
+        "development": 7,
+        "ready_for_review": 13,
+        "review": 7,
+        "ready_for_acceptance": 12,
+        "acceptance": 11,
+        "ready_for_release": 8,
+        "release": 10,
+        "done": 2
+      },
+      "runs_per_ticket": [
+        0,
+        1,
+        10
+      ],
+      "runs_per_ticket_counts": {
+        "0": 40,
+        "1": 24,
+        "10": 36
+      },
+      "session_counts": [
+        1,
+        10,
+        100
+      ],
+      "ledger_run_counts": [
+        100,
+        1000,
+        10000
+      ],
+      "session_states": {
+        "draft": 1,
+        "active": 1,
+        "completed": 1,
+        "cancelled": 1
+      },
+      "profile_counts": {
+        "sessions": 4,
+        "ledger_runs": 100
+      },
+      "budget_states": {
+        "active": 97,
+        "exhausted": 1,
+        "blocked_unknown": 1,
+        "over_budget": 1
+      }
+    },
+    "storage": "sqlite",
+    "warmup": 5,
+    "iterations": 30,
+    "seed": 35527
+  },
+  "cases": {
+    "scheduler.select_candidates": {
+      "case_id": "scheduler.select_candidates",
+      "status": "measured",
+      "before": {
+        "p50_ms": 0.02375,
+        "p95_ms": 0.025259,
+        "sample_count": 30
+      },
+      "after": {
+        "p50_ms": 0.0238955,
+        "p95_ms": 0.025022700000000002,
+        "sample_count": 30
+      },
+      "delta_percent": -0.6126315789473676
+    },
+    "orchestrator.scan_sort_cycle": {
+      "case_id": "orchestrator.scan_sort_cycle",
+      "status": "measured",
+      "before": {
+        "p50_ms": 0.484292,
+        "p95_ms": 0.53138735,
+        "sample_count": 30
+      },
+      "after": {
+        "p50_ms": 0.4806665,
+        "p95_ms": 0.5200224,
+        "sample_count": 30
+      },
+      "delta_percent": 0.7486186020004467
+    }
+  },
+  "policy": {
+    "improvement_signal_percent": 20,
+    "regression_signal_percent": 5,
+    "descriptive_only": true
+  },
+  "limitations": []
+}

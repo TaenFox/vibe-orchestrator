@@ -15,3 +15,40 @@
 создайте документ по его outline. Если baseline отсутствует или неполон, сначала восстановите
 его по коду и доступным материалам, затем добавьте новое поведение. В handoff укажите путь,
 обновленные разделы и непроверенные ограничения.
+
+## Обязательная проверка перед передачей в ревью
+
+Если тикет требует benchmark, измерений до/после или comparison artifact, перед завершением
+сначала выполните проверку именно на двух разных состояниях исходного кода:
+
+- `before` должен быть отдельным checkout родительского коммита, указанного в контексте тикета;
+- `after` должен быть отдельным checkout текущего результата разработки;
+- не используйте один и тот же каталог для `before` и `after` и не копируйте один результат в два файла;
+- manifest, seed, storage, warmup и iterations у измерений должны совпадать;
+- `before_revision` и `after_revision` должны различаться, а source checksums должны подтверждать
+  соответствующие состояния;
+- comparison artifact обязан пройти штатный validator проекта без ручного редактирования чисел;
+- проверьте все обязательные документы из `context.documentation` и укажите их в handoff.
+
+Если любое из этих условий не выполнено, не возвращайте успешный handoff. Исправьте реализацию
+или верните результат с точным описанием невыполненной проверки и её доказательством.
+
+Для benchmark-тикета в `details` добавьте YAML-секцию:
+
+```yaml
+context:
+  verification:
+    benchmark:
+      before_revision: "<parent commit>"
+      after_revision: "<current result revision or immutable diff reference>"
+      before_path: "<isolated checkout>"
+      after_path: "<isolated checkout>"
+      comparison_artifact: "<repository-relative path>"
+      validator_command: "<exact command>"
+      validator_result: passed
+    documentation:
+      checked:
+        - "<repository-relative path>"
+```
+
+`validator_result: passed` допустим только после фактического успешного запуска команды.
