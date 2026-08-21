@@ -20,6 +20,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import stat
 import statistics
 import pstats
 import subprocess
@@ -289,7 +290,42 @@ def statistics_for(samples: list[float]) -> dict[str, float]:
             "max": max(samples), "mean": statistics.mean(samples), "stdev": statistics.stdev(samples) if len(samples) > 1 else 0.0}
 
 
-def validate_result(result: dict[str, Any]) -> None:
+def _resolve_profile_artifact(path_value: object, artifact_root: Path) -> Path:
+    """Resolve a committed profile path without following untrusted links."""
+    path = Path(str(path_value))
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("profiling artifact path must be relative and stay within artifact root")
+    root = artifact_root.resolve()
+    candidate = root.joinpath(*path.parts)
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("profiling artifact path escapes artifact root") from exc
+    current = root
+    for part in path.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"profiling artifact path must not use symlinks: {path}")
+    if not candidate.exists():
+        raise ValueError(f"profiling artifact is missing: {path}")
+    if not stat.S_ISREG(candidate.stat().st_mode):
+        raise ValueError(f"profiling artifact is not a regular file: {path}")
+    return candidate
+
+
+def _validate_profile_artifact(descriptor: dict[str, Any], artifact_root: Path) -> None:
+    path = _resolve_profile_artifact(descriptor["path"], artifact_root)
+    if descriptor["kind"] == "profile_manifest":
+        return
+    data = path.read_bytes()
+    if descriptor["size_bytes"] != len(data):
+        raise ValueError(f"profiling artifact size mismatch: {descriptor['path']}")
+    if descriptor["sha256"] != hashlib.sha256(data).hexdigest():
+        raise ValueError(f"profiling artifact checksum mismatch: {descriptor['path']}")
+
+
+def validate_result(result: dict[str, Any], *, artifact_root: Path | None = None) -> None:
     """Check result integrity invariants used by CI and reviewers."""
     for key in ("schema_version", "run_id", "dataset_manifest", "cases", "source_checksum_before", "source_checksum_after"):
         if key not in result:
@@ -326,6 +362,8 @@ def validate_result(result: dict[str, Any]) -> None:
                     raise ValueError("profiling artifact path must be repository-relative")
                 if descriptor["kind"] not in {"pstats", "text", "profile_manifest"}:
                     raise ValueError("invalid profiling artifact kind")
+                if artifact_root is not None:
+                    _validate_profile_artifact(descriptor, artifact_root)
     for case in result["cases"]:
         for key in ("case_id", "component", "operation", "storage_mode", "dataset_dimensions", "expected_outcome", "errors", "statistics", "raw_samples"):
             if key not in case:
@@ -782,8 +820,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                   "storage_comparison": comparison, "alternate_run": {"storage_mode": alternate_storage,
                       "manifest": alternate_manifest, "cases": alternate_cases, "available": alternate_state["available"]},
                   "profiling": {"artifacts": [], "limitations": ["fs_ops are instrumented file-count/bytes deltas, not syscall traces", "OS cache eviction is capability-dependent", "HTTP handler/network timing is separated only at case level; browser/DOM latency is not measured"]}}
+        artifact_root = None
         if args.profile_artifacts:
             profile_root = Path(args.profile_artifacts).resolve()
+            artifact_root = profile_root
             profile_manifest_path = profile_root / "profile-manifest.json"
             profile_manifest = json.loads(profile_manifest_path.read_text(encoding="utf-8"))
             if profile_manifest.get("run_id") != result["run_id"]:
@@ -814,7 +854,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                                "cold_available": None, "cold_strategy": "per-storage-pass",
                                "cold_limitation": "cold capability is recorded per storage pass"}
         result["source_checksum_after"] = _hash_tree(source)
-        validate_result(result)
+        validate_result(result, artifact_root=artifact_root)
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         cases.cleanup()
     return result
