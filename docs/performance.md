@@ -178,6 +178,34 @@ Regression tests используют отдельные SQLite databases и Thr
 Операционные ошибки, ожидаемые case-сценарием, остаются в raw sample `error`
 и одновременно учитываются как SQLite errors, если это `sqlite3.Error`.
 
+### DEL-784959: before/after и snapshot consistency
+
+Сравнение фиксируется в `benchmarks/performance/artifacts/DEL-784959-comparison.json`:
+оба результата используют один synthetic manifest, seed, SQLite storage, warmup
+и iterations. Обязательные cases — `scheduler.select_candidates` и
+`orchestrator.scan_sort_cycle`; для каждого записаны commit, manifest hash,
+dataset dimensions, p50/p95, sample count и delta по p50. Delta положительна,
+если after быстрее; >=20% — optimization signal, >5% degradation — regression
+signal. Это descriptive-only policy, не latency SLO. Недоступный case содержит
+limitation и исключается из claims.
+
+Admission использует тот же `sessions.lock`, что и session writer: read/read
+получает единый materialized snapshot, а membership update/removal до admission
+boundary вызывает skip без reservation, started event, task или partial budget
+state. Duplicate admission сохраняется idempotent budget/run contract.
+
+Воспроизводимое сравнение выполняется двумя smoke-проходами и CLI comparison:
+
+```text
+python benchmarks/performance/run_benchmark.py --project <before-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/DEL-784959-before.json
+python benchmarks/performance/run_benchmark.py --project <after-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/DEL-784959-after.json
+python benchmarks/performance/run_benchmark.py --compare-before <output-dir>/DEL-784959-before.json --compare-after <output-dir>/DEL-784959-after.json --comparison-output benchmarks/performance/artifacts/DEL-784959-comparison.json
+```
+
+Validator проверяет schema, required cases, provenance, equivalent parameters и
+пересчитывает delta; artifact не содержит production payloads или абсолютных
+путей.
+
 ## Expected errors and result validation
 
 `validate_result` требует ссылки ошибок на существующие sample indices и при

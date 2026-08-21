@@ -223,13 +223,30 @@ class Orchestrator:
             session_id = session.id if session else None
             attempt_kind = "rework" if ticket.type == "rework" else "initial"
             try:
-                reservation = self.ledger.reserve(
-                    contract.run_id, ticket.id, session_id, self._planned_budget(ticket),
-                    attempt_kind=attempt_kind,
-                    parent_ticket_id=ticket.parent,
-                    budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
-                    require_session_budget=bool(session and session.budget_policy == "enforced"),
-                )
+                # Session writers and this revalidation share sessions.lock.
+                # A membership update therefore commits either before the
+                # fresh snapshot (and is detected) or after reservation.
+                with self.session_store.admission_lock():
+                    fresh_sessions = [item for item in self.session_store.list() if item.status == "active"]
+                    fresh_by_ticket: dict[str, Any] = {}
+                    for item in fresh_sessions:
+                        for member_id in self.session_store.effective_ticket_ids(item):
+                            fresh_by_ticket.setdefault(member_id, item)
+                    fresh_session = fresh_by_ticket.get(ticket.id)
+                    if workflow.id == "delivery" and fresh_sessions and fresh_session is None:
+                        continue
+                    if session and (fresh_session is None or fresh_session.id != session.id or
+                                     fresh_session.updated_at != session.updated_at):
+                        continue
+                    session = fresh_session if workflow.id == "delivery" else session
+                    session_id = session.id if session else None
+                    reservation = self.ledger.reserve(
+                        contract.run_id, ticket.id, session_id, self._planned_budget(ticket),
+                        attempt_kind=attempt_kind,
+                        parent_ticket_id=ticket.parent,
+                        budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
+                        require_session_budget=bool(session and session.budget_policy == "enforced"),
+                    )
             except BudgetDenied as exc:
                 reason_code = getattr(exc, "reason_code", "budget_denied")
                 already_blocked = ticket.last_outcome == "blocked_budget" and ticket.blocked_reason == reason_code

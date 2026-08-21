@@ -80,6 +80,7 @@ REQUIRED_PROFILE_CASES = {
     "UI": "ui.render_board.compact",
     "HTTP": "http.api_tickets",
 }
+REQUIRED_COMPARISON_CASES = ("scheduler.select_candidates", "orchestrator.scan_sort_cycle")
 
 PROFILE_DESCRIPTOR_FIELDS = {"run_id", "case_id", "component", "manifest_hash", "path",
                              "kind", "sha256", "size_bytes", "command_hash"}
@@ -404,6 +405,92 @@ def validate_result(result: dict[str, Any], *, artifact_root: Path | None = None
                 raise ValueError(f"unclean mutation case {case.get('case_id')}")
 
 
+def _comparison_case(result: dict[str, Any], case_id: str) -> dict[str, Any]:
+    for case in result.get("cases", []):
+        if case.get("case_id") == case_id:
+            return case
+    raise ValueError(f"comparison result missing required case: {case_id}")
+
+
+def validate_comparison_artifact(artifact: dict[str, Any]) -> None:
+    """Validate a portable before/after comparison produced by this harness."""
+    required = {"schema_version", "ticket_id", "before", "after", "cases", "policy", "limitations"}
+    missing = required - set(artifact)
+    if missing:
+        raise ValueError(f"comparison artifact missing {sorted(missing)}")
+    if artifact["schema_version"] != "performance-comparison.v1":
+        raise ValueError("unsupported comparison artifact schema")
+    for side in ("before", "after"):
+        value = artifact[side]
+        for key in ("commit", "revision_kind", "source_checksum", "manifest_hash", "dataset_dimensions", "storage", "warmup", "iterations"):
+            if key not in value:
+                raise ValueError(f"comparison {side} missing {key}")
+        if Path(str(value["commit"])).is_absolute() or Path(str(value["manifest_hash"])).is_absolute():
+            raise ValueError("comparison provenance must not contain absolute paths")
+    if set(artifact["cases"]) != set(REQUIRED_COMPARISON_CASES):
+        raise ValueError("comparison cases do not match required registry")
+    for case_id, item in artifact["cases"].items():
+        if item.get("case_id") != case_id:
+            raise ValueError("comparison case identity mismatch")
+        for side in ("before", "after"):
+            sample = item.get(side)
+            if not isinstance(sample, dict):
+                raise ValueError(f"comparison {case_id} missing {side} sample")
+            for key in ("p50_ms", "p95_ms", "sample_count"):
+                if key not in sample:
+                    raise ValueError(f"comparison {case_id} missing {side}.{key}")
+            if item.get("status") == "measured" and (sample["sample_count"] <= 0 or sample["p50_ms"] <= 0 or sample["p95_ms"] <= 0):
+                raise ValueError(f"comparison {case_id} has invalid {side} measurements")
+        expected = (item["before"]["p50_ms"] - item["after"]["p50_ms"]) / item["before"]["p50_ms"] * 100
+        if abs(float(item["delta_percent"]) - expected) > 0.01:
+            raise ValueError(f"comparison {case_id} delta_percent is inconsistent")
+        if item.get("status") not in {"measured", "unavailable"}:
+            raise ValueError(f"comparison {case_id} has invalid status")
+    if not isinstance(artifact["limitations"], list):
+        raise ValueError("comparison limitations must be a list")
+
+
+def build_comparison_artifact(before: dict[str, Any], after: dict[str, Any], *, ticket_id: str) -> dict[str, Any]:
+    """Build a compact comparison from two validated benchmark results."""
+    validate_result(before)
+    validate_result(after)
+    before_manifest = before["provenance"]["manifest_hash"]
+    after_manifest = after["provenance"]["manifest_hash"]
+    if before_manifest != after_manifest:
+        raise ValueError("before/after manifests must match")
+    before_params, after_params = before["parameters"], after["parameters"]
+    comparable = all(before_params.get(key) == after_params.get(key)
+                     for key in ("storage", "warmup", "iterations", "seed", "size"))
+    if not comparable:
+        raise ValueError("before/after benchmark parameters are not equivalent")
+    cases = {}
+    limitations: list[str] = []
+    for case_id in REQUIRED_COMPARISON_CASES:
+        left, right = _comparison_case(before, case_id), _comparison_case(after, case_id)
+        left_ok, right_ok = left.get("expected_outcome") == "success" and not left.get("errors"), right.get("expected_outcome") == "success" and not right.get("errors")
+        if not left_ok or not right_ok:
+            cases[case_id] = {"case_id": case_id, "status": "unavailable", "before": {"p50_ms": 0, "p95_ms": 0, "sample_count": 0}, "after": {"p50_ms": 0, "p95_ms": 0, "sample_count": 0}, "delta_percent": 0.0}
+            limitations.append(f"{case_id}: unavailable in before or after result; excluded from claims")
+            continue
+        b, a = left["statistics"], right["statistics"]
+        delta = (b["p50"] - a["p50"]) / b["p50"] * 100
+        cases[case_id] = {"case_id": case_id, "status": "measured",
+                          "before": {"p50_ms": b["p50"], "p95_ms": b["p95"], "sample_count": left["sample_count"]},
+                          "after": {"p50_ms": a["p50"], "p95_ms": a["p95"], "sample_count": right["sample_count"]},
+                          "delta_percent": delta}
+    artifact = {"schema_version": "performance-comparison.v1", "ticket_id": ticket_id,
+        "before": {"commit": before.get("git_commit", "unknown"), "revision_kind": "git-archive", "source_checksum": before.get("source_checksum_before"), "manifest_hash": before_manifest,
+                    "dataset_dimensions": before["dataset_manifest"].get("dimensions", {}), "storage": before_params["storage"],
+                    "warmup": before_params["warmup"], "iterations": before_params["iterations"]},
+        "after": {"commit": after.get("git_commit", "unknown"), "revision_kind": "working-tree", "source_checksum": after.get("source_checksum_before"), "manifest_hash": after_manifest,
+                   "dataset_dimensions": after["dataset_manifest"].get("dimensions", {}), "storage": after_params["storage"],
+                   "warmup": after_params["warmup"], "iterations": after_params["iterations"]},
+        "cases": cases, "policy": {"improvement_signal_percent": 20, "regression_signal_percent": 5, "descriptive_only": True},
+        "limitations": limitations}
+    validate_comparison_artifact(artifact)
+    return artifact
+
+
 def _fs_snapshot(root: Path) -> tuple[int, int]:
     files = [p for p in root.rglob("*") if p.is_file()]
     sizes = []
@@ -535,6 +622,17 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
             with ledger._connect() as db:
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
+    def orchestrator_scan_sort_cycle() -> list[str]:
+        """Benchmark the optimized read/materialize portion of one poll."""
+        active = [item for item in sessions.list() if item.status == "active"]
+        session_by_ticket: dict[str, Any] = {}
+        for item in active:
+            for member_id in sessions.effective_ticket_ids(item):
+                session_by_ticket.setdefault(member_id, item)
+        participants = set(session_by_ticket) if active else None
+        candidates = select_candidates(workflow, tickets, set(), session_participants=participants)
+        candidates.sort(key=lambda item: (-item.stage_position, item.ticket.priority, item.ticket.id))
+        return [item.ticket.id for item in candidates]
     cases = [
         ("ticketstore.list.delivery", "TicketStore", "list(process)", lambda: store.list("delivery")),
         ("ticketstore.list.all", "TicketStore", "list()", lambda: store.list()),
@@ -565,6 +663,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         ("budgetledger.concurrency.atomic_reserve", "BudgetLedger", "concurrent atomic reservation", concurrent_reservation),
         ("budgetledger.release", "BudgetLedger", "release (isolated lifecycle)", lambda: isolated_run(lambda run_id: ledger.release(run_id))),
         ("scheduler.select_candidates", "Scheduler", "select_candidates", lambda: select_candidates(workflow, tickets, set())),
+        ("orchestrator.scan_sort_cycle", "Orchestrator", "scan and sort cycle", orchestrator_scan_sort_cycle),
         ("ui.render_board.compact", "UI", "render_board", lambda: render_board(store, {"delivery": workflow}, "delivery", ui_worker, session_store=ui_sessions, mode="compact")),
         ("ui.render_fragment", "UI", "render_board_fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=ui_sessions)),
         ("http.handler.fragment", "HTTP", "handler /fragment", lambda: render_board_fragment(store, {"delivery": workflow}, "delivery", session_store=sessions)),
@@ -764,6 +863,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 manifest = generate_fixture(pass_project, seed=fixture_seed, size=size, storage_mode=storage_mode)
             cases = _cases(pass_project, storage=storage_mode)
+            if args.only_case:
+                cases[:] = [item for item in cases if item.case_id in args.only_case]
             atexit.register(cases.cleanup)
             pass_cases = []
             cold = _cold_capability() if args.cold else {"available": None, "strategy": "warm", "limitation": None}
@@ -866,10 +967,19 @@ def _git_commit(project: Path) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", required=True, type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED); parser.add_argument("--run-id"); parser.add_argument("--profile-artifacts", type=Path); parser.add_argument("--output", required=True, type=Path); parser.add_argument("--dataset", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--project", type=Path); parser.add_argument("--profile", choices=("smoke", "full"), default="smoke"); parser.add_argument("--size", choices=("small", "medium", "large", "xlarge")); parser.add_argument("--storage", choices=("sqlite", "yaml"), default="sqlite"); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--iterations", type=int, default=30); parser.add_argument("--seed", type=parse_seed, default=DEFAULT_SEED); parser.add_argument("--run-id"); parser.add_argument("--profile-artifacts", type=Path); parser.add_argument("--output", type=Path); parser.add_argument("--dataset", type=Path); parser.add_argument("--only-case", action="append", default=[]); parser.add_argument("--compare-before", type=Path); parser.add_argument("--compare-after", type=Path); parser.add_argument("--comparison-output", type=Path); mode = parser.add_mutually_exclusive_group(); mode.add_argument("--cold", action="store_true"); mode.add_argument("--warm", action="store_true")
     args = parser.parse_args()
     try:
-        run(args)
+        if args.compare_before or args.compare_after or args.comparison_output:
+            if not (args.compare_before and args.compare_after and args.comparison_output):
+                parser.error("comparison requires --compare-before, --compare-after and --comparison-output")
+            artifact = build_comparison_artifact(json.loads(args.compare_before.read_text()), json.loads(args.compare_after.read_text()), ticket_id="DEL-784959")
+            args.comparison_output.parent.mkdir(parents=True, exist_ok=True)
+            args.comparison_output.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        else:
+            if not args.project or not args.output:
+                parser.error("benchmark requires --project and --output")
+            run(args)
     except ValueError as exc:
         parser.error(str(exc))
     return 0

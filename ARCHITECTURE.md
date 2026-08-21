@@ -91,6 +91,15 @@ contract, reservation и запуска runner. При активной сесс
 сессии проходит последующие budget/WIP gates. Для немаркированных обычных и
 legacy-тикетов режим без активной сессии остается совместимым.
 
+Один polling cycle materializes active session membership once; этот snapshot
+одновременно задает `session_participants` scheduler и `session_by_ticket` для
+admission. Непосредственно перед reservation оркестратор повторно читает active
+sessions под `SessionStore.admission_lock()`, который совпадает с lock записи
+membership. Если `updated_at`/effective membership изменились, admission
+пропускается без reservation, `started` event, `active_run` или task. Следующий
+cycle видит новую membership целиком, а порядок первой session сохраняется по
+порядку `SessionStore.list()`.
+
 ## Контракт traceability
 
 Аудит опирается на два источника, и у них разная роль:

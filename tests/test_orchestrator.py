@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,34 @@ CONFIRMED_USAGE = {
 
 def run_events(ticket):
     return [entry for entry in ticket.run_history if entry["event"] != "created"]
+
+
+def test_session_admission_boundary_serializes_membership_writer_without_sleep(tmp_path: Path):
+    orchestrator = Orchestrator(tmp_path, max_agents=1)
+    entered = threading.Event()
+    release = threading.Event()
+    writer_entered = threading.Event()
+
+    def holder():
+        with orchestrator.session_store.admission_lock():
+            entered.set()
+            release.wait(timeout=2)
+
+    def writer():
+        entered.wait(timeout=2)
+        with orchestrator.session_store.admission_lock():
+            writer_entered.set()
+
+    first = threading.Thread(target=holder)
+    second = threading.Thread(target=writer)
+    first.start()
+    assert entered.wait(timeout=2)
+    second.start()
+    assert not writer_entered.is_set()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert writer_entered.is_set()
 
 
 class SuccessfulRunner:

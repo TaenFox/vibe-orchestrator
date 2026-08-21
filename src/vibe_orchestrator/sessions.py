@@ -616,6 +616,12 @@ class SessionStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
+    @contextmanager
+    def admission_lock(self):
+        """Serialize membership revalidation with session writers."""
+        with self._save_lock():
+            yield
+
     def _validate_membership(self, session: DeliverySession, ticket_ids: list[str], *, allow_active_membership_extension: bool = False,
                              validate_dependencies: bool = False, allowed_completed_ids: set[str] | None = None) -> None:
         if not isinstance(ticket_ids, list):

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 
 from vibe_orchestrator.config import load_workflow
 from vibe_orchestrator.scheduler import select_candidates
@@ -11,6 +12,14 @@ def ticket(id,status,*,priority=100,wip_exempt=False,created="2026-01-01T00:00:0
 
 def test_rightmost_queue_wins():
     workflow=load_workflow("delivery"); tickets=[ticket("A","selected_for_session"),ticket("B","ready_for_review")]; assert select_candidates(workflow,tickets,set())[0].ticket.id=="B"
+
+
+def test_concurrent_readers_receive_the_same_materialized_candidate_snapshot():
+    workflow = load_workflow("delivery")
+    tickets = [ticket("A", "selected_for_session"), ticket("B", "ready_for_review")]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        snapshots = list(pool.map(lambda _: [item.ticket.id for item in select_candidates(workflow, tickets, set(), session_participants={"A", "B"})], range(4)))
+    assert snapshots == [["B", "A"]] * 4
 
 
 def test_wip_blocks_normal_ticket():
