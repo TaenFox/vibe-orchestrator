@@ -112,13 +112,12 @@ def test_browser_smoke_04_multiline_input_and_fragment_refresh_preservation(brow
     ticket = browser_ticket
     browser_page.get_by_role("button", name="Новый тикет").click()
     dialog = browser_page.get_by_role("dialog", name="Новый тикет")
-    description = dialog.locator("textarea[name='description']")
+    description = dialog.get_by_label("Описание")
     search = browser_page.get_by_label("Поиск")
     multiline = "Description\nwith a second line"
     assert description.get_attribute("name") == "description"
     assert description.evaluate("element => element.tagName") == "TEXTAREA"
     description.fill(multiline)
-    dialog.get_by_role("button", name="Отмена").click()
     search.fill(ticket.id)
     details = browser_page.locator(f'[data-ticket-details="{ticket.id}"]')
     details.get_by_text("Подробнее", exact=True).click()
