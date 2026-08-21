@@ -103,13 +103,15 @@ class DeliverySession:
 class SessionStore:
     """Persistent delivery-session state under ``.vibe/sessions``."""
 
-    def __init__(self, project: Path, ticket_store: TicketStore | None = None, *, use_database: bool | None = None):
+    def __init__(self, project: Path, ticket_store: TicketStore | None = None, *, use_database: bool | None = None,
+                 connection_factory: Any | None = None):
         self.project = project.resolve()
         self.root = self.project / ".vibe"
         self.sessions_root = self.root / "sessions"
         self.lock_path = self.root / "sessions.lock"
         self.ticket_store = ticket_store or TicketStore(self.project)
         self.use_database = self.ticket_store.database_enabled if use_database is None else use_database
+        self.connection_factory = connection_factory or getattr(self.ticket_store, "connection_factory", sqlite3.connect)
         self._migrating = False
 
     @property
@@ -121,7 +123,7 @@ class SessionStore:
     def _db(self) -> sqlite3.Connection:
         from .control_db_migration import ensure_control_schema
         ensure_control_schema(self.ticket_store.database)
-        db = sqlite3.connect(self.ticket_store.database, timeout=10)
+        db = self.connection_factory(self.ticket_store.database, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=10000")

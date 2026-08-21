@@ -67,9 +67,9 @@ class SessionError(ValueError):
 class DeliverySessionStore:
     """Compatibility adapter backed exclusively by the persistent SessionStore."""
 
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, *, use_database: bool = True):
         self.project = project.resolve()
-        self.store = SessionStore(self.project)
+        self.store = SessionStore(self.project, use_database=use_database)
 
     def list(self):
         try:

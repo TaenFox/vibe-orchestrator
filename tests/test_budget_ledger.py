@@ -189,6 +189,62 @@ def test_concurrent_reserve_cannot_exceed_limit(tmp_path: Path):
     assert results.count(None) == 1
 
 
+def test_concurrent_identical_reserve_has_one_run_and_one_aggregate_effect(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 10, "points": 10, "runs": 10})
+
+    def attempt(_):
+        return ledger.reserve("same-run", "DEL-1", None, {"tokens": 2, "points": 1, "runs": 1})
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        reservations = list(pool.map(attempt, range(4)))
+    assert {item.run_id for item in reservations} == {"same-run"}
+    assert len(ledger.list_runs("ticket:DEL-1")) == 1
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["reserved"] == {"tokens": 2, "points": 1, "runs": 1}
+
+
+def test_concurrent_reserve_checks_tokens_points_and_runs_atomically(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 10, "points": 5, "runs": 2})
+
+    def attempt(index):
+        try:
+            ledger.reserve(f"run-{index}", "DEL-1", None, {"tokens": 6, "points": 3, "runs": 1})
+            return True
+        except BudgetDenied:
+            return False
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        accepted = list(pool.map(attempt, range(4)))
+    budget = ledger.get_budget("ticket:DEL-1")
+    assert sum(accepted) == 1
+    assert budget["aggregates"]["reserved"] == {"tokens": 6, "points": 3, "runs": 1}
+    assert len(ledger.list_runs("ticket:DEL-1")) == 1
+
+
+def test_ticket_and_session_denial_leaves_no_partial_reservation(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 10, "points": 10, "runs": 2})
+    ledger.create_budget("session", "SESSION-1", limits={"tokens": 1, "points": 1, "runs": 1})
+    with pytest.raises(BudgetDenied):
+        ledger.reserve("run-1", "DEL-1", "SESSION-1", {"tokens": 2, "points": 2, "runs": 1})
+    assert ledger.get_run("run-1") is None
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["reserved"] == {"tokens": 0, "points": 0, "runs": 0}
+    assert ledger.get_budget("session:SESSION-1")["aggregates"]["reserved"] == {"tokens": 0, "points": 0, "runs": 0}
+
+
+def test_concurrent_terminal_transition_is_idempotent(tmp_path: Path):
+    ledger = BudgetLedger(tmp_path)
+    ledger.create_budget("ticket", "DEL-1", limits={"tokens": 50, "points": 50, "runs": 5})
+    ledger.reserve("run-1", "DEL-1", None, {"tokens": 5, "points": 1, "runs": 1})
+    ledger.start("run-1")
+    usage = confirmed("run-1", 5)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: ledger.finalize("run-1", "completed", usage), range(4)))
+    assert {item["state"] for item in results} == {"finalized"}
+    assert ledger.get_budget("ticket:DEL-1")["aggregates"]["finalized"] == {"tokens": 5, "points": 1, "runs": 1}
+
+
 def test_terminal_run_can_only_be_corrected_by_append_only_adjustment(tmp_path: Path):
     ledger = BudgetLedger(tmp_path)
     ledger.create_budget("ticket", "DEL-1", limits={"tokens": 50, "points": 50, "runs": 5})

@@ -156,10 +156,10 @@ def _session_payload(store: TicketStore, session: DeliverySession) -> dict[str, 
 class ReadOnlyAgentTools:
     """Safe, bounded queries over one project's local control-plane state."""
 
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, *, use_database: bool = True):
         self.project = project.resolve()
-        self._store = TicketStore(self.project)
-        self.sessions = SessionStore(self.project, self._store)
+        self._store = TicketStore(self.project, use_database=use_database)
+        self.sessions = SessionStore(self.project, self._store, use_database=use_database)
 
     def _sessions(self) -> list[DeliverySession]:
         return self.sessions.list()
@@ -202,8 +202,8 @@ class ReadOnlyAgentTools:
 class AgentTicketTools(ReadOnlyAgentTools):
     """Validated ticket writes; the underlying TicketStore is not exposed."""
 
-    def __init__(self, project: Path, *, actor: str):
-        super().__init__(project)
+    def __init__(self, project: Path, *, actor: str, use_database: bool = True):
+        super().__init__(project, use_database=use_database)
         self.actor = actor
         self.service = TicketWriteService(self.project)
 
