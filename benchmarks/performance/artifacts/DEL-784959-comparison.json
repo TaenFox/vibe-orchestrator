@@ -2,9 +2,9 @@
   "schema_version": "performance-comparison.v1",
   "ticket_id": "DEL-784959",
   "before": {
-    "commit": "ed60ad5359b09865dfbe599b81c3292999913ee2",
+    "commit": "24c55cb5f0bcf2bf1733340d797fe4b00459ae14",
     "revision_kind": "git-archive",
-    "source_checksum": "aac7e98ba0c25f155da2985f411b9134a9beb5ea2c9958c95a7aaaa6a9e9c214",
+    "source_checksum": "3706bb7c55e56c6dccb1ece894231644c98fd9f29a32466355b93c0541523d9b",
     "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
     "dataset_dimensions": {
       "size": "small",
@@ -71,9 +71,9 @@
     "seed": 35527
   },
   "after": {
-    "commit": "ed60ad5359b09865dfbe599b81c3292999913ee2",
+    "commit": "135ee3d461394c36e14febe0ef5b333407d87d81",
     "revision_kind": "working-tree",
-    "source_checksum": "aac7e98ba0c25f155da2985f411b9134a9beb5ea2c9958c95a7aaaa6a9e9c214",
+    "source_checksum": "81dff3d66bf2ed7a6aa148be8b2213afe278dcdd374a8418eee85c4562fc2123",
     "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
     "dataset_dimensions": {
       "size": "small",
@@ -144,31 +144,31 @@
       "case_id": "scheduler.select_candidates",
       "status": "measured",
       "before": {
-        "p50_ms": 0.024729,
-        "p95_ms": 0.02622935,
+        "p50_ms": 0.02375,
+        "p95_ms": 0.025259,
         "sample_count": 30
       },
       "after": {
-        "p50_ms": 0.023583,
-        "p95_ms": 0.0250628,
+        "p50_ms": 0.0238955,
+        "p95_ms": 0.025022700000000002,
         "sample_count": 30
       },
-      "delta_percent": 4.634235108576979
+      "delta_percent": -0.6126315789473676
     },
     "orchestrator.scan_sort_cycle": {
       "case_id": "orchestrator.scan_sort_cycle",
       "status": "measured",
       "before": {
-        "p50_ms": 0.525542,
-        "p95_ms": 0.6661042,
+        "p50_ms": 0.484292,
+        "p95_ms": 0.53138735,
         "sample_count": 30
       },
       "after": {
-        "p50_ms": 0.499521,
-        "p95_ms": 0.5689478,
+        "p50_ms": 0.4806665,
+        "p95_ms": 0.5200224,
         "sample_count": 30
       },
-      "delta_percent": 4.951269356207489
+      "delta_percent": 0.7486186020004467
     }
   },
   "policy": {
@@ -176,7 +176,5 @@
     "regression_signal_percent": 5,
     "descriptive_only": true
   },
-  "limitations": [
-    "before and after are repeated measurements of the same checkout; this smoke comparison validates reproducibility, not historical speedup"
-  ]
+  "limitations": []
 }

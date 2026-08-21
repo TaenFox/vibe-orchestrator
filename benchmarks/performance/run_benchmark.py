@@ -430,6 +430,9 @@ def validate_comparison_artifact(artifact: dict[str, Any]) -> None:
     if any(artifact["before"][key] != artifact["after"][key]
            for key in ("manifest_hash", "dataset_dimensions", "storage", "warmup", "iterations", "seed")):
         raise ValueError("comparison before/after parameters are not identical")
+    if (artifact["before"]["commit"] == artifact["after"]["commit"] and
+            artifact["before"]["source_checksum"] == artifact["after"]["source_checksum"]):
+        raise ValueError("comparison before/after must reference different source revisions")
     if set(artifact["cases"]) != set(REQUIRED_COMPARISON_CASES):
         raise ValueError("comparison cases do not match required registry")
     for case_id, item in artifact["cases"].items():
@@ -490,10 +493,6 @@ def build_comparison_artifact(before: dict[str, Any], after: dict[str, Any], *, 
                    "warmup": after_params["warmup"], "iterations": after_params["iterations"], "seed": after_params["seed"]},
         "cases": cases, "policy": {"improvement_signal_percent": 20, "regression_signal_percent": 5, "descriptive_only": True},
         "limitations": limitations}
-    if artifact["before"]["commit"] == artifact["after"]["commit"] and artifact["before"]["source_checksum"] == artifact["after"]["source_checksum"]:
-        artifact["limitations"].append(
-            "before and after are repeated measurements of the same checkout; this smoke comparison validates reproducibility, not historical speedup"
-        )
     validate_comparison_artifact(artifact)
     return artifact
 

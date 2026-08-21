@@ -48,6 +48,14 @@ def test_comparison_rejects_non_identical_measurement_parameters():
         validate_comparison_artifact(artifact)
 
 
+def test_comparison_rejects_same_source_revision():
+    artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
+    artifact["after"]["commit"] = artifact["before"]["commit"]
+    artifact["after"]["source_checksum"] = artifact["before"]["source_checksum"]
+    with pytest.raises(ValueError, match="different source revisions"):
+        validate_comparison_artifact(artifact)
+
+
 def test_committed_comparison_has_no_regression_signal():
     artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
     validate_comparison_artifact(artifact)
