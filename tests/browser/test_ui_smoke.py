@@ -186,13 +186,19 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     fragment_requests = []
     browser_page.on(
         "request",
-        lambda request: fragment_requests.append(request)
+        lambda request: fragment_requests.append((request, time.monotonic()))
         if request.url.split("?", 1)[0].endswith("/fragment")
+        and request.method == "GET"
+        and request.resource_type == "fetch"
         else None,
     )
     browser_page.evaluate(
         """() => {
             const search = document.querySelector('[data-board-search]');
+            // Blur normally dispatches change and intentionally triggers refresh(true).
+            // Suppress only that production event so the request below can come only
+            // from the existing interval; production code and timer semantics remain untouched.
+            search.addEventListener('change', event => event.stopImmediatePropagation(), true);
             search.blur();
             document.body.tabIndex = -1;
             document.body.focus();
@@ -212,7 +218,11 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
         timeout=8500,
     ) as response_info:
         pass
-    assert time.monotonic() - cadence_started >= 6.0
+    assert fragment_requests
+    request, request_started = fragment_requests[-1]
+    assert request.method == "GET"
+    assert request.resource_type == "fetch"
+    assert request_started - cadence_started >= 6.0
     assert response_info.value.request.method == "GET"
     assert response_info.value.request.resource_type == "fetch"
     assert "частичное автообновление 8с" in browser_page.locator("body").inner_text()
