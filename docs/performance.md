@@ -215,6 +215,13 @@ dataset dimensions, p50/p95, sample count и delta по p50. Delta положи�
 signal. Это descriptive-only policy, не latency SLO. Недоступный case содержит
 limitation и исключается из claims.
 
+В текущем rework artifact before/after являются двумя независимыми smoke-запусками
+одного checkout: это воспроизводимая проверка harness и отсутствие измеренной
+регрессии на одинаковом synthetic workload, но не историческое доказательство
+ускорения относительно родительского commit. Для исторического before следует
+запустить тот же harness из checkout родительского commit; сравнение отклоняется,
+если manifest, seed, storage, warmup или iterations различаются.
+
 Admission использует тот же `sessions.lock`, что и session writer: initial
 materialization active sessions, `session_by_ticket` и membership token происходит
 в одной критической секции, а revalidation перед reservation повторяет это как

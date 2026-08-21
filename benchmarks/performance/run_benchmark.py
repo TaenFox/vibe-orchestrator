@@ -422,11 +422,14 @@ def validate_comparison_artifact(artifact: dict[str, Any]) -> None:
         raise ValueError("unsupported comparison artifact schema")
     for side in ("before", "after"):
         value = artifact[side]
-        for key in ("commit", "revision_kind", "source_checksum", "manifest_hash", "dataset_dimensions", "storage", "warmup", "iterations"):
+        for key in ("commit", "revision_kind", "source_checksum", "manifest_hash", "dataset_dimensions", "storage", "warmup", "iterations", "seed"):
             if key not in value:
                 raise ValueError(f"comparison {side} missing {key}")
         if Path(str(value["commit"])).is_absolute() or Path(str(value["manifest_hash"])).is_absolute():
             raise ValueError("comparison provenance must not contain absolute paths")
+    if any(artifact["before"][key] != artifact["after"][key]
+           for key in ("manifest_hash", "dataset_dimensions", "storage", "warmup", "iterations", "seed")):
+        raise ValueError("comparison before/after parameters are not identical")
     if set(artifact["cases"]) != set(REQUIRED_COMPARISON_CASES):
         raise ValueError("comparison cases do not match required registry")
     for case_id, item in artifact["cases"].items():
@@ -481,12 +484,16 @@ def build_comparison_artifact(before: dict[str, Any], after: dict[str, Any], *, 
     artifact = {"schema_version": "performance-comparison.v1", "ticket_id": ticket_id,
         "before": {"commit": before.get("git_commit", "unknown"), "revision_kind": "git-archive", "source_checksum": before.get("source_checksum_before"), "manifest_hash": before_manifest,
                     "dataset_dimensions": before["dataset_manifest"].get("dimensions", {}), "storage": before_params["storage"],
-                    "warmup": before_params["warmup"], "iterations": before_params["iterations"]},
+                    "warmup": before_params["warmup"], "iterations": before_params["iterations"], "seed": before_params["seed"]},
         "after": {"commit": after.get("git_commit", "unknown"), "revision_kind": "working-tree", "source_checksum": after.get("source_checksum_after", after.get("source_checksum_before")), "manifest_hash": after_manifest,
                    "dataset_dimensions": after["dataset_manifest"].get("dimensions", {}), "storage": after_params["storage"],
-                   "warmup": after_params["warmup"], "iterations": after_params["iterations"]},
+                   "warmup": after_params["warmup"], "iterations": after_params["iterations"], "seed": after_params["seed"]},
         "cases": cases, "policy": {"improvement_signal_percent": 20, "regression_signal_percent": 5, "descriptive_only": True},
         "limitations": limitations}
+    if artifact["before"]["commit"] == artifact["after"]["commit"] and artifact["before"]["source_checksum"] == artifact["after"]["source_checksum"]:
+        artifact["limitations"].append(
+            "before and after are repeated measurements of the same checkout; this smoke comparison validates reproducibility, not historical speedup"
+        )
     validate_comparison_artifact(artifact)
     return artifact
 
@@ -623,7 +630,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
                 db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
                 db.execute("DELETE FROM budgets WHERE budget_id=?", (f"ticket:{owner}",))
     def orchestrator_scan_sort_cycle() -> list[str]:
-        """Benchmark the optimized read/materialize portion of one poll."""
+        """Benchmark one poll's read/materialize and candidate-selection path."""
         active = [item for item in sessions.list() if item.status == "active"]
         session_by_ticket: dict[str, Any] = {}
         for item in active:
@@ -631,7 +638,6 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
                 session_by_ticket.setdefault(member_id, item)
         participants = set(session_by_ticket) if active else None
         candidates = select_candidates(workflow, tickets, set(), session_participants=participants)
-        candidates.sort(key=lambda item: (-item.stage_position, item.ticket.priority, item.ticket.id))
         return [item.ticket.id for item in candidates]
     cases = [
         ("ticketstore.list.delivery", "TicketStore", "list(process)", lambda: store.list("delivery")),

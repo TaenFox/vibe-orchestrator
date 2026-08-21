@@ -38,6 +38,22 @@ def test_comparison_artifact_has_required_cases_and_reproducible_delta():
     validate_comparison_artifact(artifact)
     assert artifact["cases"]["scheduler.select_candidates"]["delta_percent"] == 20.0
     assert artifact["before"]["manifest_hash"] == artifact["after"]["manifest_hash"] == "manifest"
+    assert artifact["before"]["seed"] == artifact["after"]["seed"] == 35527
+
+
+def test_comparison_rejects_non_identical_measurement_parameters():
+    artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
+    artifact["after"]["seed"] = artifact["before"]["seed"] + 1
+    with pytest.raises(ValueError, match="parameters are not identical"):
+        validate_comparison_artifact(artifact)
+
+
+def test_committed_comparison_has_no_regression_signal():
+    artifact = json.loads(Path("benchmarks/performance/artifacts/DEL-784959-comparison.json").read_text(encoding="utf-8"))
+    validate_comparison_artifact(artifact)
+    threshold = artifact["policy"]["regression_signal_percent"]
+    assert all(case["status"] == "measured" and case["delta_percent"] >= -threshold
+               for case in artifact["cases"].values())
 
 
 def test_seed_accepts_decimal_and_ticket_style_hex_suffix():
