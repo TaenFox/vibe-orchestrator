@@ -124,6 +124,19 @@ pip install -e '.[dev]'
 pytest
 ```
 
+Для проектов с UI browser-level проверки подключаются отдельно, чтобы обычная
+установка и запуск pytest не требовали Playwright или браузерных бинарников:
+
+```bash
+pip install -e '.[dev,browser]'
+python -m playwright install chromium
+pytest -m browser
+```
+
+Тесты, которым нужна эта capability, помечаются `@pytest.mark.browser`.
+На этом этапе репозиторий предоставляет только opt-in контракт capability;
+browser smoke-тесты добавляются отдельными тикетами.
+
 Откройте этот репозиторий в VS Code. Встроенные задачи покрывают настройку, тесты, оркестратор и команды UI.
 
 Инициализируйте целевой Git-репозиторий:
