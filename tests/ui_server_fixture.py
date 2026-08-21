@@ -331,10 +331,20 @@ class UiServerFixture:
             profile_path = state_root / "browser-profile"
             browser_state_path = state_root / "browser-state"
             for path in (cache_path, profile_path, browser_state_path):
+                if not path.is_relative_to(state_root):
+                    raise UiServerError(
+                        "Browser paths must remain inside the run state root",
+                        classification=CAPABILITY_FAILURE,
+                        diagnostics=self.diagnostics,
+                    )
+            for path in (cache_path, profile_path, browser_state_path):
                 path.mkdir(parents=True, exist_ok=True)
             self.diagnostics.browser_cache_path = cache_path
             self.diagnostics.browser_profile_path = profile_path
             self.diagnostics.browser_state_path = browser_state_path
+            # Persist the run-owned paths before launching so even a browser
+            # startup failure leaves auditable, per-run diagnostics.
+            self.diagnostics.save()
             # A persistent context gives every run an explicit, private profile.
             # It is supported by all Playwright browser types and avoids relying
             # on the host's default profile/state directories.
@@ -498,6 +508,8 @@ class UiServerFixture:
             self.diagnostics.last_attempt_port = port
             self.diagnostics.base_url = f"http://{self._host}:{port}"
             self.diagnostics.readiness_url = f"{self.diagnostics.base_url}{self.readiness_path}"
+            self.diagnostics.readiness = {}
+            self.diagnostics.readiness_deadline = None
             self.diagnostics.command = self._argv(port)
             self.diagnostics.save()
             try:

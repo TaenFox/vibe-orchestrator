@@ -5,6 +5,7 @@ import socket
 import sys
 import textwrap
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,9 @@ def test_starts_on_ephemeral_port_and_persists_metadata(tmp_path: Path):
     metadata = json.loads(server.diagnostics.metadata_path.read_text())
     assert metadata["requested_port"] == 0
     assert metadata["assigned_port"] == server.port
+    assert urlsplit(metadata["base_url"]).port == server.port
+    with socket.create_connection((server.host, server.port), timeout=1):
+        pass
     assert metadata["last_attempt_port"] == server.port
     assert metadata["pid"] and metadata["pgid"]
     assert metadata["process_alive_after"] is False
@@ -167,6 +171,9 @@ def test_bind_conflict_retries_with_new_factually_ready_port(tmp_path: Path):
     assert metadata["port_errors"] == ["attempt 1: EADDRINUSE"]
     assert metadata["assigned_port"] == server.port
     assert metadata["base_url"].endswith(f":{server.port}")
+    assert metadata["readiness"]["observed_status"] == 200
+    with socket.create_connection((server.host, server.port), timeout=1):
+        pass
     assert metadata["process_alive_after"] is False
     assert metadata["process_group_alive_after"] is False
 

@@ -111,16 +111,29 @@ def test_parallel_browser_contexts_have_private_profile_paths(tmp_path: Path):
     first = UiServerFixture(command(marker="first"), project_root=tmp_path, test_id="browser-isolation")
     second = UiServerFixture(command(marker="second"), project_root=tmp_path, test_id="browser-isolation")
     try:
-        first.start()
-        second.start()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run.start) for run in (first, second)]
+            for future in futures:
+                future.result()
         try:
-            first.start_browser()
-            second.start_browser()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(run.start_browser) for run in (first, second)]
+                for future in futures:
+                    future.result()
         except Exception as exc:
             pytest.skip(f"Playwright/browser binary unavailable: {type(exc).__name__}")
         assert first.browser_context is not second.browser_context
-        assert first.diagnostics.browser_cache_path.is_relative_to(first.diagnostics.state_root)
-        assert second.diagnostics.browser_cache_path.is_relative_to(second.diagnostics.state_root)
+        for fixture in (first, second):
+            state_root = fixture.diagnostics.state_root
+            assert state_root is not None
+            assert fixture.diagnostics.browser_cache_path.is_relative_to(state_root)
+            assert fixture.diagnostics.browser_profile_path.is_relative_to(state_root)
+            assert fixture.diagnostics.browser_state_path.is_relative_to(state_root)
+            manifest = json.loads(fixture.diagnostics.manifest_path.read_text(encoding="utf-8"))
+            paths = manifest["browser_paths"]
+            assert Path(paths["cache"]).is_relative_to(state_root)
+            assert Path(paths["profile"]).is_relative_to(state_root)
+            assert Path(paths["state"]).is_relative_to(state_root)
         assert first.diagnostics.browser_profile_path != second.diagnostics.browser_profile_path
         assert first.diagnostics.browser_state_path != second.diagnostics.browser_state_path
     finally:
