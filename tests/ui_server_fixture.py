@@ -325,6 +325,7 @@ class UiServerFixture:
         require the optional browser dependency or a locally installed binary.
         """
         target = url or self.base_url
+        self.diagnostics.browser_name = browser_name
         try:
             from playwright.sync_api import sync_playwright
             self._playwright = sync_playwright().start()
@@ -363,7 +364,6 @@ class UiServerFixture:
             )
             self._page = self._context.new_page()
             self._context.tracing.start(screenshots=True, snapshots=True, sources=False)
-            self.diagnostics.browser_name = browser_name
             self.diagnostics.browser_version = self._context.browser.version if self._context.browser else None
             self.diagnostics.browser_reason = None
             self._page.goto(target)
