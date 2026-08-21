@@ -100,6 +100,12 @@ membership. Если `updated_at`/effective membership изменились, adm
 cycle видит новую membership целиком, а порядок первой session сохраняется по
 порядку `SessionStore.list()`.
 
+Admission также перечитывает ticket под тем же lock и атомарно сохраняет его
+`active_run` вместе со started event сразу после reservation. Поэтому два
+параллельных scheduler attempt для одного ticket дают один claim; проигравший
+attempt не создаёт вторую reservation или task. Ошибка подготовки workspace
+после claim освобождает reservation через существующий failure path.
+
 ## Контракт traceability
 
 Аудит опирается на два источника, и у них разная роль:

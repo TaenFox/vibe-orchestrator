@@ -158,6 +158,10 @@ class Orchestrator:
         for session in active_delivery_sessions:
             for ticket_id in self.session_store.effective_ticket_ids(session):
                 session_by_ticket.setdefault(ticket_id, session)
+        membership_snapshot = tuple(
+            (session.id, session.updated_at, tuple(self.session_store.effective_ticket_ids(session)))
+            for session in active_delivery_sessions
+        )
         delivery_session_participants = set(session_by_ticket)
         if not active_delivery_sessions:
             delivery_session_participants = None
@@ -228,16 +232,30 @@ class Orchestrator:
                 # fresh snapshot (and is detected) or after reservation.
                 with self.session_store.admission_lock():
                     fresh_sessions = [item for item in self.session_store.list() if item.status == "active"]
+                    fresh_snapshot = tuple(
+                        (item.id, item.updated_at, tuple(self.session_store.effective_ticket_ids(item)))
+                        for item in fresh_sessions
+                    )
+                    # The candidate and its session must come from the same
+                    # polling snapshot.  This also covers removal of the last
+                    # active session (fresh_sessions == []).
+                    if fresh_snapshot != membership_snapshot:
+                        continue
                     fresh_by_ticket: dict[str, Any] = {}
                     for item in fresh_sessions:
                         for member_id in self.session_store.effective_ticket_ids(item):
                             fresh_by_ticket.setdefault(member_id, item)
                     fresh_session = fresh_by_ticket.get(ticket.id)
-                    if workflow.id == "delivery" and fresh_sessions and fresh_session is None:
+                    if workflow.id == "delivery" and active_delivery_sessions and fresh_session is None:
                         continue
                     if session and (fresh_session is None or fresh_session.id != session.id or
                                      fresh_session.updated_at != session.updated_at):
                         continue
+                    fresh_ticket = self.store.get(ticket.id)
+                    if (fresh_ticket.active_run or fresh_ticket.blocked_by or
+                            fresh_ticket.status != candidate.source_status):
+                        continue
+                    ticket = fresh_ticket
                     session = fresh_session if workflow.id == "delivery" else session
                     session_id = session.id if session else None
                     reservation = self.ledger.reserve(
@@ -247,6 +265,26 @@ class Orchestrator:
                         budget_owner_ticket_id=ticket.parent if attempt_kind == "rework" else ticket.id,
                         require_session_budget=bool(session and session.budget_policy == "enforced"),
                     )
+                    # Claim the ticket before releasing the shared admission
+                    # lock. A concurrent scheduler therefore observes the
+                    # active_run and cannot reserve/start a second run.
+                    ticket.status = candidate.target_status
+                    ticket.active_run = contract.run_id
+                    ticket.retry_after = None
+                    ticket.blocked_reason = None
+                    self.store.record_run_event(
+                        ticket,
+                        run_id=contract.run_id,
+                        stage_id=candidate.target_status,
+                        event="started",
+                        from_status=candidate.source_status,
+                        to_status=candidate.target_status,
+                        context_revision=ticket.context_revision,
+                        reservation=self._reservation_metadata(reservation.run_id),
+                        **contract.history_metadata(),
+                        **ticket_prompt_metadata(ticket),
+                    )
+                    self.store.save(ticket)
             except BudgetDenied as exc:
                 reason_code = getattr(exc, "reason_code", "budget_denied")
                 already_blocked = ticket.last_outcome == "blocked_budget" and ticket.blocked_reason == reason_code
@@ -274,22 +312,6 @@ class Orchestrator:
                 self._record_failure(ticket, contract.run_id, candidate.target_status, exc, contract.history_metadata())
                 log.exception("сбой подготовки workspace для %s (%s)", ticket.id, ticket.type)
                 continue
-            ticket.status = candidate.target_status
-            ticket.active_run = contract.run_id
-            ticket.retry_after = None
-            ticket.blocked_reason = None
-            self.store.record_run_event(
-                ticket,
-                run_id=contract.run_id,
-                stage_id=candidate.target_status,
-                event="started",
-                from_status=candidate.source_status,
-                to_status=candidate.target_status,
-                context_revision=ticket.context_revision,
-                **contract.history_metadata(),
-                **ticket_prompt_metadata(ticket),
-            )
-            self.store.save(ticket)
             execution = self._execute(workflow, ticket.id, candidate.target_status, contract, workspace=workspace)
             try:
                 task = asyncio.create_task(execution, name=ticket.id)

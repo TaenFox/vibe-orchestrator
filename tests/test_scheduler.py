@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from vibe_orchestrator.config import load_workflow
 from vibe_orchestrator.scheduler import select_candidates
@@ -20,6 +21,24 @@ def test_concurrent_readers_receive_the_same_materialized_candidate_snapshot():
     with ThreadPoolExecutor(max_workers=4) as pool:
         snapshots = list(pool.map(lambda _: [item.ticket.id for item in select_candidates(workflow, tickets, set(), session_participants={"A", "B"})], range(4)))
     assert snapshots == [["B", "A"]] * 4
+
+
+def test_candidate_readers_keep_one_membership_snapshot_at_cycle_boundary():
+    workflow = load_workflow("delivery")
+    tickets = [ticket("A", "selected_for_session"), ticket("B", "selected_for_session")]
+    membership = frozenset({"A"})
+    barrier = Barrier(2)
+
+    def read_once(_):
+        barrier.wait()
+        return [item.ticket.id for item in select_candidates(
+            workflow, tickets, set(), session_participants=membership,
+        )]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshots = list(pool.map(read_once, range(2)))
+
+    assert snapshots == [["A"], ["A"]]
 
 
 def test_wip_blocks_normal_ticket():

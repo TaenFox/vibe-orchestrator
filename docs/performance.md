@@ -194,12 +194,21 @@ Admission использует тот же `sessions.lock`, что и session wr
 boundary вызывает skip без reservation, started event, task или partial budget
 state. Duplicate admission сохраняется idempotent budget/run contract.
 
+Детерминированные regression-сценарии закреплены в тестах: `consistent_snapshot`
+проверяет одинаковый membership snapshot для параллельных readers,
+`membership_removal_before_admission` — отсутствие reservation/started/task при
+удалении membership до boundary, а `parallel_admission` — ровно один
+`active_run`, started event и ledger reservation. Сценарии используют barriers и
+events, без time-based sleeps; active session removal проверяется через
+допустимый lifecycle transition в `cancelled`.
+
 Воспроизводимое сравнение выполняется двумя smoke-проходами и CLI comparison:
 
 ```text
 python benchmarks/performance/run_benchmark.py --project <before-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/DEL-784959-before.json
 python benchmarks/performance/run_benchmark.py --project <after-project> --profile smoke --size small --storage sqlite --warmup 5 --iterations 30 --seed 35527 --output <output-dir>/DEL-784959-after.json
 python benchmarks/performance/run_benchmark.py --compare-before <output-dir>/DEL-784959-before.json --compare-after <output-dir>/DEL-784959-after.json --comparison-output benchmarks/performance/artifacts/DEL-784959-comparison.json
+python -m pytest tests/test_scheduler.py tests/test_orchestrator.py tests/test_performance_benchmark.py -q
 ```
 
 Validator проверяет schema, required cases, provenance, equivalent parameters и
