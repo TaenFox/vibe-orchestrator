@@ -174,8 +174,9 @@ process group, передавая изолированный project/data root, 
 Ожидаемый HTTP-статус readiness настраивается параметром
 `expected_readiness_status` и по умолчанию равен `200`; фактически наблюдённый
 статус и ожидаемое значение сохраняются в metadata.
-Параллельный запуск нескольких экземпляров этой MVP не является обещанным
-контрактом.
+Обычный запуск остаётся serial и не требует parallel plugin. Параллельный режим
+является только явным opt-in сценарием: каждый запуск получает собственные
+artifact root, browser context, фактически bound port и state root.
 
 Пример:
 
@@ -187,17 +188,53 @@ with ui_server(lambda project, host, port: [
     ...
 ```
 
-Метаданные сохраняются в `server.diagnostics.metadata_path`, а полные stdout и
-stderr — в соседних `stdout.log` и `stderr.log`. В metadata записываются PID,
-PGID, command, host/port, URL, isolated root, readiness и состояние cleanup.
+### Browser artifacts and retention
+
+`ui_server` создаёт run-каталог `.vibe/browser-artifacts/<test-id>/<run-id>/`.
+В нём находятся `manifest.json`, `server.stdout.log`, `server.stderr.log`,
+`state/` и `project/`. Manifest пишется через temporary file + replace и содержит
+test/run ID, browser name/version (или null с reason), URL, фактический port,
+worktree, roots, UTC timestamps, owned PID/PGID, доступные файлы и retention
+status. При failure browser adapter сохраняет `screenshot.png` и `trace.zip`,
+если capability доступна; для недоступных файлов сохраняется reason. Путь к
+artifact root печатается в test output и в сообщении об ошибке; он совпадает с
+`manifest.artifact_root`.
+
+Политика по умолчанию — `retain-on-failure/delete-transient-on-success`:
+после успешного teardown удаляются только transient logs/state текущего run,
+а manifest остаётся как компактная запись cleanup. Для отладки можно явно
+задать `BROWSER_ARTIFACT_RETENTION=always`; удаление ограничено текущим run root.
+
+Метаданные также сохраняются в `server.diagnostics.metadata_path`, а полные
+stdout и stderr — в `server.diagnostics.stdout_path` и
+`server.diagnostics.stderr_path`. В metadata записываются PID, PGID, command,
+host/port, URL, isolated root, readiness и состояние cleanup.
 После обычного выхода сначала выполняется SIGTERM только собственной группе,
 даже если root process уже завершился, затем при необходимости SIGKILL всей
 оставшейся группе и её descendants. После teardown проверяется отсутствие root
-и собственной process group. Missing runner, bind/start failure, startup
+и собственной process group; unrelated process не затрагивается. Missing runner, bind/start failure, startup
 exit, readiness timeout и teardown failure имеют классификацию
 `capability_environment_failure` и означают ограничение тестовой capability, а
 не дефект UI. Browser-level DOM/focus/keyboard/viewport проверки в worker
 окружении недоступны.
+
+### Isolation invariants and parallel opt-in
+
+Для двух явно созданных fixtures проверяются разные run/artifact roots, state
+roots, browser contexts и ports; state одного run не виден другому. Это отдельное
+opt-in доказательство и не включает parallel mode в обычный pytest запуск.
+Browser cache/profile/state paths задаются на уровне run, а teardown idempotent и
+ограничен собственной POSIX process group.
+
+### Verification commands and environment limitations
+
+Минимальные проверки: `python -m pytest --collect-only -q` и
+`python -m pytest tests/test_browser_capability.py tests/test_ui_server_fixture.py -q`.
+Для browser capability нужны `pip install -e '.[dev,browser]'` и
+`python -m playwright install chromium`. В текущем worker-контексте browser-level
+DOM/focus/keyboard/viewport и реальная проверка parallel browser contexts не
+подключены; это требует внешнего/manual runner. HTTP/API и статические тесты не
+считаются browser-level доказательством.
 
 Targeted проверка: `python -m pytest tests/test_ui_server_fixture.py -q`.
 

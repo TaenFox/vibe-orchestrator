@@ -16,6 +16,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Callable, Sequence
 CAPABILITY_FAILURE = "capability_environment_failure"
 PRODUCT_FAILURE = "ui_product_failure"
 SCHEMA_VERSION = 1
+ARTIFACT_RETENTION_ENV = "BROWSER_ARTIFACT_RETENTION"
 
 
 def _now() -> str:
@@ -59,6 +61,18 @@ class UiServerDiagnostics:
     started_at: str | None = None
     readiness_deadline: str | None = None
     stopped_at: str | None = None
+    test_id: str = "ui-server"
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    state_root: Path | None = None
+    manifest_path: Path | None = None
+    outcome: str | None = None
+    browser_name: str | None = None
+    browser_version: str | None = None
+    browser_reason: str | None = None
+    worktree: Path | None = None
+    retention_policy: str = "delete-transient-on-success"
+    retention_status: str = "pending"
+    files: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -88,10 +102,33 @@ class UiServerDiagnostics:
             "process_alive_before": self.process_alive_before,
             "process_alive_after": self.process_alive_after,
             "process_group_alive_after": self.process_group_alive_after,
+            "test_id": self.test_id,
+            "run_id": self.run_id,
+            "outcome": self.outcome,
+            "browser_name": self.browser_name,
+            "browser_version": self.browser_version,
+            "browser_reason": self.browser_reason,
+            "url": self.base_url,
+            "port": self.assigned_port,
+            "worktree": str(self.worktree or self.data_root),
+            "artifact_root": str(self.artifact_dir),
+            "state_root": str(self.state_root) if self.state_root else None,
+            "timestamps": {"created": self.created_at, "started": self.started_at, "stopped": self.stopped_at},
+            "owned_process": {"pid": self.pid, "pgid": self.pgid, "signals": self.termination_signals},
+            "files": self.files,
+            "retention": {"policy": self.retention_policy, "status": self.retention_status},
         }
 
     def save(self) -> None:
-        self.metadata_path.write_text(json.dumps(self.as_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        payload = json.dumps(self.as_dict(), indent=2, ensure_ascii=False)
+        self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.metadata_path.with_name(f".{self.metadata_path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(self.metadata_path)
+        if self.manifest_path and self.manifest_path != self.metadata_path:
+            temporary_manifest = self.manifest_path.with_name(f".{self.manifest_path.name}.{uuid.uuid4().hex}.tmp")
+            temporary_manifest.write_text(payload, encoding="utf-8")
+            temporary_manifest.replace(self.manifest_path)
 
 
 class UiServerError(RuntimeError):
@@ -119,6 +156,9 @@ class UiServerFixture:
         command: Sequence[str] | CommandFactory,
         *,
         project_root: Path | None = None,
+        test_id: str | None = None,
+        artifact_base: Path | None = None,
+        retention: str | None = None,
         host: str = "127.0.0.1",
         readiness_path: str = "/",
         expected_readiness_status: int = 200,
@@ -133,6 +173,14 @@ class UiServerFixture:
                                 diagnostics=self._placeholder_diagnostics())
         self.command_template = command
         self.source_root = Path(project_root).resolve() if project_root else None
+        self.test_id = (test_id or os.environ.get("PYTEST_CURRENT_TEST", "ui-server")).split(" ")[0]
+        self.test_id = "".join(char if char.isalnum() or char in "-_" else "_" for char in self.test_id)[:120] or "ui-server"
+        self.artifact_base = Path(artifact_base).resolve() if artifact_base else (
+            self.source_root / ".vibe" / "browser-artifacts" if self.source_root else None
+        )
+        self.retention = retention or os.environ.get(ARTIFACT_RETENTION_ENV, "failure")
+        if self.retention not in {"failure", "always"}:
+            raise ValueError("retention must be 'failure' or 'always'")
         self._host = host
         self.readiness_path = readiness_path if readiness_path.startswith("/") else f"/{readiness_path}"
         if not isinstance(expected_readiness_status, int):
@@ -146,7 +194,12 @@ class UiServerFixture:
         self.process: subprocess.Popen[bytes] | None = None
         self._stdout = None
         self._stderr = None
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
         self.diagnostics = self._placeholder_diagnostics()
+        self.diagnostics.worktree = self.source_root or self.diagnostics.data_root
         self.diagnostics.host = host
         self.diagnostics.expected_readiness_status = expected_readiness_status
         self.diagnostics.environment_overrides = {
@@ -155,14 +208,33 @@ class UiServerFixture:
         }
 
     def _placeholder_diagnostics(self) -> UiServerDiagnostics:
-        artifact_dir = Path(tempfile.mkdtemp(prefix="vibe-ui-fixture-"))
+        if self.artifact_base:
+            artifact_base = self.artifact_base / self.test_id
+            artifact_base.mkdir(parents=True, exist_ok=True)
+            artifact_dir = artifact_base / uuid.uuid4().hex
+            artifact_dir.mkdir()
+        else:
+            artifact_dir = Path(tempfile.mkdtemp(prefix="vibe-ui-fixture-"))
         data_root = artifact_dir / "project"
         data_root.mkdir()
-        return UiServerDiagnostics(artifact_dir, artifact_dir / "metadata.json", artifact_dir / "stdout.log", artifact_dir / "stderr.log", data_root)
+        state_root = artifact_dir / "state"
+        state_root.mkdir()
+        return UiServerDiagnostics(
+            artifact_dir, artifact_dir / "metadata.json", artifact_dir / "server.stdout.log",
+            artifact_dir / "server.stderr.log", data_root, test_id=self.test_id,
+            state_root=state_root, manifest_path=artifact_dir / "manifest.json",
+            retention_policy="retain-on-failure/delete-transient-on-success" if self.retention == "failure" else "always",
+        )
 
     def _prepare(self) -> None:
         if self.source_root:
-            shutil.copytree(self.source_root, self.diagnostics.data_root, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            # The artifact base lives under the project .vibe directory.  Do
+            # not copy it into the per-run project or a run would recursively
+            # copy its own evidence and leak other runs' state.
+            shutil.copytree(
+                self.source_root, self.diagnostics.data_root, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "browser-artifacts"),
+            )
 
     def _port(self) -> int:
         last: OSError | None = None
@@ -222,6 +294,105 @@ class UiServerFixture:
             self.diagnostics.returncode = self.process.poll()
         self.diagnostics.save()
 
+    def _file_status(self, name: str, path: Path, *, reason: str | None = None) -> None:
+        descriptor: dict[str, object] = {"path": str(path), "available": path.exists()}
+        if path.exists():
+            descriptor["size_bytes"] = path.stat().st_size
+        if reason:
+            descriptor["reason"] = reason
+        self.diagnostics.files[name] = descriptor
+
+    def start_browser(self, url: str | None = None, *, browser_name: str = "chromium"):
+        """Create a fresh Playwright context for this run and start tracing.
+
+        Playwright is deliberately imported lazily: serial HTTP checks do not
+        require the optional browser dependency or a locally installed binary.
+        """
+        target = url or self.base_url
+        try:
+            from playwright.sync_api import sync_playwright
+            self._playwright = sync_playwright().start()
+            browser_type = getattr(self._playwright, browser_name)
+            self._browser = browser_type.launch(
+                env={"XDG_CACHE_HOME": str(self.diagnostics.state_root / "cache")},
+            )
+            self._context = self._browser.new_context()
+            self._page = self._context.new_page()
+            self._context.tracing.start(screenshots=True, snapshots=True, sources=False)
+            self.diagnostics.browser_name = browser_name
+            self.diagnostics.browser_version = self._browser.version
+            self.diagnostics.browser_reason = None
+            self._page.goto(target)
+            return self._page
+        except ImportError as exc:
+            self.diagnostics.browser_reason = "Playwright is not installed"
+            self.diagnostics.files["screenshot.png"] = {"path": str(self.diagnostics.artifact_dir / "screenshot.png"), "available": False, "reason": self.diagnostics.browser_reason}
+            self.diagnostics.files["trace.zip"] = {"path": str(self.diagnostics.artifact_dir / "trace.zip"), "available": False, "reason": self.diagnostics.browser_reason}
+            self.diagnostics.save()
+            raise UiServerError("Browser capability is unavailable", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics, cause=exc) from exc
+        except Exception as exc:
+            self.diagnostics.browser_reason = f"browser setup failed: {type(exc).__name__}"
+            self.diagnostics.save()
+            raise UiServerError("Browser capability setup failed", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics, cause=exc) from exc
+
+    @property
+    def page(self):
+        if self._page is None:
+            raise RuntimeError("browser has not started")
+        return self._page
+
+    @property
+    def browser_context(self):
+        if self._context is None:
+            raise RuntimeError("browser has not started")
+        return self._context
+
+    def _close_browser(self, failed: bool) -> None:
+        screenshot = self.diagnostics.artifact_dir / "screenshot.png"
+        trace = self.diagnostics.artifact_dir / "trace.zip"
+        if self._context is None and self.diagnostics.browser_reason is None:
+            self.diagnostics.browser_reason = "browser context was not created"
+        if self._page is not None and failed:
+            try:
+                self._page.screenshot(path=str(screenshot), full_page=True)
+            except Exception as exc:
+                self._file_status("screenshot.png", screenshot, reason=f"capture failed: {type(exc).__name__}")
+        elif self._page is not None:
+            self._file_status("screenshot.png", screenshot, reason="success retention policy")
+        else:
+            self._file_status("screenshot.png", screenshot, reason=self.diagnostics.browser_reason)
+        if self._context is not None:
+            try:
+                self._context.tracing.stop(path=str(trace))
+            except Exception as exc:
+                self._file_status("trace.zip", trace, reason=f"capture failed: {type(exc).__name__}")
+        else:
+            self._file_status("trace.zip", trace, reason=self.diagnostics.browser_reason)
+        self._file_status("screenshot.png", screenshot, reason=self.diagnostics.files.get("screenshot.png", {}).get("reason") if "screenshot.png" in self.diagnostics.files else None)
+        self._file_status("trace.zip", trace, reason=self.diagnostics.files.get("trace.zip", {}).get("reason") if "trace.zip" in self.diagnostics.files else None)
+        for resource in (self._context, self._browser, self._playwright):
+            if resource is not None:
+                try:
+                    resource.close() if resource is not self._playwright else resource.stop()
+                except Exception as exc:
+                    self.diagnostics.readiness["browser_teardown_error"] = type(exc).__name__
+        self._context = self._browser = self._playwright = self._page = None
+
+    def _finalize_artifacts(self, outcome: str) -> None:
+        self.diagnostics.outcome = outcome
+        self.diagnostics.retention_status = "retained" if outcome == "failure" or self.retention == "always" else "cleanup-pending"
+        self._file_status("server.stdout.log", self.diagnostics.stdout_path)
+        self._file_status("server.stderr.log", self.diagnostics.stderr_path)
+        self._close_browser(outcome == "failure")
+        self.diagnostics.save()
+        if outcome == "success" and self.retention != "always":
+            for path in (self.diagnostics.stdout_path, self.diagnostics.stderr_path, self.diagnostics.state_root):
+                if path and path.exists():
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+            self.diagnostics.retention_status = "deleted-transient"
+            self.diagnostics.save()
+        print(f"Browser artifacts: {self.diagnostics.artifact_dir}")
+
     def start(self) -> "UiServerFixture":
         self._prepare()
         port = self._port()
@@ -245,12 +416,12 @@ class UiServerFixture:
             self.diagnostics.save()
         except (OSError, ValueError) as exc:
             self._write_state()
-            self.teardown()
+            self.teardown(outcome="failure")
             raise UiServerError("UI runner failed to start", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics, cause=exc) from exc
         try:
             self._wait_ready()
         except UiServerError:
-            self.teardown()
+            self.teardown(outcome="failure")
             raise
         return self
 
@@ -312,10 +483,13 @@ class UiServerFixture:
         self._write_state()
         raise UiServerError("UI readiness timed out", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics)
 
-    def teardown(self) -> None:
+    def teardown(self, *, outcome: str | None = None) -> None:
+        if outcome is None:
+            outcome = "failure" if self.diagnostics.classification == CAPABILITY_FAILURE else "success"
         if self.process is None:
             self._close_streams()
             self._write_state()
+            self._finalize_artifacts(outcome)
             return
         if self.diagnostics.process_alive_before is None:
             self.diagnostics.process_alive_before = self._alive()
@@ -351,6 +525,9 @@ class UiServerFixture:
         self._close_streams()
         self.diagnostics.stopped_at = _now()
         self._write_state()
+        if self.diagnostics.process_alive_after or self.diagnostics.process_group_alive_after:
+            outcome = "failure"
+        self._finalize_artifacts(outcome)
 
     def _close_streams(self) -> None:
         for stream in (self._stdout, self._stderr):
@@ -361,7 +538,7 @@ class UiServerFixture:
         return self.start()
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        self.teardown()
+        self.teardown(outcome="failure" if exc_type else "success")
         return False
 
 
