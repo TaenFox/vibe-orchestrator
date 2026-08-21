@@ -482,7 +482,7 @@ def build_comparison_artifact(before: dict[str, Any], after: dict[str, Any], *, 
         "before": {"commit": before.get("git_commit", "unknown"), "revision_kind": "git-archive", "source_checksum": before.get("source_checksum_before"), "manifest_hash": before_manifest,
                     "dataset_dimensions": before["dataset_manifest"].get("dimensions", {}), "storage": before_params["storage"],
                     "warmup": before_params["warmup"], "iterations": before_params["iterations"]},
-        "after": {"commit": after.get("git_commit", "unknown"), "revision_kind": "working-tree", "source_checksum": after.get("source_checksum_before"), "manifest_hash": after_manifest,
+        "after": {"commit": after.get("git_commit", "unknown"), "revision_kind": "working-tree", "source_checksum": after.get("source_checksum_after", after.get("source_checksum_before")), "manifest_hash": after_manifest,
                    "dataset_dimensions": after["dataset_manifest"].get("dimensions", {}), "storage": after_params["storage"],
                    "warmup": after_params["warmup"], "iterations": after_params["iterations"]},
         "cases": cases, "policy": {"improvement_signal_percent": 20, "regression_signal_percent": 5, "descriptive_only": True},
@@ -627,7 +627,7 @@ def _cases(project: Path, *, storage: str = "sqlite") -> list[tuple[str, str, st
         active = [item for item in sessions.list() if item.status == "active"]
         session_by_ticket: dict[str, Any] = {}
         for item in active:
-            for member_id in sessions.effective_ticket_ids(item):
+            for member_id in sessions.effective_ticket_id_sequence(item):
                 session_by_ticket.setdefault(member_id, item)
         participants = set(session_by_ticket) if active else None
         candidates = select_candidates(workflow, tickets, set(), session_participants=participants)

@@ -148,7 +148,7 @@ class Orchestrator:
         session_by_ticket: dict[str, Any] = {}
         effective_by_session: dict[str, tuple[str, ...]] = {}
         for session in sessions:
-            effective_ids = tuple(sorted(self.session_store.effective_ticket_ids(session)))
+            effective_ids = self.session_store.effective_ticket_id_sequence(session)
             effective_by_session[session.id] = effective_ids
             for ticket_id in effective_ids:
                 session_by_ticket.setdefault(ticket_id, session)

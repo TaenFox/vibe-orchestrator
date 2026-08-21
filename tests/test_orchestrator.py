@@ -72,7 +72,7 @@ def test_membership_removal_before_admission_skips_run_and_reservation(tmp_path:
         session = orchestrator.session_store.create([ticket.id])
         orchestrator.session_store.activate(session)
 
-        original_effective = orchestrator.session_store.effective_ticket_ids
+        original_effective = orchestrator.session_store.effective_ticket_id_sequence
         first_snapshot_ready = threading.Event()
         release_snapshot = threading.Event()
         contract_started = threading.Event()
@@ -88,7 +88,7 @@ def test_membership_removal_before_admission_skips_run_and_reservation(tmp_path:
                 assert release_snapshot.wait(timeout=2)
             return result
 
-        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_ids", controlled_effective)
+        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_id_sequence", controlled_effective)
         original_prepare = runner.prepare_execution_contract
 
         def controlled_prepare(stage, run_id=None):
@@ -143,7 +143,7 @@ def test_membership_update_between_snapshot_and_admission_is_skipped(tmp_path: P
         session = orchestrator.session_store.create([ticket.id])
         orchestrator.session_store.activate(session)
 
-        original_effective = orchestrator.session_store.effective_ticket_ids
+        original_effective = orchestrator.session_store.effective_ticket_id_sequence
         first_snapshot_ready = threading.Event()
         release_snapshot = threading.Event()
         contract_started = threading.Event()
@@ -159,7 +159,7 @@ def test_membership_update_between_snapshot_and_admission_is_skipped(tmp_path: P
                 assert release_snapshot.wait(timeout=2)
             return result
 
-        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_ids", controlled_effective)
+        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_id_sequence", controlled_effective)
         original_prepare = runner.prepare_execution_contract
 
         def controlled_prepare(stage, run_id=None):

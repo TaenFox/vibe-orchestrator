@@ -4,6 +4,7 @@ from threading import Barrier
 
 from vibe_orchestrator.config import load_workflow
 from vibe_orchestrator.scheduler import select_candidates
+from vibe_orchestrator.sessions import DeliverySession, SessionStore
 from vibe_orchestrator.tickets import Ticket
 
 
@@ -39,6 +40,18 @@ def test_candidate_readers_keep_one_membership_snapshot_at_cycle_boundary():
         snapshots = list(pool.map(read_once, range(2)))
 
     assert snapshots == [["A"], ["A"]]
+
+
+def test_effective_membership_sequence_is_deterministic_and_deduplicated():
+    session = DeliverySession(
+        id="SESSION-SEQUENCE",
+        ticket_ids=["A", "B", "A"],
+        audit_events=[{"event": "membership_override", "ticket_id": "B"},
+                      {"event": "membership_override", "ticket_id": "C"}],
+    )
+
+    assert SessionStore.effective_ticket_id_sequence(session) == ("A", "B", "C")
+    assert SessionStore.effective_ticket_ids(session) == {"A", "B", "C"}
 
 
 def test_wip_blocks_normal_ticket():

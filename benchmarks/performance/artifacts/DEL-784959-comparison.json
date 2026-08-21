@@ -70,9 +70,9 @@
     "iterations": 30
   },
   "after": {
-    "commit": "24c55cb5f0bcf2bf1733340d797fe4b00459ae14",
+    "commit": "9be7fc93b1b830ca0c48fba8d4b3c998c3491ae9",
     "revision_kind": "working-tree",
-    "source_checksum": "5ebf7ecb4d6d250c286f5ca8e4ea2b12e452935c246b774308ca43d0296f0f03",
+    "source_checksum": "d72b419b9384fd76972412e53b6e1bb0512c8df89e3e87d532f07c6f3b12bf60",
     "manifest_hash": "569e4697d6e070ac42e1fe374c0736ed49077396978b35f7e6c9199ae8378aa1",
     "dataset_dimensions": {
       "size": "small",
@@ -147,11 +147,11 @@
         "sample_count": 30
       },
       "after": {
-        "p50_ms": 0.024229,
-        "p95_ms": 0.02662515,
+        "p50_ms": 0.038,
+        "p95_ms": 0.0463151,
         "sample_count": 30
       },
-      "delta_percent": 0.2572916452256965
+      "delta_percent": -56.4333202972233
     },
     "orchestrator.scan_sort_cycle": {
       "case_id": "orchestrator.scan_sort_cycle",
@@ -162,11 +162,11 @@
         "sample_count": 30
       },
       "after": {
-        "p50_ms": 0.6120625,
-        "p95_ms": 0.86494375,
+        "p50_ms": 0.8190625,
+        "p95_ms": 1.23137295,
         "sample_count": 30
       },
-      "delta_percent": -13.603460468362247
+      "delta_percent": -52.024236642284016
     }
   },
   "policy": {

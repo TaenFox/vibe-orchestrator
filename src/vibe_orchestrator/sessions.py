@@ -455,11 +455,24 @@ class SessionStore:
         self.save(session)
 
     @staticmethod
+    def effective_ticket_id_sequence(session: DeliverySession) -> tuple[str, ...]:
+        """Return effective membership once, preserving its canonical order."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for ticket_id in session.ticket_ids:
+            if ticket_id not in seen:
+                seen.add(ticket_id)
+                result.append(ticket_id)
+        for event in session.audit_events:
+            ticket_id = event.get("ticket_id")
+            if event.get("event") == "membership_override" and isinstance(ticket_id, str) and ticket_id not in seen:
+                seen.add(ticket_id)
+                result.append(ticket_id)
+        return tuple(result)
+
+    @staticmethod
     def effective_ticket_ids(session: DeliverySession) -> set[str]:
-        result = set(session.ticket_ids)
-        result.update(event["ticket_id"] for event in session.audit_events
-                      if event.get("event") == "membership_override" and isinstance(event.get("ticket_id"), str))
-        return result
+        return set(SessionStore.effective_ticket_id_sequence(session))
 
     def _validate_session(self, session: DeliverySession, *, allow_active_membership_extension: bool = False,
                           allowed_completed_ids: set[str] | None = None) -> None:
