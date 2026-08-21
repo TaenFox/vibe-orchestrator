@@ -134,8 +134,27 @@ pytest -m browser
 ```
 
 Тесты, которым нужна эта capability, помечаются `@pytest.mark.browser`.
-На этом этапе репозиторий предоставляет только opt-in контракт capability;
-browser smoke-тесты добавляются отдельными тикетами.
+Browser suite запускается отдельно от static/API suite:
+
+```bash
+pip install -e '.[dev,browser]'
+python -m playwright install chromium
+.venv/bin/python -m pytest -m browser tests/browser -q
+.venv/bin/python -m pytest -q                 # без Playwright/Chromium
+```
+
+`tests/browser` использует реальный Chromium через `UiServerFixture`, изолированный
+порт, копию проекта и persistent profile на каждый run. Сценарии помечены marker
+`browser` и покрывают матрицу `BROWSER-SMOKE-01..07`: board/card и drawer,
+focus/close/Escape, keyboard-only navigation, multiline input и сохранение состояния
+при `/fragment`, create плюс доступное state action, safe rendering, mobile viewport
+и bounded auto-refresh (8 секунд). Синхронизация выполняется Playwright
+auto-waiting, response observation и bounded conditions; arbitrary sleeps в тестах не
+используются.
+
+При падении артефакты сохраняются в `.vibe/browser-artifacts/<test-id>/<run-id>/`:
+`manifest.json`, screenshot, trace и server logs. `manifest.json` фиксирует Chromium
+name/version, URL, isolated roots и cleanup status.
 
 Откройте этот репозиторий в VS Code. Встроенные задачи покрывают настройку, тесты, оркестратор и команды UI.
 
@@ -335,6 +354,25 @@ UI проверяется регрессионными тестами для Dis
 для повторного открытия, а focus возвращается на кнопку-открыватель (если она
 ещё доступна; при её удалении выполняется безопасный no-op). Поздний ответ
 закрытого запроса не меняет DOM.
+
+### Browser smoke matrix и evidence
+
+| ID | Observable contract |
+|---|---|
+| `BROWSER-SMOKE-01` | board/column/card semantic identity and matching drawer ticket |
+| `BROWSER-SMOKE-02` | dialog/aria-hidden, focus trap, close/backdrop/Escape and focus return |
+| `BROWSER-SMOKE-03` | Tab/Shift+Tab/Enter/Space/Escape keyboard path |
+| `BROWSER-SMOKE-04` | multiline values, details and selection preserved across fragment observation |
+| `BROWSER-SMOKE-05` | UI create, reload identity and available move/retry action |
+| `BROWSER-SMOKE-06` | escaped script-like text and bounded multiline rendering |
+| `BROWSER-SMOKE-07` | mobile overflow bound and eight-second fragment cadence |
+
+Static tests in `tests/test_ui.py`, API tests and JavaScript checks remain independent
+and do not constitute browser evidence. The current worker environment may lack
+Playwright or an installed Chromium binary; in that case browser-marked tests skip
+with a capability limitation, while assertion failures after Chromium startup remain
+product failures. Browser-level DOM, focus, viewport and timing evidence must be
+obtained in a browser-enabled runner.
 
 ## Управляемые Delivery-сессии
 
