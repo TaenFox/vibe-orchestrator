@@ -110,9 +110,15 @@ def test_browser_smoke_03_keyboard_only_navigation(browser_ticket, browser_page)
 def test_browser_smoke_04_multiline_input_and_fragment_refresh_preservation(browser_ticket, browser_page):
     """BROWSER-SMOKE-04: multiline text and controlled fragment refresh preserve state."""
     ticket = browser_ticket
+    browser_page.get_by_role("button", name="Новый тикет").click()
+    dialog = browser_page.get_by_role("dialog", name="Новый тикет")
+    description = dialog.get_by_label("Описание")
     search = browser_page.get_by_label("Поиск")
-    multiline = "Description\nwith"
-    search.fill(multiline)
+    multiline = "Description\nwith a second line"
+    assert description.get_attribute("name") == "description"
+    assert description.evaluate("element => element.tagName") == "TEXTAREA"
+    description.fill(multiline)
+    search.fill(ticket.id)
     details = browser_page.locator(f'[data-ticket-details="{ticket.id}"]')
     details.get_by_text("Подробнее", exact=True).click()
     card = browser_page.locator(f'[data-ticket="{ticket.id}"]')
@@ -120,6 +126,7 @@ def test_browser_smoke_04_multiline_input_and_fragment_refresh_preservation(brow
     search.focus()
     browser_page.evaluate("window.__boardBefore = document.querySelector('.board')")
     before = browser_page.evaluate("""() => ({
+        description: document.querySelector('textarea[name="description"]').value,
         search: document.querySelector('[data-board-search]').value,
         details: document.querySelector('[data-ticket-details]').open,
         selected: document.querySelector('.card.selected')?.dataset.ticket,
@@ -129,13 +136,15 @@ def test_browser_smoke_04_multiline_input_and_fragment_refresh_preservation(brow
         search.dispatch_event("change")
     browser_page.wait_for_function("() => document.querySelector('.board') !== window.__boardBefore")
     after = browser_page.evaluate("""() => ({
+        description: document.querySelector('textarea[name="description"]').value,
         search: document.querySelector('[data-board-search]').value,
         details: document.querySelector('[data-ticket-details]').open,
         selected: document.querySelector('.card.selected')?.dataset.ticket,
         focus: document.activeElement === document.querySelector('[data-board-search]')
     })""")
-    assert after == {"search": multiline, "details": True, "selected": ticket.id, "focus": True}
-    assert multiline in browser_page.locator(f'[data-ticket-details="{ticket.id}"]').inner_text()
+    assert before["description"] == multiline
+    assert after == {"description": multiline, "search": ticket.id, "details": True, "selected": ticket.id, "focus": True}
+    assert ticket.description in browser_page.locator(f'[data-ticket-details="{ticket.id}"]').inner_text()
 
 
 def test_browser_smoke_05_create_and_state_action_persist_after_reload(browser_page):
