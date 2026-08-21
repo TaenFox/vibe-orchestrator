@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 import pytest
 
@@ -67,6 +68,23 @@ def test_browser_smoke_02_drawer_focus_close_backdrop_escape_and_return(browser_
 def test_browser_smoke_03_keyboard_only_navigation(browser_ticket, browser_page):
     """BROWSER-SMOKE-03: Tab/Enter/Escape navigation without click helpers."""
     ticket = browser_ticket
+    mode = browser_page.get_by_label("Режим")
+    search = browser_page.get_by_label("Поиск")
+    status = browser_page.get_by_label("Фильтр")
+    active = browser_page.get_by_label("Активность")
+    mode.focus()
+    browser_page.keyboard.press("Tab")
+    assert browser_page.evaluate("document.activeElement === document.querySelector('[data-board-search]')")
+    browser_page.keyboard.press("Tab")
+    assert browser_page.evaluate("document.activeElement === document.querySelector('[data-board-status]')")
+    browser_page.keyboard.press("Tab")
+    assert browser_page.evaluate("document.activeElement === document.querySelector('[data-board-active]')")
+    browser_page.keyboard.press("Shift+Tab")
+    assert browser_page.evaluate("document.activeElement === document.querySelector('[data-board-status]')")
+    browser_page.keyboard.press("Shift+Tab")
+    assert browser_page.evaluate("document.activeElement === document.querySelector('[data-board-search]')")
+    assert mode.is_visible() and search.is_visible() and status.is_visible() and active.is_visible()
+
     opener = browser_page.get_by_role("button", name=f"Открыть тикет {ticket.id}")
     browser_page.locator("body").focus()
     for _ in range(40):
@@ -93,17 +111,30 @@ def test_browser_smoke_04_multiline_input_and_fragment_refresh_preservation(brow
     """BROWSER-SMOKE-04: multiline text and controlled fragment refresh preserve state."""
     ticket = browser_ticket
     search = browser_page.get_by_label("Поиск")
-    multiline = "first line\nsecond line"
+    multiline = "Description\nwith"
     search.fill(multiline)
     details = browser_page.locator(f'[data-ticket-details="{ticket.id}"]')
     details.get_by_text("Подробнее", exact=True).click()
-    before = browser_page.evaluate("({search: document.querySelector('[data-board-search]').value, details: document.querySelector('[data-ticket-details]').open})")
-    browser_page.evaluate("""async () => {
-        const response = await fetch('/fragment?process=discovery&mode=compact');
-        if (!response.ok) throw new Error('fragment request failed');
-    }""")
-    after = browser_page.evaluate("({search: document.querySelector('[data-board-search]').value, details: document.querySelector('[data-ticket-details]').open})")
-    assert after == before
+    card = browser_page.locator(f'[data-ticket="{ticket.id}"]')
+    card.click()
+    search.focus()
+    browser_page.evaluate("window.__boardBefore = document.querySelector('.board')")
+    before = browser_page.evaluate("""() => ({
+        search: document.querySelector('[data-board-search]').value,
+        details: document.querySelector('[data-ticket-details]').open,
+        selected: document.querySelector('.card.selected')?.dataset.ticket,
+        focus: document.activeElement?.getAttribute('data-board-state-key') || document.activeElement?.dataset.boardStateKey
+    })""")
+    with browser_page.expect_response(lambda response: "/fragment?" in response.url and response.request.method == "GET"):
+        search.dispatch_event("change")
+    browser_page.wait_for_function("() => document.querySelector('.board') !== window.__boardBefore")
+    after = browser_page.evaluate("""() => ({
+        search: document.querySelector('[data-board-search]').value,
+        details: document.querySelector('[data-ticket-details]').open,
+        selected: document.querySelector('.card.selected')?.dataset.ticket,
+        focus: document.activeElement === document.querySelector('[data-board-search]')
+    })""")
+    assert after == {"search": multiline, "details": True, "selected": ticket.id, "focus": True}
     assert multiline in browser_page.locator(f'[data-ticket-details="{ticket.id}"]').inner_text()
 
 
@@ -117,15 +148,21 @@ def test_browser_smoke_05_create_and_state_action_persist_after_reload(browser_p
     card = browser_page.locator(".card", has=browser_page.get_by_text(title, exact=True))
     assert "created line 1" not in card.inner_text()
     browser_page.reload()
-    browser_page.get_by_text(title, exact=True).wait_for()
+    card = browser_page.locator(".card", has=browser_page.get_by_text(title, exact=True))
+    card.wait_for()
+    ticket_id = card.locator(".meta").first.inner_text()
+    initial_stage = card.locator("xpath=ancestor::section[@data-stage]").get_attribute("data-stage")
     action = card.get_by_role("button", name=re.compile("Переместить"))
-    if action.count():
-        with browser_page.expect_response(lambda response: response.url.endswith("/move") and response.request.method == "POST"):
-            action.click()
-        browser_page.reload()
-        browser_page.get_by_text(title, exact=True).wait_for()
-    else:
-        pytest.skip("product limitation: created card has no available state action")
+    assert action.count() == 1, "created fixture card must expose a move action"
+    target_stage = card.locator('form[action="/move"] input[name="target"]').input_value()
+    assert target_stage and target_stage != initial_stage
+    with browser_page.expect_response(lambda response: response.url.endswith("/move") and response.request.method == "POST"):
+        action.click()
+    browser_page.reload()
+    card = browser_page.locator(f'[data-ticket="{ticket_id}"]')
+    card.wait_for()
+    assert card.get_by_text(title, exact=True).is_visible()
+    assert card.locator("xpath=ancestor::section[@data-stage]").get_attribute("data-stage") == target_stage
 
 
 def test_browser_smoke_06_safe_rendering(browser_page):
@@ -143,10 +180,63 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     browser_page.set_viewport_size({"width": 390, "height": 844})
     assert browser_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert browser_page.get_by_role("button", name="Новый тикет").is_visible()
-    browser_page.get_by_label("Поиск").fill("mobile")
+    fragment_requests = []
+    browser_page.on(
+        "request",
+        lambda request: fragment_requests.append((request, time.monotonic()))
+        if request.url.split("?", 1)[0].endswith("/fragment")
+        and request.method == "GET"
+        and request.resource_type == "fetch"
+        else None,
+    )
+    # Anchor the measurement before navigation so the existing page-load timer
+    # is measured from a deterministic boundary rather than from an arbitrary
+    # point after the timer may already have consumed part of its interval.
+    reload_started = time.monotonic()
+    browser_page.reload(wait_until="commit")
+    search = browser_page.get_by_label("Поиск")
+    search.wait_for()
+    browser_page.evaluate(
+        """() => {
+            window.__suppressBoardSearchChange = true;
+            document.addEventListener('change', event => {
+                if (window.__suppressBoardSearchChange && event.target.matches('[data-board-search]')) {
+                    window.__suppressBoardSearchChange = false;
+                    // Let blur move focus, but do not let native change invoke
+                    // the production controlled refresh(true) listener.
+                    event.stopImmediatePropagation();
+                }
+            }, true);
+        }"""
+    )
+    search.fill("mobile")
     assert browser_page.evaluate("document.querySelector('[data-board-search]').value === 'mobile'")
-    browser_page.keyboard.press("Tab")
-    with browser_page.expect_response(lambda response: "/fragment?" in response.url, timeout=9500) as response_info:
+    browser_page.evaluate(
+        """() => {
+            const search = document.querySelector('[data-board-search]');
+            search.blur();
+            document.body.tabIndex = -1;
+            document.body.focus();
+        }"""
+    )
+    assert browser_page.evaluate(
+        "() => !document.activeElement?.matches('input, select, textarea')"
+    )
+    # The guard interval rules out a controlled refresh before the timer can fire.
+    browser_page.wait_for_timeout(1300)
+    assert fragment_requests == []
+    with browser_page.expect_response(
+        lambda response: response.url.split("?", 1)[0].endswith("/fragment")
+        and response.request.method == "GET"
+        and response.request.resource_type == "fetch",
+        timeout=8500,
+    ) as response_info:
         pass
+    assert fragment_requests
+    request, request_started = fragment_requests[-1]
+    assert request.method == "GET"
+    assert request.resource_type == "fetch"
+    assert request_started - reload_started >= 6.0
+    assert response_info.value.request.method == "GET"
     assert response_info.value.request.resource_type == "fetch"
     assert "частичное автообновление 8с" in browser_page.locator("body").inner_text()
