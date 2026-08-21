@@ -177,11 +177,15 @@ def test_browser_smoke_05_create_and_state_action_persist_after_reload(browser_p
 def test_browser_smoke_06_safe_rendering(browser_page):
     """BROWSER-SMOKE-06: script-like payload stays text and multiline content is bounded."""
     payload = '<script>window.__unsafe_payload = true</script>\nsecond line'
-    _fill_create(browser_page, title=payload, description=payload)
+    description = "description line 1\ndescription line 2"
+    _fill_create(browser_page, title=payload, description=description)
     assert browser_page.evaluate("window.__unsafe_payload === undefined")
     assert browser_page.locator("script").filter(has_text="window.__unsafe_payload").count() == 0
-    assert browser_page.get_by_text(payload, exact=True).count() == 1
-    assert browser_page.locator(".card").last.evaluate("element => getComputedStyle(element).overflowWrap === 'anywhere'")
+    card = browser_page.locator(".card", has=browser_page.get_by_text(payload, exact=True)).last
+    assert card.locator("strong").inner_text() == payload
+    description_row = card.locator(".details-row", has_text="Описание").first
+    assert description in description_row.inner_text()
+    assert card.evaluate("element => getComputedStyle(element).overflowWrap === 'anywhere'")
 
 
 def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page):
