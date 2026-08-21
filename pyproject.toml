@@ -11,6 +11,7 @@ dependencies = ["PyYAML>=6.0", "Starlette>=0.37,<1", "Uvicorn>=0.30,<1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+browser = ["playwright>=1.49,<2", "pytest-playwright>=0.7,<1"]
 
 [project.scripts]
 vibe = "vibe_orchestrator.cli:main"
@@ -21,6 +22,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "browser: tests that require the optional Playwright browser capability",
+]
 
 [tool.vibe.environment]
 interpreter = ".venv/bin/python"
