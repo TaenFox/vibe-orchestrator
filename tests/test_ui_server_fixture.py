@@ -27,13 +27,15 @@ pytestmark = pytest.mark.skipif(not _local_bind_available(), reason="local loopb
 RUNNER = textwrap.dedent(
     """
     import http.server, signal, sys, time
-    root, host, port, delay, ignore, status = sys.argv[1:]
+    root, host, port, delay, ignore, status, marker, conflict = sys.argv[1:]
     if ignore == '1': signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if delay == 'exit': raise SystemExit(7)
     time.sleep(float(delay))
+    if conflict == '1':
+        raise OSError(98, 'Address already in use')
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(int(status)); self.end_headers(); self.wfile.write(b'ready')
+            self.send_response(int(status)); self.end_headers(); self.wfile.write(marker.encode())
         def log_message(self, *args): pass
     server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
@@ -44,8 +46,8 @@ RUNNER = textwrap.dedent(
 )
 
 
-def command(delay="0", ignore="0", status="200"):
-    return [sys.executable, "-c", RUNNER, "{project_root}", "{host}", "{port}", delay, ignore, status]
+def command(delay="0", ignore="0", status="200", marker="ready", conflict="0"):
+    return [sys.executable, "-c", RUNNER, "{project_root}", "{host}", "{port}", delay, ignore, status, marker, conflict]
 
 
 def test_starts_on_ephemeral_port_and_persists_metadata(tmp_path: Path):
@@ -120,3 +122,37 @@ def test_sigkill_fallback_is_limited_to_owned_group(tmp_path: Path):
     finally:
         unrelated.terminate()
         unrelated.wait()
+
+
+def test_bind_conflict_retries_with_new_factually_ready_port(tmp_path: Path):
+    attempts = 0
+
+    def runner(project, host, port):
+        nonlocal attempts
+        attempts += 1
+        return command(marker="retry-ok", conflict="1" if attempts == 1 else "0")
+
+    fixture = UiServerFixture(runner, project_root=tmp_path, port_attempts=2, readiness_timeout=1)
+    with fixture as server:
+        assert urllib.request.urlopen(server.base_url).read() == b"retry-ok"
+    metadata = json.loads(fixture.diagnostics.manifest_path.read_text())
+    assert attempts == 2
+    assert metadata["port_attempts"] == 2
+    assert metadata["port_retries"] == 1
+    assert metadata["port_errors"] == ["attempt 1: EADDRINUSE"]
+    assert metadata["assigned_port"] == server.port
+    assert metadata["base_url"].endswith(f":{server.port}")
+    assert metadata["process_alive_after"] is False
+    assert metadata["process_group_alive_after"] is False
+
+
+def test_exhausted_bind_retries_persist_diagnostics(tmp_path: Path):
+    fixture = UiServerFixture(command(conflict="1"), project_root=tmp_path, port_attempts=2, readiness_timeout=1)
+    with pytest.raises(UiServerError) as caught:
+        fixture.start()
+    assert caught.value.classification == CAPABILITY_FAILURE
+    assert fixture.diagnostics.port_attempts == 2
+    assert fixture.diagnostics.port_retries == 1
+    assert len(fixture.diagnostics.port_errors) == 1
+    assert "Address already in use" in fixture.diagnostics.stderr_path.read_text()
+    assert fixture.diagnostics.metadata_path.exists()

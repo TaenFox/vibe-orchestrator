@@ -177,6 +177,12 @@ process group, передавая изолированный project/data root, 
 Обычный запуск остаётся serial и не требует parallel plugin. Параллельный режим
 является только явным opt-in сценарием: каждый запуск получает собственные
 artifact root, browser context, фактически bound port и state root.
+Фактически bound port — это порт subprocess, который успешно прошёл readiness;
+предварительный ephemeral-port probe не считается доказательством. Если subprocess
+завершается с `EADDRINUSE`/`Address already in use`, fixture очищает только его
+process group, выбирает новый кандидат и повторяет полный запуск не более
+`port_attempts` раз. `manifest.json` сохраняет номер попытки, число retry, ошибки
+конфликта и финальные `command`, `base_url`, `readiness_url` и `assigned_port`.
 
 Пример:
 
@@ -225,11 +231,20 @@ roots, browser contexts и ports; state одного run не виден дру�
 opt-in доказательство и не включает parallel mode в обычный pytest запуск.
 Browser cache/profile/state paths задаются на уровне run, а teardown idempotent и
 ограничен собственной POSIX process group.
+Для каждого run используются каталоги `state/browser-cache`,
+`state/browser-profile` и `state/browser-state`; Playwright запускается через
+отдельный persistent context с этим profile path. Исполняемый opt-in тест
+запускает два fixture с overlapping lifetime, проверяет разные run/artifact/data/
+state roots и ports, отвечает по двум разным marker URL и выполняет отрицательную
+проверку cross-read/cross-write для state roots.
 
 ### Verification commands and environment limitations
 
 Минимальные проверки: `python -m pytest --collect-only -q` и
 `python -m pytest tests/test_browser_capability.py tests/test_ui_server_fixture.py -q`.
+Проверка retry отдельно покрывает детерминированный `EADDRINUSE` и исчерпание
+bounded попыток; при недоступном loopback она корректно пропускается как capability
+тест.
 Для browser capability нужны `pip install -e '.[dev,browser]'` и
 `python -m playwright install chromium`. В текущем worker-контексте browser-level
 DOM/focus/keyboard/viewport и реальная проверка parallel browser contexts не

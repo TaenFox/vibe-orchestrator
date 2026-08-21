@@ -69,6 +69,12 @@ class UiServerDiagnostics:
     browser_name: str | None = None
     browser_version: str | None = None
     browser_reason: str | None = None
+    browser_cache_path: Path | None = None
+    browser_profile_path: Path | None = None
+    browser_state_path: Path | None = None
+    port_attempts: int = 0
+    port_retries: int = 0
+    port_errors: list[str] = field(default_factory=list)
     worktree: Path | None = None
     retention_policy: str = "delete-transient-on-success"
     retention_status: str = "pending"
@@ -108,6 +114,14 @@ class UiServerDiagnostics:
             "browser_name": self.browser_name,
             "browser_version": self.browser_version,
             "browser_reason": self.browser_reason,
+            "browser_paths": {
+                "cache": str(self.browser_cache_path) if self.browser_cache_path else None,
+                "profile": str(self.browser_profile_path) if self.browser_profile_path else None,
+                "state": str(self.browser_state_path) if self.browser_state_path else None,
+            },
+            "port_attempts": self.port_attempts,
+            "port_retries": self.port_retries,
+            "port_errors": self.port_errors,
             "url": self.base_url,
             "port": self.assigned_port,
             "worktree": str(self.worktree or self.data_root),
@@ -190,6 +204,8 @@ class UiServerFixture:
         self.readiness_interval = readiness_interval
         self.graceful_timeout = graceful_timeout
         self.port_attempts = port_attempts
+        if self.port_attempts < 1:
+            raise ValueError("port_attempts must be at least 1")
         self.env_overrides = dict(env or {})
         self.process: subprocess.Popen[bytes] | None = None
         self._stdout = None
@@ -237,15 +253,9 @@ class UiServerFixture:
             )
 
     def _port(self) -> int:
-        last: OSError | None = None
-        for _ in range(self.port_attempts):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.bind((self._host, 0))
-                    return int(sock.getsockname()[1])
-            except OSError as exc:
-                last = exc
-        raise UiServerError("Unable to allocate an ephemeral UI port", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics, cause=last)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((self._host, 0))
+            return int(sock.getsockname()[1])
 
     def _argv(self, port: int) -> list[str]:
         if callable(self.command_template):
@@ -313,14 +323,27 @@ class UiServerFixture:
             from playwright.sync_api import sync_playwright
             self._playwright = sync_playwright().start()
             browser_type = getattr(self._playwright, browser_name)
-            self._browser = browser_type.launch(
-                env={"XDG_CACHE_HOME": str(self.diagnostics.state_root / "cache")},
+            state_root = self.diagnostics.state_root
+            assert state_root is not None
+            cache_path = state_root / "browser-cache"
+            profile_path = state_root / "browser-profile"
+            browser_state_path = state_root / "browser-state"
+            for path in (cache_path, profile_path, browser_state_path):
+                path.mkdir(parents=True, exist_ok=True)
+            self.diagnostics.browser_cache_path = cache_path
+            self.diagnostics.browser_profile_path = profile_path
+            self.diagnostics.browser_state_path = browser_state_path
+            # A persistent context gives every run an explicit, private profile.
+            # It is supported by all Playwright browser types and avoids relying
+            # on the host's default profile/state directories.
+            self._context = browser_type.launch_persistent_context(
+                user_data_dir=str(profile_path),
+                env={"XDG_CACHE_HOME": str(cache_path)},
             )
-            self._context = self._browser.new_context()
             self._page = self._context.new_page()
             self._context.tracing.start(screenshots=True, snapshots=True, sources=False)
             self.diagnostics.browser_name = browser_name
-            self.diagnostics.browser_version = self._browser.version
+            self.diagnostics.browser_version = self._context.browser.version if self._context.browser else None
             self.diagnostics.browser_reason = None
             self._page.goto(target)
             return self._page
@@ -370,7 +393,8 @@ class UiServerFixture:
             self._file_status("trace.zip", trace, reason=self.diagnostics.browser_reason)
         self._file_status("screenshot.png", screenshot, reason=self.diagnostics.files.get("screenshot.png", {}).get("reason") if "screenshot.png" in self.diagnostics.files else None)
         self._file_status("trace.zip", trace, reason=self.diagnostics.files.get("trace.zip", {}).get("reason") if "trace.zip" in self.diagnostics.files else None)
-        for resource in (self._context, self._browser, self._playwright):
+        resources = (self._context, self._browser, self._playwright)
+        for resource in resources:
             if resource is not None:
                 try:
                     resource.close() if resource is not self._playwright else resource.stop()
@@ -393,37 +417,108 @@ class UiServerFixture:
             self.diagnostics.save()
         print(f"Browser artifacts: {self.diagnostics.artifact_dir}")
 
+    def _is_bind_conflict(self) -> bool:
+        if not self.diagnostics.stderr_path.exists():
+            return False
+        text = self.diagnostics.stderr_path.read_text(encoding="utf-8", errors="replace").lower()
+        return "eaddrinuse" in text or "address already in use" in text
+
+    def _cleanup_owned_process(self) -> None:
+        """Stop only the process group belonging to the current attempt."""
+        if self.process is None:
+            self._close_streams()
+            return
+        pgid = self.diagnostics.pgid
+        if self.diagnostics.process_alive_before is None:
+            self.diagnostics.process_alive_before = self._alive()
+        if pgid is not None and self._group_exists():
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+                self.diagnostics.termination_signals.append("SIGTERM")
+            except ProcessLookupError:
+                pass
+            graceful_deadline = time.monotonic() + self.graceful_timeout
+            while time.monotonic() < graceful_deadline:
+                if self.process.poll() is not None and not self._group_exists():
+                    break
+                time.sleep(min(0.01, max(0, graceful_deadline - time.monotonic())))
+            if self._group_exists():
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                    self.diagnostics.termination_signals.append("SIGKILL")
+                except ProcessLookupError:
+                    pass
+                forced_deadline = time.monotonic() + self.graceful_timeout
+                while time.monotonic() < forced_deadline and self._group_exists():
+                    time.sleep(min(0.01, max(0, forced_deadline - time.monotonic())))
+        if self.process.poll() is None:
+            try:
+                self.process.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                pass
+        if self._alive() or self._group_exists():
+            self.diagnostics.readiness["teardown_error"] = "owned process group remained after forced cleanup"
+            self.diagnostics.classification = CAPABILITY_FAILURE
+        self._close_streams()
+        self.diagnostics.process_alive_after = self._alive()
+        self.diagnostics.process_group_alive_after = self._group_exists()
+
     def start(self) -> "UiServerFixture":
         self._prepare()
-        port = self._port()
-        self.diagnostics.assigned_port = port
-        self.diagnostics.base_url = f"http://{self._host}:{port}"
-        self.diagnostics.readiness_url = f"{self.diagnostics.base_url}{self.readiness_path}"
-        self.diagnostics.command = self._argv(port)
         self.diagnostics.classification = CAPABILITY_FAILURE
-        self.diagnostics.save()
-        try:
-            self._stdout = self.diagnostics.stdout_path.open("wb")
-            self._stderr = self.diagnostics.stderr_path.open("wb")
-            child_env = os.environ.copy()
-            child_env.update(self.env_overrides)
-            self.process = subprocess.Popen(self.diagnostics.command, cwd=self.diagnostics.data_root, env=child_env,
-                                             stdout=self._stdout, stderr=self._stderr, start_new_session=True)
-            self.diagnostics.pid = self.process.pid
-            self.diagnostics.pgid = os.getpgid(self.process.pid)
-            self.diagnostics.process_alive_before = True
-            self.diagnostics.started_at = _now()
+        last_error: BaseException | None = None
+        for attempt in range(1, self.port_attempts + 1):
+            try:
+                port = self._port()
+            except OSError as exc:
+                self.diagnostics.port_attempts = attempt
+                self.diagnostics.port_errors.append(f"attempt {attempt}: {exc}")
+                self._finalize_artifacts("failure")
+                raise UiServerError("Unable to allocate an ephemeral UI port", classification=CAPABILITY_FAILURE,
+                                    diagnostics=self.diagnostics, cause=exc) from exc
+            self.diagnostics.port_attempts = attempt
+            self.diagnostics.assigned_port = port
+            self.diagnostics.base_url = f"http://{self._host}:{port}"
+            self.diagnostics.readiness_url = f"{self.diagnostics.base_url}{self.readiness_path}"
+            self.diagnostics.command = self._argv(port)
             self.diagnostics.save()
-        except (OSError, ValueError) as exc:
-            self._write_state()
-            self.teardown(outcome="failure")
-            raise UiServerError("UI runner failed to start", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics, cause=exc) from exc
-        try:
-            self._wait_ready()
-        except UiServerError:
-            self.teardown(outcome="failure")
-            raise
-        return self
+            try:
+                # Each attempt gets a fresh stream so bind-conflict detection
+                # cannot mistake a prior attempt's stderr for the current one.
+                self._stdout = self.diagnostics.stdout_path.open("wb")
+                self._stderr = self.diagnostics.stderr_path.open("wb")
+                child_env = os.environ.copy()
+                child_env.update(self.env_overrides)
+                self.process = subprocess.Popen(self.diagnostics.command, cwd=self.diagnostics.data_root, env=child_env,
+                                                 stdout=self._stdout, stderr=self._stderr, start_new_session=True)
+                self.diagnostics.pid = self.process.pid
+                self.diagnostics.pgid = os.getpgid(self.process.pid)
+                self.diagnostics.process_alive_before = True
+                self.diagnostics.started_at = _now()
+                self.diagnostics.save()
+                self._wait_ready()
+                return self
+            except (OSError, ValueError) as exc:
+                last_error = exc
+            except UiServerError as exc:
+                last_error = exc
+                if not self._is_bind_conflict():
+                    self._cleanup_owned_process()
+                    self._finalize_artifacts("failure")
+                    raise
+            if not self._is_bind_conflict() or attempt == self.port_attempts:
+                self._cleanup_owned_process()
+                self._finalize_artifacts("failure")
+                raise UiServerError("UI runner failed to bind after port attempts", classification=CAPABILITY_FAILURE,
+                                    diagnostics=self.diagnostics, cause=last_error) from last_error
+            self.diagnostics.port_retries += 1
+            self.diagnostics.port_errors.append(f"attempt {attempt}: EADDRINUSE")
+            self._cleanup_owned_process()
+            self.process = None
+            self._stdout = self._stderr = None
+            self.diagnostics.pid = self.diagnostics.pgid = None
+        raise UiServerError("UI runner failed to start", classification=CAPABILITY_FAILURE,
+                            diagnostics=self.diagnostics, cause=last_error)
 
     def _wait_ready(self) -> None:
         deadline = time.monotonic() + self.readiness_timeout
@@ -486,43 +581,7 @@ class UiServerFixture:
     def teardown(self, *, outcome: str | None = None) -> None:
         if outcome is None:
             outcome = "failure" if self.diagnostics.classification == CAPABILITY_FAILURE else "success"
-        if self.process is None:
-            self._close_streams()
-            self._write_state()
-            self._finalize_artifacts(outcome)
-            return
-        if self.diagnostics.process_alive_before is None:
-            self.diagnostics.process_alive_before = self._alive()
-        pgid = self.diagnostics.pgid
-        if pgid is not None and self._group_exists():
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-                self.diagnostics.termination_signals.append("SIGTERM")
-            except ProcessLookupError:
-                pass
-            graceful_deadline = time.monotonic() + self.graceful_timeout
-            while time.monotonic() < graceful_deadline:
-                if self.process.poll() is not None and not self._group_exists():
-                    break
-                time.sleep(min(0.01, max(0, graceful_deadline - time.monotonic())))
-            if self._group_exists():
-                try:
-                    os.killpg(pgid, signal.SIGKILL)
-                    self.diagnostics.termination_signals.append("SIGKILL")
-                except ProcessLookupError:
-                    pass
-                forced_deadline = time.monotonic() + self.graceful_timeout
-                while time.monotonic() < forced_deadline and self._group_exists():
-                    time.sleep(min(0.01, max(0, forced_deadline - time.monotonic())))
-        if self.process.poll() is None:
-            try:
-                self.process.wait(timeout=0)
-            except subprocess.TimeoutExpired:
-                pass
-        if self._alive() or self._group_exists():
-            self.diagnostics.readiness["teardown_error"] = "owned process group remained after forced cleanup"
-            self.diagnostics.classification = CAPABILITY_FAILURE
-        self._close_streams()
+        self._cleanup_owned_process()
         self.diagnostics.stopped_at = _now()
         self._write_state()
         if self.diagnostics.process_alive_after or self.diagnostics.process_group_alive_after:
