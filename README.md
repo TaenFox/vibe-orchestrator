@@ -361,11 +361,11 @@ UI проверяется регрессионными тестами для Dis
 |---|---|
 | `BROWSER-SMOKE-01` | board/column/card semantic identity and matching drawer ticket |
 | `BROWSER-SMOKE-02` | dialog/aria-hidden, focus trap, close/backdrop/Escape and focus return |
-| `BROWSER-SMOKE-03` | Tab/Shift+Tab/Enter/Space/Escape keyboard path |
-| `BROWSER-SMOKE-04` | multiline values, details and selection preserved across fragment observation |
-| `BROWSER-SMOKE-05` | UI create, reload identity and available move/retry action |
+| `BROWSER-SMOKE-03` | board controls traversed forward and backward with Tab/Shift+Tab; Enter/Space/Escape keyboard path |
+| `BROWSER-SMOKE-04` | production-triggered `/fragment` replacement preserves multiline values, details, selection and focus |
+| `BROWSER-SMOKE-05` | UI create, reload identity and asserted move/retry state transition |
 | `BROWSER-SMOKE-06` | escaped script-like text and bounded multiline rendering |
-| `BROWSER-SMOKE-07` | mobile overflow bound and eight-second fragment cadence |
+| `BROWSER-SMOKE-07` | mobile overflow bound and eight-second fragment cadence after form focus is removed |
 
 Static tests in `tests/test_ui.py`, API tests and JavaScript checks remain independent
 and do not constitute browser evidence. The current worker environment may lack
