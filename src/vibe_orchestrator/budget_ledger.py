@@ -101,7 +101,8 @@ class BudgetLedger:
     """SQLite-backed transactional ledger for ticket and session budgets."""
 
     def __init__(self, project: str | Path, *, timeout: float = 10.0, pending_timeout: float = 60.0,
-                 clock: Callable[[], str] | None = None, authorizer: Callable[..., Any] | None = None):
+                 clock: Callable[[], str] | None = None, authorizer: Callable[..., Any] | None = None,
+                 connection_factory: Callable[..., sqlite3.Connection] | None = None):
         root = Path(project)
         self.path = root if root.suffix == ".sqlite3" else root / ".vibe" / "budgets" / "ledger.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,10 +110,11 @@ class BudgetLedger:
         self.pending_timeout = pending_timeout
         self.clock = clock or _now
         self.authorizer = authorizer
+        self.connection_factory = connection_factory or sqlite3.connect
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
+        connection = self.connection_factory(self.path, timeout=self.timeout, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
@@ -480,6 +482,42 @@ class BudgetLedger:
         result["status"] = status
         result["snapshot_status"] = "fresh"
         result["enforcement_state_exact"] = True
+        return result
+
+    def read_budgets(self, *, scope: str | None = None,
+                     owner_ids: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        """Return authoritative effective snapshots for a set of budgets."""
+        if scope is not None and scope not in {"ticket", "session"}:
+            raise ValueError("invalid budget scope")
+        if owner_ids is not None and not owner_ids:
+            return []
+        query = "SELECT * FROM budgets WHERE 1=1"
+        params: list[Any] = []
+        if scope is not None:
+            query += " AND scope=?"
+            params.append(scope)
+        if owner_ids is not None:
+            query += f" AND owner_id IN ({','.join('?' for _ in owner_ids)})"
+            params.extend(owner_ids)
+        with self._connect() as db:
+            rows = db.execute(query + " ORDER BY budget_id", params).fetchall()
+            now = self.clock()
+            result = []
+            for row in rows:
+                item = dict(row)
+                effective = self._effective_limits(db, row, now=now)
+                item["limits"] = effective
+                item["aggregates"] = {kind: {d: item[f"{kind}_{d}"] for d in DIMENSIONS}
+                                       for kind in ("planned", "reserved", "finalized")}
+                item["available"] = {
+                    d: None if effective[d] is None else effective[d] - sum(item[f"{kind}_{d}"]
+                                                                              for kind in ("planned", "reserved", "finalized"))
+                    for d in DIMENSIONS
+                }
+                item["status"] = self._derived_status(db, row, effective, now=now)
+                item["snapshot_status"] = "fresh"
+                item["enforcement_state_exact"] = True
+                result.append(item)
         return result
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:

@@ -59,7 +59,7 @@ def test_ui_board_uses_russian_labels(tmp_path: Path):
 
     html = render_board(store, load_all_workflows(), "delivery")
     assert "Готово к ревью" in html
-    assert "ждёт зависимость" in html
+    assert "заблокирован: 1" in html
     assert "агент выполняется" in html
     assert "без учета WIP" in html
     assert "приоритет 100" in html

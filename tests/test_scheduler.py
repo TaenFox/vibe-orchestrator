@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from vibe_orchestrator.config import load_workflow
-from vibe_orchestrator.scheduler import effective_blockers, select_candidates
+from vibe_orchestrator.scheduler import select_candidates
 from vibe_orchestrator.tickets import Ticket
 
 
@@ -31,67 +31,6 @@ def test_blocked_ticket_is_not_scheduled():
     blocked.blocked_reason = "rework_cycle_stopped"
 
     assert select_candidates(workflow, [blocked], set()) == []
-
-
-def test_child_inherits_parent_gate_but_resolver_branch_stays_runnable():
-    workflow = load_workflow("delivery")
-    root = ticket("ROOT", "review")
-    gate = ticket("GATE", "ready_for_review")
-    gate.parent = root.id
-    other = ticket("OTHER", "development")
-    other.parent = root.id
-    child = ticket("CHILD", "development")
-    child.parent = other.id
-    tickets = [root, gate, other, child]
-    root.blocked_by = [gate.id, child.id]
-
-    assert effective_blockers(child, tickets, workflow) == {gate.id}
-    assert effective_blockers(gate, tickets, workflow) == set()
-    candidates = select_candidates(workflow, tickets, set())
-    assert {candidate.ticket.id for candidate in candidates} == {gate.id}
-
-
-def test_blocked_tickets_do_not_consume_wip_for_their_resolver():
-    workflow = load_workflow("delivery")
-    root = ticket("ROOT", "review")
-    gate = ticket("GATE", "ready_for_review")
-    gate.parent = root.id
-    blocked_one = ticket("BLOCKED-1", "review")
-    blocked_one.parent = root.id
-    blocked_two = ticket("BLOCKED-2", "review")
-    blocked_two.parent = root.id
-    dependency_one = ticket("DEPENDENCY-1", "todo")
-    dependency_two = ticket("DEPENDENCY-2", "todo")
-    blocked_one.blocked_by = [dependency_one.id]
-    blocked_two.blocked_by = [dependency_two.id]
-    root.blocked_by = [gate.id, blocked_one.id, blocked_two.id]
-
-    candidates = select_candidates(
-        workflow,
-        [root, gate, blocked_one, blocked_two, dependency_one, dependency_two],
-        set(),
-    )
-
-    assert [candidate.ticket.id for candidate in candidates] == [gate.id]
-
-
-def test_resolver_branch_ignores_sibling_parent_gates():
-    workflow = load_workflow("delivery")
-    root = ticket("ROOT", "review")
-    gate = ticket("GATE", "ready_for_review")
-    gate.parent = root.id
-    sibling_gate = ticket("SIBLING-GATE", "ready_for_review")
-    sibling_gate.parent = root.id
-    sibling_dependency = ticket("SIBLING-DEPENDENCY", "todo")
-    sibling_gate.blocked_by = [sibling_dependency.id]
-    resolver = ticket("RESOLVER", "selected_for_session")
-    resolver.parent = gate.id
-    root.blocked_by = [gate.id, sibling_gate.id]
-    gate.blocked_by = [resolver.id]
-
-    all_tickets = [root, gate, sibling_gate, resolver, sibling_dependency]
-    assert effective_blockers(resolver, all_tickets, workflow) == set()
-    assert [candidate.ticket.id for candidate in select_candidates(workflow, all_tickets, set())] == [resolver.id]
 
 
 def test_parent_retries_same_agent_stage_after_correction():

@@ -115,8 +115,8 @@ AUTO_REFRESH_SCRIPT = f"""<script>
 </script>"""
 
 
-def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
-    store = TicketStore(project); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project); ledger = BudgetLedger(project); agent_tools = AgentTicketTools(project, actor="http-agent")
+def _build_server(project: Path, host: str, port: int, *, use_database: bool = True) -> ThreadingHTTPServer:
+    store = TicketStore(project, use_database=use_database); store.init(); workflows = load_all_workflows(); worker_control = WorkerControl(project); tree_manager = GitTreeManager(project, store); session_store = DeliverySessionStore(project, use_database=use_database); ledger = BudgetLedger(project); agent_tools = AgentTicketTools(project, actor="http-agent", use_database=use_database)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -320,8 +320,8 @@ def _build_server(project: Path, host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> tuple[ThreadingHTTPServer, Thread]:
-    server = _build_server(project, host, port)
+def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, *, use_database: bool = True) -> tuple[ThreadingHTTPServer, Thread]:
+    server = _build_server(project, host, port, use_database=use_database)
     url = f"http://{host}:{port}"
     print(f"Интерфейс: {url}")
     if open_browser: webbrowser.open(url)
@@ -330,8 +330,8 @@ def start_server(project: Path, host: str = "127.0.0.1", port: int = 8765, open_
     return server, thread
 
 
-def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
-    server = _build_server(project, host, port)
+def serve(project: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, *, use_database: bool = True) -> None:
+    server = _build_server(project, host, port, use_database=use_database)
     url = f"http://{host}:{port}"
     print(f"Интерфейс: {url}")
     if open_browser: webbrowser.open(url)
@@ -474,17 +474,6 @@ def _board_toolbar(workflow, mode, search, status, active=False):
     return f'<section class="board-toolbar"><label>Режим <select data-board-mode><option value="compact"{(" selected" if mode == "compact" else "")}>Компактный</option><option value="flat"{(" selected" if mode == "flat" else "")}>Плоский список</option></select></label><label>Поиск <input data-board-search type="search" value="{html.escape(search)}" placeholder="ID, заголовок или описание"></label><label>Фильтр <select data-board-status>{options}</select></label><label>Активность <select data-board-active>{active_options}</select></label></section>'
 
 
-def _blocker_items(store, blocker_ids):
-    items = []
-    for blocker_id in blocker_ids:
-        try:
-            blocker = store.get(blocker_id)
-            items.append(f"{blocker_id}: {blocker.title}")
-        except KeyError:
-            items.append(str(blocker_id))
-    return items
-
-
 def _stage_column(store, workflow, stage, tickets, tree_manager, session_store, ledger=None, budget_context=None):
         cards=[]; stage_tickets=[t for t in tickets if t.status==stage.id]; stage_tickets.sort(key=lambda t:(0 if t.wip_exempt else 1,t.priority,t.created_at))
         for ticket in stage_tickets:
@@ -496,10 +485,7 @@ def _stage_column(store, workflow, stage, tickets, tree_manager, session_store, 
                 action=f'<form method="post" action="/retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить</button></form>'
             if ticket.status == "ready_for_release" and ticket.last_outcome == "integration_conflict":
                 action=f'<form method="post" action="/release-retry"><input type="hidden" name="id" value="{html.escape(ticket.id)}"><button>Повторить интеграцию</button></form>'
-            blocker_items = _blocker_items(store, ticket.blocked_by)
-            blocker_title = "Ожидает: " + "; ".join(blocker_items)
-            blocker_label = f"ждёт {len(ticket.blocked_by)} завис." if len(ticket.blocked_by) > 1 else "ждёт зависимость"
-            blocked=f'<span class="badge" title="{html.escape(blocker_title)}">{html.escape(blocker_label)}</span>' if ticket.blocked_by else ""; run='<span class="badge active-badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree, ledger, budget_context); drawer_button=f'<button type="button" id="open-ticket-{html.escape(ticket.id)}" class="drawer-trigger" data-open-ticket="{html.escape(ticket.id)}" aria-label="Открыть тикет {html.escape(ticket.id)}">Открыть</button>'
+            blocked=f'<span class="badge">заблокирован: {len(ticket.blocked_by)}</span>' if ticket.blocked_by else ""; run='<span class="badge active-badge">агент выполняется</span>' if ticket.active_run else ""; retry='<span class="badge">ожидает автоповтора</span>' if stage.kind == "agent" and automatic_retry_available(ticket) and not ticket.active_run else ""; corrective='<span class="badge">без учета WIP</span>' if ticket.wip_exempt else ""; session_badge=_ticket_session_badge(ticket, session_store); summary=f'<div class="summary">{html.escape(ticket.last_summary or "")}</div>' if ticket.last_summary else ""; tree=tree_manager.trees.get(ticket.id) if tree_manager else None; details=_ticket_details_html(ticket, tree, ledger, budget_context); drawer_button=f'<button type="button" id="open-ticket-{html.escape(ticket.id)}" class="drawer-trigger" data-open-ticket="{html.escape(ticket.id)}" aria-label="Открыть тикет {html.escape(ticket.id)}">Открыть</button>'
             card_class = "card active-run" if ticket.active_run else "card"
             budget, _ = _budget_read_model(ledger, f"ticket:{ticket.id}", budget_context) if ledger else (None, [])
             budget_html = _budget_summary_html(budget)
