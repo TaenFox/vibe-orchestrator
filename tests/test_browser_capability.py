@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 import tomllib
+import types
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.ui_server_fixture import UiServerFixture
+from tests.ui_server_fixture import CAPABILITY_FAILURE, UiServerError, UiServerFixture
 from tests.test_ui_server_fixture import command
 
 ROOT = Path(__file__).parents[1]
@@ -156,6 +158,47 @@ def test_manifest_is_atomic_and_records_unavailable_browser_artifacts(tmp_path: 
     assert data["files"]["trace.zip"]["reason"]
     assert str(fixture.diagnostics.artifact_dir) in data["artifact_root"]
     assert not list(manifest.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("setup_failure", ["import", "launch"])
+def test_failed_browser_setup_persists_requested_browser_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup_failure: str):
+    class FakeBrowserType:
+        def launch_persistent_context(self, **kwargs):
+            raise OSError("browser executable is unavailable")
+
+    class FakePlaywright:
+        chromium = FakeBrowserType()
+
+        def stop(self):
+            pass
+
+    def sync_playwright():
+        if setup_failure == "import":
+            raise ImportError("playwright is unavailable")
+        return types.SimpleNamespace(start=lambda: FakePlaywright())
+
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = sync_playwright
+    playwright = types.ModuleType("playwright")
+    playwright.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", playwright)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+    fixture = UiServerFixture([], project_root=tmp_path, test_id="browser-failure")
+    with pytest.raises(UiServerError) as caught:
+        fixture.start_browser(url="http://127.0.0.1:1", browser_name="chromium")
+
+    fixture._finalize_artifacts("failure")
+    manifest_path = fixture.diagnostics.manifest_path
+    assert manifest_path is not None and manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert caught.value.classification == CAPABILITY_FAILURE
+    assert caught.value.cause is not None
+    assert manifest["outcome"] == "failure"
+    assert manifest["browser_name"] == "chromium"
+    assert manifest["browser_version"] is None
+    assert manifest["browser_reason"]
+    assert not any(path.name.endswith(".tmp") for path in manifest_path.parent.iterdir())
 
 
 def test_success_retention_deletes_transient_files_but_keeps_manifest(tmp_path: Path):
