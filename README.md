@@ -166,6 +166,41 @@ UI можно запустить вместе с оркестратором од
 vibe run /path/to/your-project --ui
 ```
 
+Для subprocess-проверок UI тесты предоставляют отдельную serial-фикстуру
+`ui_server`. Она запускает переданную команду без shell-строки в новой POSIX
+process group, передавая изолированный project/data root, `--host`, фактически
+назначенный порт и `--no-browser` (последние параметры добавляет command factory).
+Порт запрашивается через `0`, а после readiness доступен как `fixture.base_url`.
+Ожидаемый HTTP-статус readiness настраивается параметром
+`expected_readiness_status` и по умолчанию равен `200`; фактически наблюдённый
+статус и ожидаемое значение сохраняются в metadata.
+Параллельный запуск нескольких экземпляров этой MVP не является обещанным
+контрактом.
+
+Пример:
+
+```python
+with ui_server(lambda project, host, port: [
+    "vibe", "ui", str(project), "--host", host, "--port", str(port), "--no-browser"
+]) as server:
+    # HTTP/API checks use server.base_url.
+    ...
+```
+
+Метаданные сохраняются в `server.diagnostics.metadata_path`, а полные stdout и
+stderr — в соседних `stdout.log` и `stderr.log`. В metadata записываются PID,
+PGID, command, host/port, URL, isolated root, readiness и состояние cleanup.
+После обычного выхода сначала выполняется SIGTERM только собственной группе,
+даже если root process уже завершился, затем при необходимости SIGKILL всей
+оставшейся группе и её descendants. После teardown проверяется отсутствие root
+и собственной process group. Missing runner, bind/start failure, startup
+exit, readiness timeout и teardown failure имеют классификацию
+`capability_environment_failure` и означают ограничение тестовой capability, а
+не дефект UI. Browser-level DOM/focus/keyboard/viewport проверки в worker
+окружении недоступны.
+
+Targeted проверка: `python -m pytest tests/test_ui_server_fixture.py -q`.
+
 Новый UI использует серверный рендеринг и не требует отдельной сборки
 frontend-пакетов. Доска, поиск, карточка тикета и создание тикетов работают
 через framework routes; старый `http.server` больше не используется командами

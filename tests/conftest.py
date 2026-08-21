@@ -5,6 +5,7 @@ import pytest
 
 from vibe_orchestrator.tickets import TicketStore
 from vibe_orchestrator.ui import _build_server
+from tests.ui_server_fixture import UiServerFixture
 
 
 @pytest.fixture
@@ -29,3 +30,11 @@ def http_server(project):
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+@pytest.fixture
+def ui_server(project):
+    """Factory for the serial subprocess UI capability adapter."""
+    def factory(command, **kwargs):
+        return UiServerFixture(command, project_root=project, **kwargs)
+    return factory
