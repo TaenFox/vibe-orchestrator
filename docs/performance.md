@@ -139,6 +139,21 @@ busy-handler callback для измерения скрытого ожидани�
 Поэтому lock-wait fields сериализуются как `null` с явной limitation; это не
 означает нулевое ожидание и не меняет production retry/timeout semantics.
 
+## Изменения DEL-5D2004: UI render path
+
+Full board и `/fragment` используют request-local read model: каждый `budget_id`
+получает не более одного snapshot и списка runs, а delivery sessions читаются один
+раз и индексируются по ticket ID. Полная страница рендерит только drawer shell;
+выбранная панель загружается свежим `/drawer`, сохраняя context, budget, retry,
+session/tree, run history и artifact links. `/fragment` по-прежнему возвращает
+только board.
+
+Regression cases в `tests/test_ui.py` проверяют call counts, lazy markup, фильтры,
+fresh drawer endpoint, escaping/API payloads и существующие auto-refresh guards.
+Benchmark registry сохраняет board/fragment/drawer HTTP cases и сравнение выполняется
+при одинаковых dataset, storage, seed, warmup и iterations. Browser-level DOM/focus/
+viewport smoke в worker недоступен; telemetry и абсолютный SLO отсутствуют.
+
 ## Optimization criteria and regression policy
 
 **Decision status (DEL-355F27): no-SLO.** The owner decision is recorded in

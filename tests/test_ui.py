@@ -245,6 +245,41 @@ def test_budget_read_model_uses_one_snapshot_per_context(project):
     assert calls == {"budget": 1, "runs": 1}
 
 
+def test_delivery_render_reuses_budget_and_session_reads(project, monkeypatch):
+    store = TicketStore(project)
+    ticket = store.create("delivery", "task", "Один проход чтения", status="development")
+    ledger = BudgetLedger(project)
+    ledger.create_budget("ticket", ticket.id, limits={"tokens": 10, "points": 10, "runs": 1})
+    monkeypatch.setattr("vibe_orchestrator.ui.BudgetLedger", lambda _project: ledger)
+    sessions = DeliverySessionStore(project)
+    session = sessions.create("Индекс сессий")
+    sessions.add(session.id, ticket.id, store)
+
+    calls = {"budget": 0, "runs": 0, "sessions": 0}
+    original_budget, original_runs = ledger.read_budget, ledger.list_runs
+    original_sessions = sessions.list
+
+    def read_budget(budget_id):
+        calls["budget"] += 1
+        return original_budget(budget_id)
+
+    def list_runs(budget_id):
+        calls["runs"] += 1
+        return original_runs(budget_id)
+
+    def list_sessions():
+        calls["sessions"] += 1
+        return original_sessions()
+
+    ledger.read_budget, ledger.list_runs = read_budget, list_runs
+    sessions.list = list_sessions
+    page = render_board(store, load_all_workflows(), "delivery", session_store=sessions)
+
+    assert f"сессия: {session.id}" in page
+    # One read per distinct budget_id: ticket budget plus the absent session budget.
+    assert calls == {"budget": 2, "runs": 1, "sessions": 1}
+
+
 def test_empty_delivery_session_ticket_selector_disables_add_action(http_server, project):
     sessions = DeliverySessionStore(project)
     session = sessions.create("Пустая сессия")
@@ -526,10 +561,8 @@ def test_ticket_drawer_contains_context_history_artifacts_and_accessibility(proj
 
     assert 'class="card active-run"' in page
     assert 'data-open-ticket="' + ticket.id + '"' in page
-    assert 'data-ticket-drawer' in page and 'data-drawer-ticket="' + ticket.id + '"' in page
-    assert "Подробное описание" in page and "Итог запуска" in page
-    assert "DEL-PARENT" in page and "DEL-BLOCKED" in page
-    assert "/artifacts/run-active" in page
+    assert 'data-ticket-drawer' in page and 'data-drawer-ticket="' not in page
+    assert "Загрузка актуальных данных" in page
     assert "aria-label=\"Контекст тикета\"" in page
     assert "Escape" in page and "data-drawer-close" in page
     assert "fetch('/drawer?'" in page
