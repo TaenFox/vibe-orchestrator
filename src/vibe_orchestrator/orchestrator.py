@@ -142,6 +142,22 @@ class Orchestrator:
             await self._schedule_once()
             await asyncio.sleep(self.poll_interval)
 
+    def _materialize_delivery_membership(self) -> tuple[list[Any], dict[str, Any], tuple[Any, ...]]:
+        """Read active sessions once and derive all polling membership views."""
+        sessions = [session for session in self.session_store.list() if session.status == "active"]
+        session_by_ticket: dict[str, Any] = {}
+        effective_by_session: dict[str, tuple[str, ...]] = {}
+        for session in sessions:
+            effective_ids = tuple(sorted(self.session_store.effective_ticket_ids(session)))
+            effective_by_session[session.id] = effective_ids
+            for ticket_id in effective_ids:
+                session_by_ticket.setdefault(ticket_id, session)
+        snapshot = tuple(
+            (session.id, session.updated_at, effective_by_session[session.id])
+            for session in sessions
+        )
+        return sessions, session_by_ticket, snapshot
+
     async def _schedule_once(self) -> None:
         worker_limit = self._read_worker_limit()
         slots = worker_limit - len(self.running)
@@ -149,19 +165,13 @@ class Orchestrator:
             return
         global_candidates = []
         running_ids = set(self.running)
-        active_delivery_sessions = [session for session in self.session_store.list() if session.status == "active"]
-        # Materialize membership once per polling snapshot.  The same lookup
-        # is needed for candidate filtering and for selecting the run's
-        # session; keeping this map also preserves the existing session order
-        # when a ticket is present in more than one active session.
-        session_by_ticket: dict[str, Any] = {}
-        for session in active_delivery_sessions:
-            for ticket_id in self.session_store.effective_ticket_ids(session):
-                session_by_ticket.setdefault(ticket_id, session)
-        membership_snapshot = tuple(
-            (session.id, session.updated_at, tuple(self.session_store.effective_ticket_ids(session)))
-            for session in active_delivery_sessions
-        )
+        # Session writers use the same lock. Materialize the map and its
+        # token in one critical section so an update cannot split the two
+        # reads that define this polling snapshot.
+        with self.session_store.admission_lock():
+            active_delivery_sessions, session_by_ticket, membership_snapshot = (
+                self._materialize_delivery_membership()
+            )
         delivery_session_participants = set(session_by_ticket)
         if not active_delivery_sessions:
             delivery_session_participants = None
@@ -231,20 +241,12 @@ class Orchestrator:
                 # A membership update therefore commits either before the
                 # fresh snapshot (and is detected) or after reservation.
                 with self.session_store.admission_lock():
-                    fresh_sessions = [item for item in self.session_store.list() if item.status == "active"]
-                    fresh_snapshot = tuple(
-                        (item.id, item.updated_at, tuple(self.session_store.effective_ticket_ids(item)))
-                        for item in fresh_sessions
-                    )
+                    fresh_sessions, fresh_by_ticket, fresh_snapshot = self._materialize_delivery_membership()
                     # The candidate and its session must come from the same
                     # polling snapshot.  This also covers removal of the last
                     # active session (fresh_sessions == []).
                     if fresh_snapshot != membership_snapshot:
                         continue
-                    fresh_by_ticket: dict[str, Any] = {}
-                    for item in fresh_sessions:
-                        for member_id in self.session_store.effective_ticket_ids(item):
-                            fresh_by_ticket.setdefault(member_id, item)
                     fresh_session = fresh_by_ticket.get(ticket.id)
                     if workflow.id == "delivery" and active_delivery_sessions and fresh_session is None:
                         continue

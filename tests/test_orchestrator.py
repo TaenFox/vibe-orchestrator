@@ -75,6 +75,8 @@ def test_membership_removal_before_admission_skips_run_and_reservation(tmp_path:
         original_effective = orchestrator.session_store.effective_ticket_ids
         first_snapshot_ready = threading.Event()
         release_snapshot = threading.Event()
+        contract_started = threading.Event()
+        release_contract = threading.Event()
         calls = 0
 
         def controlled_effective(current):
@@ -87,21 +89,115 @@ def test_membership_removal_before_admission_skips_run_and_reservation(tmp_path:
             return result
 
         monkeypatch.setattr(orchestrator.session_store, "effective_ticket_ids", controlled_effective)
+        original_prepare = runner.prepare_execution_contract
+
+        def controlled_prepare(stage, run_id=None):
+            contract_started.set()
+            assert release_contract.wait(timeout=2)
+            return original_prepare(stage, run_id)
+
+        monkeypatch.setattr(runner, "prepare_execution_contract", controlled_prepare)
         scheduling = threading.Thread(target=lambda: asyncio.run(orchestrator._schedule_once()))
         scheduling.start()
         assert first_snapshot_ready.wait(timeout=2)
 
-        current = orchestrator.session_store.get(session.id)
-        orchestrator.session_store.cancel(current)
+        removal_done = threading.Event()
+        removal_started = threading.Event()
+
+        def remove_session():
+            removal_started.set()
+            current = orchestrator.session_store.get(session.id)
+            orchestrator.session_store.cancel(current)
+            removal_done.set()
+
+        removal = threading.Thread(target=remove_session)
+        removal.start()
+        assert removal_started.wait(timeout=2)
+        assert not removal_done.is_set()
         release_snapshot.set()
+        assert contract_started.wait(timeout=2)
+        assert removal_done.wait(timeout=2)
+        release_contract.set()
         scheduling.join(timeout=3)
+        removal.join(timeout=3)
         assert not scheduling.is_alive()
+        assert removal_done.is_set()
 
         persisted = orchestrator.store.get(ticket.id)
         assert persisted.active_run is None
         assert [event["event"] for event in run_events(persisted)] == []
         assert runner.contracts == []
         assert not orchestrator.running
+        assert orchestrator.ledger.list_runs(f"ticket:{ticket.id}") == []
+
+    asyncio.run(scenario())
+
+
+def test_membership_update_between_snapshot_and_admission_is_skipped(tmp_path: Path, monkeypatch):
+    async def scenario() -> None:
+        orchestrator = Orchestrator(tmp_path, max_agents=1)
+        runner = CapturingRunner()
+        orchestrator.runner = runner
+        ticket = orchestrator.store.create("delivery", "task", "Race update", status="selected_for_session")
+        added = orchestrator.store.create("delivery", "task", "Updated member", status="selected_for_session")
+        session = orchestrator.session_store.create([ticket.id])
+        orchestrator.session_store.activate(session)
+
+        original_effective = orchestrator.session_store.effective_ticket_ids
+        first_snapshot_ready = threading.Event()
+        release_snapshot = threading.Event()
+        contract_started = threading.Event()
+        release_contract = threading.Event()
+        calls = 0
+
+        def controlled_effective(current):
+            nonlocal calls
+            calls += 1
+            result = original_effective(current)
+            if calls == 1:
+                first_snapshot_ready.set()
+                assert release_snapshot.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(orchestrator.session_store, "effective_ticket_ids", controlled_effective)
+        original_prepare = runner.prepare_execution_contract
+
+        def controlled_prepare(stage, run_id=None):
+            contract_started.set()
+            assert release_contract.wait(timeout=2)
+            return original_prepare(stage, run_id)
+
+        monkeypatch.setattr(runner, "prepare_execution_contract", controlled_prepare)
+        scheduling = threading.Thread(target=lambda: asyncio.run(orchestrator._schedule_once()))
+        scheduling.start()
+        assert first_snapshot_ready.wait(timeout=2)
+
+        update_done = threading.Event()
+        update_started = threading.Event()
+
+        def update_membership():
+            update_started.set()
+            current = orchestrator.session_store.get(session.id)
+            orchestrator.session_store.override_ticket(current, added.id, actor="race-test", reason="boundary")
+            update_done.set()
+
+        updater = threading.Thread(target=update_membership)
+        updater.start()
+        assert update_started.wait(timeout=2)
+        assert not update_done.is_set()
+        release_snapshot.set()
+        assert contract_started.wait(timeout=2)
+        assert update_done.wait(timeout=2)
+        release_contract.set()
+        scheduling.join(timeout=3)
+        updater.join(timeout=3)
+
+        assert not scheduling.is_alive()
+        assert update_done.is_set()
+        persisted = orchestrator.store.get(ticket.id)
+        assert persisted.active_run is None
+        assert run_events(persisted) == []
+        assert runner.contracts == []
         assert orchestrator.ledger.list_runs(f"ticket:{ticket.id}") == []
 
     asyncio.run(scenario())

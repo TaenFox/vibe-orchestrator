@@ -189,15 +189,19 @@ dataset dimensions, p50/p95, sample count и delta по p50. Delta положи�
 signal. Это descriptive-only policy, не latency SLO. Недоступный case содержит
 limitation и исключается из claims.
 
-Admission использует тот же `sessions.lock`, что и session writer: read/read
-получает единый materialized snapshot, а membership update/removal до admission
-boundary вызывает skip без reservation, started event, task или partial budget
-state. Duplicate admission сохраняется idempotent budget/run contract.
+Admission использует тот же `sessions.lock`, что и session writer: initial
+materialization active sessions, `session_by_ticket` и membership token происходит
+в одной критической секции, а revalidation перед reservation повторяет это как
+один materialized read. Поэтому membership update/removal не может смешать версии
+внутри одного snapshot; изменение, опубликованное до admission boundary, вызывает
+skip без reservation, started event, task или partial budget state. Duplicate
+admission сохраняется idempotent budget/run contract.
 
 Детерминированные regression-сценарии закреплены в тестах: `consistent_snapshot`
 проверяет одинаковый membership snapshot для параллельных readers,
 `membership_removal_before_admission` — отсутствие reservation/started/task при
-удалении membership до boundary, а `parallel_admission` — ровно один
+удалении membership до boundary, `membership_update_between_snapshot_and_admission`
+— блокировку writer до snapshot boundary и skip stale admission, а `parallel_admission` — ровно один
 `active_run`, started event и ledger reservation. Сценарии используют barriers и
 events, без time-based sleeps; active session removal проверяется через
 допустимый lifecycle transition в `cancelled`.
