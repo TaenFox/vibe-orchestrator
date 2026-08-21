@@ -171,6 +171,9 @@ vibe run /path/to/your-project --ui
 process group, передавая изолированный project/data root, `--host`, фактически
 назначенный порт и `--no-browser` (последние параметры добавляет command factory).
 Порт запрашивается через `0`, а после readiness доступен как `fixture.base_url`.
+Ожидаемый HTTP-статус readiness настраивается параметром
+`expected_readiness_status` и по умолчанию равен `200`; фактически наблюдённый
+статус и ожидаемое значение сохраняются в metadata.
 Параллельный запуск нескольких экземпляров этой MVP не является обещанным
 контрактом.
 
@@ -188,7 +191,9 @@ with ui_server(lambda project, host, port: [
 stderr — в соседних `stdout.log` и `stderr.log`. В metadata записываются PID,
 PGID, command, host/port, URL, isolated root, readiness и состояние cleanup.
 После обычного выхода сначала выполняется SIGTERM только собственной группе,
-затем при необходимости SIGKILL. Missing runner, bind/start failure, startup
+даже если root process уже завершился, затем при необходимости SIGKILL всей
+оставшейся группе и её descendants. После teardown проверяется отсутствие root
+и собственной process group. Missing runner, bind/start failure, startup
 exit, readiness timeout и teardown failure имеют классификацию
 `capability_environment_failure` и означают ограничение тестовой capability, а
 не дефект UI. Browser-level DOM/focus/keyboard/viewport проверки в worker

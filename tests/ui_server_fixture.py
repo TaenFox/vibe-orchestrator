@@ -44,6 +44,7 @@ class UiServerDiagnostics:
     assigned_port: int | None = None
     base_url: str | None = None
     readiness_url: str | None = None
+    expected_readiness_status: int = 200
     pid: int | None = None
     pgid: int | None = None
     classification: str | None = None
@@ -73,6 +74,7 @@ class UiServerDiagnostics:
             "assigned_port": self.assigned_port,
             "base_url": self.base_url,
             "readiness_url": self.readiness_url,
+            "expected_readiness_status": self.expected_readiness_status,
             "data_root": str(self.data_root),
             "artifact_dir": str(self.artifact_dir),
             "pid": self.pid,
@@ -119,6 +121,7 @@ class UiServerFixture:
         project_root: Path | None = None,
         host: str = "127.0.0.1",
         readiness_path: str = "/",
+        expected_readiness_status: int = 200,
         readiness_timeout: float = 10.0,
         readiness_interval: float = 0.05,
         graceful_timeout: float = 2.0,
@@ -132,6 +135,9 @@ class UiServerFixture:
         self.source_root = Path(project_root).resolve() if project_root else None
         self._host = host
         self.readiness_path = readiness_path if readiness_path.startswith("/") else f"/{readiness_path}"
+        if not isinstance(expected_readiness_status, int):
+            raise TypeError("expected_readiness_status must be an integer")
+        self.expected_readiness_status = expected_readiness_status
         self.readiness_timeout = readiness_timeout
         self.readiness_interval = readiness_interval
         self.graceful_timeout = graceful_timeout
@@ -142,6 +148,7 @@ class UiServerFixture:
         self._stderr = None
         self.diagnostics = self._placeholder_diagnostics()
         self.diagnostics.host = host
+        self.diagnostics.expected_readiness_status = expected_readiness_status
         self.diagnostics.environment_overrides = {
             key: "<redacted>" if any(token in key.upper() for token in ("SECRET", "TOKEN", "PASSWORD", "KEY")) else value
             for key, value in self.env_overrides.items()
@@ -252,24 +259,56 @@ class UiServerFixture:
         self.diagnostics.readiness_deadline = datetime.fromtimestamp(time.time() + self.readiness_timeout, timezone.utc).isoformat()
         self.diagnostics.save()
         last_error = "not attempted"
+        observed_status: int | None = None
         while time.monotonic() < deadline:
             if self.process and self.process.poll() is not None:
-                self.diagnostics.readiness = {"status": "process_exited", "last_error": last_error, "elapsed": self.readiness_timeout - max(0, deadline - time.monotonic())}
+                self.diagnostics.readiness = {
+                    "status": "process_exited",
+                    "expected_status": self.expected_readiness_status,
+                    "observed_status": observed_status,
+                    "last_error": last_error,
+                    "elapsed": self.readiness_timeout - max(0, deadline - time.monotonic()),
+                }
                 self._write_state()
                 raise UiServerError("UI runner exited before readiness", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics)
             try:
                 with urllib.request.urlopen(self.diagnostics.readiness_url, timeout=min(1.0, self.readiness_interval + 0.5)) as response:
                     status = response.status
-                if status == 200:
+                observed_status = status
+                if status == self.expected_readiness_status:
                     self.diagnostics.classification = None
-                    self.diagnostics.readiness = {"status": status, "ready_at": _now()}
+                    self.diagnostics.readiness = {
+                        "status": status,
+                        "expected_status": self.expected_readiness_status,
+                        "observed_status": status,
+                        "ready_at": _now(),
+                    }
                     self.diagnostics.save()
                     return
                 last_error = f"unexpected HTTP status {status}"
+            except urllib.error.HTTPError as exc:
+                observed_status = exc.code
+                if observed_status == self.expected_readiness_status:
+                    self.diagnostics.classification = None
+                    self.diagnostics.readiness = {
+                        "status": observed_status,
+                        "expected_status": self.expected_readiness_status,
+                        "observed_status": observed_status,
+                        "ready_at": _now(),
+                    }
+                    self.diagnostics.save()
+                    return
+                last_error = f"unexpected HTTP status {observed_status}"
             except (urllib.error.URLError, OSError) as exc:
                 last_error = str(exc)
             time.sleep(self.readiness_interval)
-        self.diagnostics.readiness = {"status": "timeout", "last_error": last_error, "deadline": _now()}
+        self.diagnostics.readiness = {
+            "status": "timeout",
+            "expected_status": self.expected_readiness_status,
+            "observed_status": observed_status,
+            "last_error": last_error,
+            "deadline": _now(),
+        }
         self._write_state()
         raise UiServerError("UI readiness timed out", classification=CAPABILITY_FAILURE, diagnostics=self.diagnostics)
 
@@ -280,25 +319,35 @@ class UiServerFixture:
             return
         if self.diagnostics.process_alive_before is None:
             self.diagnostics.process_alive_before = self._alive()
-        if self._alive() and self.diagnostics.pgid is not None:
+        pgid = self.diagnostics.pgid
+        if pgid is not None and self._group_exists():
             try:
-                os.killpg(self.diagnostics.pgid, signal.SIGTERM)
+                os.killpg(pgid, signal.SIGTERM)
                 self.diagnostics.termination_signals.append("SIGTERM")
             except ProcessLookupError:
                 pass
-            try:
-                self.process.wait(timeout=self.graceful_timeout)
-            except subprocess.TimeoutExpired:
+            graceful_deadline = time.monotonic() + self.graceful_timeout
+            while time.monotonic() < graceful_deadline:
+                if self.process.poll() is not None and not self._group_exists():
+                    break
+                time.sleep(min(0.01, max(0, graceful_deadline - time.monotonic())))
+            if self._group_exists():
                 try:
-                    os.killpg(self.diagnostics.pgid, signal.SIGKILL)
+                    os.killpg(pgid, signal.SIGKILL)
                     self.diagnostics.termination_signals.append("SIGKILL")
                 except ProcessLookupError:
                     pass
-                try:
-                    self.process.wait(timeout=self.graceful_timeout)
-                except subprocess.TimeoutExpired as exc:
-                    self.diagnostics.readiness["teardown_error"] = str(exc)
-                    self.diagnostics.classification = CAPABILITY_FAILURE
+                forced_deadline = time.monotonic() + self.graceful_timeout
+                while time.monotonic() < forced_deadline and self._group_exists():
+                    time.sleep(min(0.01, max(0, forced_deadline - time.monotonic())))
+        if self.process.poll() is None:
+            try:
+                self.process.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                pass
+        if self._alive() or self._group_exists():
+            self.diagnostics.readiness["teardown_error"] = "owned process group remained after forced cleanup"
+            self.diagnostics.classification = CAPABILITY_FAILURE
         self._close_streams()
         self.diagnostics.stopped_at = _now()
         self._write_state()
