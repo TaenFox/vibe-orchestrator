@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import sys
 import textwrap
@@ -137,6 +138,28 @@ def test_missing_runner_is_capability_failure(tmp_path: Path):
     assert caught.value.cause is not None
 
 
+def test_preparation_failure_retains_failure_bundle_and_original_cause(tmp_path: Path, monkeypatch):
+    fixture = UiServerFixture(command(), project_root=tmp_path, test_id="prepare-failure")
+    original = OSError("copy failed")
+
+    def fail_copytree(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr(shutil, "copytree", fail_copytree)
+
+    with pytest.raises(UiServerError) as caught:
+        fixture.start()
+
+    assert caught.value.classification == CAPABILITY_FAILURE
+    assert caught.value.cause is original
+    assert fixture.diagnostics.manifest_path.exists()
+    manifest = json.loads(fixture.diagnostics.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["outcome"] == "failure"
+    assert manifest["preparation"]["status"] == "failed"
+    assert manifest["preparation"]["error_type"] == "OSError"
+    assert fixture.diagnostics.artifact_dir.exists()
+
+
 def test_sigkill_fallback_is_limited_to_owned_group(tmp_path: Path):
     unrelated = __import__("subprocess").Popen([sys.executable, "-c", "import time; time.sleep(5)"])
     fixture = UiServerFixture(command(ignore="1"), project_root=tmp_path, readiness_timeout=2, graceful_timeout=0.05)
@@ -151,6 +174,39 @@ def test_sigkill_fallback_is_limited_to_owned_group(tmp_path: Path):
     finally:
         unrelated.terminate()
         unrelated.wait()
+
+
+def test_cleanup_does_not_delete_external_state_root(tmp_path: Path):
+    fixture = UiServerFixture([], project_root=tmp_path, retention="failure")
+    external = tmp_path / "external-state"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    fixture.diagnostics.state_root = external
+
+    fixture._finalize_artifacts("success")
+
+    assert sentinel.exists()
+    manifest = json.loads(fixture.diagnostics.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["retention"]["status"] == "cleanup-safety-failed"
+    assert any("state_root" in error for error in manifest["cleanup"]["errors"])
+
+
+def test_cleanup_does_not_delete_artifact_dir_outside_configured_base(tmp_path: Path):
+    artifact_base = tmp_path / "configured-artifacts"
+    fixture = UiServerFixture([], project_root=tmp_path, artifact_base=artifact_base, retention="failure")
+    external_artifact_dir = tmp_path / "external-artifacts"
+    external_artifact_dir.mkdir()
+    sentinel = external_artifact_dir / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    fixture.diagnostics.artifact_dir = external_artifact_dir
+
+    fixture._finalize_artifacts("success")
+
+    assert sentinel.exists()
+    manifest = json.loads(fixture.diagnostics.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["retention"]["status"] == "cleanup-safety-failed"
+    assert any("artifact_dir" in error for error in manifest["cleanup"]["errors"])
 
 
 def test_bind_conflict_retries_with_new_factually_ready_port(tmp_path: Path):

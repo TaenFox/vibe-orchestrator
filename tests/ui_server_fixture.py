@@ -80,6 +80,8 @@ class UiServerDiagnostics:
     retention_policy: str = "delete-transient-on-success"
     retention_status: str = "pending"
     files: dict[str, dict[str, object]] = field(default_factory=dict)
+    preparation: dict[str, object] = field(default_factory=dict)
+    cleanup: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -133,6 +135,8 @@ class UiServerDiagnostics:
             "owned_process": {"pid": self.pid, "pgid": self.pgid, "signals": self.termination_signals},
             "files": self.files,
             "retention": {"policy": self.retention_policy, "status": self.retention_status},
+            "preparation": self.preparation,
+            "cleanup": self.cleanup,
         }
 
     def save(self) -> None:
@@ -419,6 +423,46 @@ class UiServerFixture:
                     self.diagnostics.readiness["browser_teardown_error"] = type(exc).__name__
         self._context = self._browser = self._playwright = self._page = None
 
+    def _validated_cleanup_path(self, path: Path, *, name: str) -> Path | None:
+        """Return a run-owned path, or record why it must not be removed."""
+        try:
+            artifact_dir = self.diagnostics.artifact_dir.resolve()
+            resolved = path.resolve(strict=False)
+            if self.artifact_base is not None:
+                artifact_base = self.artifact_base.resolve()
+                if not artifact_dir.is_relative_to(artifact_base):
+                    raise ValueError("artifact_dir is outside configured artifact_base")
+            if resolved == artifact_dir or not resolved.is_relative_to(artifact_dir):
+                raise ValueError(f"{name} is outside the current artifact_dir")
+            if path.is_symlink():
+                raise ValueError(f"{name} must not be a symlink")
+            if name == "state_root" and resolved == artifact_dir:
+                raise ValueError("state_root must be strictly inside artifact_dir")
+            return resolved
+        except (OSError, ValueError) as exc:
+            errors = self.diagnostics.cleanup.setdefault("errors", [])
+            assert isinstance(errors, list)
+            errors.append(f"{name}: {exc}")
+            self.diagnostics.cleanup["status"] = "safety-check-failed"
+            return None
+
+    def _delete_transient(self, path: Path, *, name: str) -> None:
+        validated = self._validated_cleanup_path(path, name=name)
+        if validated is None or not validated.exists():
+            return
+        try:
+            if validated.is_dir():
+                shutil.rmtree(validated)
+            else:
+                validated.unlink()
+        except OSError as exc:
+            errors = self.diagnostics.cleanup.setdefault("errors", [])
+            assert isinstance(errors, list)
+            errors.append(f"{name}: deletion failed: {exc}")
+            self.diagnostics.cleanup["status"] = "deletion-failed"
+            return
+        self.diagnostics.cleanup.setdefault("deleted", []).append(name)
+
     def _finalize_artifacts(self, outcome: str) -> None:
         self.diagnostics.outcome = outcome
         self.diagnostics.retention_status = "retained" if outcome == "failure" or self.retention == "always" else "cleanup-pending"
@@ -427,10 +471,14 @@ class UiServerFixture:
         self._close_browser(outcome == "failure")
         self.diagnostics.save()
         if outcome == "success" and self.retention != "always":
-            for path in (self.diagnostics.stdout_path, self.diagnostics.stderr_path, self.diagnostics.state_root):
-                if path and path.exists():
-                    shutil.rmtree(path) if path.is_dir() else path.unlink()
-            self.diagnostics.retention_status = "deleted-transient"
+            self._delete_transient(self.diagnostics.stdout_path, name="stdout")
+            self._delete_transient(self.diagnostics.stderr_path, name="stderr")
+            if self.diagnostics.state_root:
+                self._delete_transient(self.diagnostics.state_root, name="state_root")
+            if self.diagnostics.cleanup.get("errors"):
+                self.diagnostics.retention_status = "cleanup-safety-failed"
+            else:
+                self.diagnostics.retention_status = "deleted-transient"
             self.diagnostics.save()
         print(f"Browser artifacts: {self.diagnostics.artifact_dir}")
 
@@ -489,8 +537,23 @@ class UiServerFixture:
         self.diagnostics.process_group_alive_after = self._group_exists()
 
     def start(self) -> "UiServerFixture":
-        self._prepare()
         self.diagnostics.classification = CAPABILITY_FAILURE
+        try:
+            self._prepare()
+        except Exception as exc:
+            self.diagnostics.preparation = {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            self._finalize_artifacts("failure")
+            raise UiServerError(
+                "UI project preparation failed",
+                classification=CAPABILITY_FAILURE,
+                diagnostics=self.diagnostics,
+                cause=exc,
+            ) from exc
+        self.diagnostics.preparation = {"status": "completed"}
         last_error: BaseException | None = None
         for attempt in range(1, self.port_attempts + 1):
             try:

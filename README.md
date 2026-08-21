@@ -206,10 +206,20 @@ status. При failure browser adapter сохраняет `screenshot.png` и `t
 artifact root печатается в test output и в сообщении об ошибке; он совпадает с
 `manifest.artifact_root`.
 
+Ошибка подготовки project/data root (например, исключение `copytree`) также
+проходит через failure lifecycle: bundle и manifest сохраняются, в manifest
+фиксируются `outcome=failure` и причина подготовки, а `UiServerError.cause`
+содержит исходное исключение. Поэтому startup failure не теряет путь к evidence.
+
 Политика по умолчанию — `retain-on-failure/delete-transient-on-success`:
 после успешного teardown удаляются только transient logs/state текущего run,
 а manifest остаётся как компактная запись cleanup. Для отладки можно явно
 задать `BROWSER_ARTIFACT_RETENTION=always`; удаление ограничено текущим run root.
+Перед удалением transient logs и state fixture разрешает пути через
+`Path.resolve()` и проверяет, что run root находится внутри configured
+`artifact_base`, а удаляемые ресурсы — строго внутри этого run root. Нарушение
+проверки не удаляет внешний путь: manifest сохраняет `cleanup.errors` и статус
+`cleanup-safety-failed`, приоритетом остаётся сохранение evidence.
 
 Метаданные также сохраняются в `server.diagnostics.metadata_path`, а полные
 stdout и stderr — в `server.diagnostics.stdout_path` и
