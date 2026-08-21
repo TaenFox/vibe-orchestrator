@@ -180,9 +180,6 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     browser_page.set_viewport_size({"width": 390, "height": 844})
     assert browser_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert browser_page.get_by_role("button", name="Новый тикет").is_visible()
-    search = browser_page.get_by_label("Поиск")
-    search.fill("mobile")
-    assert browser_page.evaluate("document.querySelector('[data-board-search]').value === 'mobile'")
     fragment_requests = []
     browser_page.on(
         "request",
@@ -192,13 +189,31 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
         and request.resource_type == "fetch"
         else None,
     )
+    # Anchor the measurement before navigation so the existing page-load timer
+    # is measured from a deterministic boundary rather than from an arbitrary
+    # point after the timer may already have consumed part of its interval.
+    reload_started = time.monotonic()
+    browser_page.reload(wait_until="commit")
+    search = browser_page.get_by_label("Поиск")
+    search.wait_for()
+    browser_page.evaluate(
+        """() => {
+            window.__suppressBoardSearchChange = true;
+            document.addEventListener('change', event => {
+                if (window.__suppressBoardSearchChange && event.target.matches('[data-board-search]')) {
+                    window.__suppressBoardSearchChange = false;
+                    // Let blur move focus, but do not let native change invoke
+                    // the production controlled refresh(true) listener.
+                    event.stopImmediatePropagation();
+                }
+            }, true);
+        }"""
+    )
+    search.fill("mobile")
+    assert browser_page.evaluate("document.querySelector('[data-board-search]').value === 'mobile'")
     browser_page.evaluate(
         """() => {
             const search = document.querySelector('[data-board-search]');
-            // Blur normally dispatches change and intentionally triggers refresh(true).
-            // Suppress only that production event so the request below can come only
-            // from the existing interval; production code and timer semantics remain untouched.
-            search.addEventListener('change', event => event.stopImmediatePropagation(), true);
             search.blur();
             document.body.tabIndex = -1;
             document.body.focus();
@@ -210,7 +225,6 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     # The guard interval rules out a controlled refresh before the timer can fire.
     browser_page.wait_for_timeout(1300)
     assert fragment_requests == []
-    cadence_started = time.monotonic()
     with browser_page.expect_response(
         lambda response: response.url.split("?", 1)[0].endswith("/fragment")
         and response.request.method == "GET"
@@ -222,7 +236,7 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     request, request_started = fragment_requests[-1]
     assert request.method == "GET"
     assert request.resource_type == "fetch"
-    assert request_started - cadence_started >= 6.0
+    assert request_started - reload_started >= 6.0
     assert response_info.value.request.method == "GET"
     assert response_info.value.request.resource_type == "fetch"
     assert "частичное автообновление 8с" in browser_page.locator("body").inner_text()

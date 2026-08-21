@@ -373,6 +373,7 @@ Playwright or an installed Chromium binary; in that case browser-marked tests sk
 with a capability limitation, while assertion failures after Chromium startup remain
 product failures. Browser-level DOM, focus, viewport and timing evidence must be
 obtained in a browser-enabled runner.
+External Chromium runner command: `python -m pytest -m browser tests/browser/test_ui_smoke.py -q`.
 
 ## Управляемые Delivery-сессии
 
