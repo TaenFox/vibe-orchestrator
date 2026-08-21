@@ -148,11 +148,22 @@ Full board и `/fragment` используют request-local read model: каж�
 session/tree, run history и artifact links. `/fragment` по-прежнему возвращает
 только board.
 
+The drawer lifecycle keeps this lazy contract across repeated use: a successful
+load may replace the shell with a fetched panel, while every close removes that
+panel and restores one reusable loading shell. Close via button, Escape, or backdrop
+also restores focus to the opener when it remains connected; a removed opener is a
+safe no-op. A request token prevents a response arriving after close from reopening
+the drawer or inserting stale content. The Node harness covers these unit-level
+transitions; real browser DOM/focus/keyboard/viewport smoke remains unavailable in
+the worker and requires an external or manual run.
+
 Regression cases в `tests/test_ui.py` проверяют call counts, lazy markup, фильтры,
 fresh drawer endpoint, escaping/API payloads и существующие auto-refresh guards.
+Node lifecycle harness также проверяет два последовательных открытия, восстановление
+shell и focus для close button/backdrop, а также игнорирование late response.
 Benchmark registry сохраняет board/fragment/drawer HTTP cases и сравнение выполняется
 при одинаковых dataset, storage, seed, warmup и iterations. Browser-level DOM/focus/
-viewport smoke в worker недоступен; telemetry и абсолютный SLO отсутствуют.
+viewport, Escape и Tab smoke в worker недоступен; telemetry и абсолютный SLO отсутствуют.
 
 ## Optimization criteria and regression policy
 

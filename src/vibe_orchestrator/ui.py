@@ -83,6 +83,25 @@ AUTO_REFRESH_SCRIPT = f"""<script>
     document.querySelectorAll('details[data-ticket-details]').forEach(el => {{ if (savedDetails.has(el.dataset.ticketDetails)) el.open = savedDetails.get(el.dataset.ticketDetails); }});
   }};
   let inFlight = false; let lastInteraction = 0;
+  let drawerRequestToken = 0;
+  const createDrawerLoading = () => {{
+    const shell = document.createElement('section'); shell.className = 'drawer-panel'; shell.dataset.drawerLoading = ''; shell.tabIndex = -1;
+    shell.innerHTML = '<div class="drawer-header"><h2>Контекст тикета</h2><button type="button" class="drawer-close" data-drawer-close aria-label="Закрыть drawer">Закрыть</button></div><p class="meta">Загрузка актуальных данных…</p>';
+    return shell;
+  }};
+  const ensureDrawerLoading = drawer => {{
+    drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.remove());
+    let loading = drawer.querySelector('[data-drawer-loading]');
+    if (!loading) {{ loading = createDrawerLoading(); drawer.appendChild(loading); }}
+    drawer.querySelectorAll('[data-drawer-loading]').forEach(item => {{ if (item !== loading) item.remove(); }});
+    loading.hidden = false; return loading;
+  }};
+  const restoreDrawerFocus = drawer => {{
+    let opener = drawer.__previousFocus;
+    if (opener && opener.isConnected === false && drawer.__previousFocusId) opener = document.getElementById(drawer.__previousFocusId);
+    if (opener?.focus && opener.isConnected !== false) opener.focus();
+    drawer.__previousFocus = null; drawer.__previousFocusId = '';
+  }};
   const toggle = () => document.querySelector('[data-refresh-toggle]');
   const updateToggle = () => {{ const paused = state().refreshPaused === true; const button = toggle(); if (button) {{ button.textContent = paused ? 'Обновление: пауза' : 'Обновление: включено'; button.setAttribute('aria-pressed', String(paused)); }} }};
   const busy = force => {{
@@ -117,8 +136,8 @@ AUTO_REFRESH_SCRIPT = f"""<script>
   document.addEventListener('click', event => {{
     lastInteraction = Date.now(); const link = event.target.closest('a[href*="?process="]'); if (link) {{ remember(); save({{process: new URL(link.href, location.href).searchParams.get('process')}}); }}
     const toggleButton = event.target.closest('[data-refresh-toggle]'); if (toggleButton) {{ save({{refreshPaused: state().refreshPaused !== true}}); updateToggle(); return; }}
-    const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const ticketId = open.dataset.openTicket; const loading = drawer?.querySelector('[data-drawer-loading]'); if (!drawer || !loading) return; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.dataset.previousFocus = open.id || ''; document.body.classList.add('drawer-open'); loading.hidden = false; loading.focus(); save({{ticket: ticketId}}); fetch('/drawer?' + new URLSearchParams({{process: state().process || 'discovery', ticket: ticketId}}), {{cache: 'no-store'}}).then(response => response.ok ? response.text() : '').then(text => {{ if (!text || state().ticket !== ticketId) return; const updated = document.createRange().createContextualFragment(text).firstElementChild; if (updated) {{ updated.hidden = false; loading.replaceWith(updated); updated.focus(); }} }}).catch(() => {{}}); return; }}
-    if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (drawer) {{ drawer.hidden = true; drawer.setAttribute('aria-hidden', 'true'); drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.hidden = true); }} if (backdrop) backdrop.hidden = true; document.body.classList.remove('drawer-open'); refresh(true); }}
+    const open = event.target.closest('[data-open-ticket]'); if (open) {{ event.preventDefault(); const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); const ticketId = open.dataset.openTicket; if (!drawer) return; const loading = ensureDrawerLoading(drawer); const requestToken = ++drawerRequestToken; drawer.hidden = false; if (backdrop) backdrop.hidden = false; drawer.setAttribute('aria-hidden', 'false'); drawer.__previousFocus = open; drawer.__previousFocusId = open.id || ''; drawer.dataset.previousFocus = open.id || ''; document.body.classList.add('drawer-open'); loading.hidden = false; loading.focus(); save({{ticket: ticketId}}); fetch('/drawer?' + new URLSearchParams({{process: state().process || 'discovery', ticket: ticketId}}), {{cache: 'no-store'}}).then(response => response.ok ? response.text() : '').then(text => {{ if (!text || requestToken !== drawerRequestToken || drawer.hidden || state().ticket !== ticketId) return; const updated = document.createRange().createContextualFragment(text).firstElementChild; if (updated) {{ updated.hidden = false; loading.replaceWith(updated); updated.focus(); }} }}).catch(() => {{}}); return; }}
+    if (event.target.matches('[data-drawer-close], [data-drawer-backdrop]')) {{ const drawer = document.querySelector('[data-ticket-drawer]'); const backdrop = document.querySelector('[data-drawer-backdrop]'); if (drawer) {{ ++drawerRequestToken; drawer.hidden = true; drawer.setAttribute('aria-hidden', 'true'); drawer.querySelectorAll('[data-drawer-ticket]').forEach(panel => panel.remove()); ensureDrawerLoading(drawer); }} if (backdrop) backdrop.hidden = true; document.body.classList.remove('drawer-open'); Promise.resolve(refresh(true)).finally(() => {{ if (drawer) restoreDrawerFocus(drawer); }}); }}
     const card = event.target.closest('.card[data-ticket]'); if (card) {{ document.querySelectorAll('.card.selected').forEach(item => item.classList.remove('selected')); card.classList.add('selected'); save({{ticket: card.dataset.ticket}}); }}
   }});
   document.addEventListener('keydown', event => {{

@@ -440,6 +440,102 @@ assert.equal(fetches, 3);
     assert "if (!response.ok) throw new Error('Не удалось создать тикет')" in AUTO_REFRESH_SCRIPT
 
 
+def test_ticket_drawer_lifecycle_reopens_restores_focus_and_ignores_late_response():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the drawer lifecycle harness")
+
+    script = re.search(r"<script>(.*?)</script>", AUTO_REFRESH_SCRIPT, re.DOTALL).group(1)
+    harness = r'''
+(async () => {
+  const assert = require('node:assert/strict');
+  class Element {
+    constructor(tag, attrs = {}) {
+      this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null;
+      this.dataset = {}; this.attributes = {}; this.hidden = false; this.tabIndex = 0;
+      this.id = attrs.id || ''; this.value = attrs.value || ''; this.className = attrs.class || '';
+      for (const [key, value] of Object.entries(attrs)) {
+        if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
+      }
+      this.classList = { add: name => { if (!this.className.split(/\\s+/).includes(name)) this.className += ` ${name}`; }, remove: name => { this.className = this.className.split(/\\s+/).filter(item => item && item !== name).join(' '); } };
+    }
+    get isConnected() { return !this.parentNode || this.parentNode.isConnected; }
+    appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+    remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(item => item !== this); this.parentNode = null; }
+    replaceWith(child) { const index = this.parentNode.children.indexOf(this); child.parentNode = this.parentNode; this.parentNode.children[index] = child; this.parentNode = null; }
+    focus() { active = this; }
+    click() { clickHandler({ target: this, preventDefault: () => {} }); }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    getAttribute(name) { return this.attributes[name] ?? null; }
+        matches(selector) {
+          if (selector === '[data-drawer-close], [data-drawer-backdrop]') return this.matches('[data-drawer-close]') || this.matches('[data-drawer-backdrop]');
+      if (selector === '[data-ticket-drawer]') return 'ticketDrawer' in this.dataset;
+      if (selector === '[data-drawer-backdrop]') return 'drawerBackdrop' in this.dataset;
+      if (selector === '[data-drawer-loading]') return 'drawerLoading' in this.dataset;
+      if (selector === '[data-drawer-ticket]') return 'drawerTicket' in this.dataset;
+      if (selector === '[data-drawer-ticket]:not([hidden])') return 'drawerTicket' in this.dataset && !this.hidden;
+      if (selector === '[data-drawer-close]') return 'drawerClose' in this.dataset;
+      if (selector === '[data-open-ticket]') return 'openTicket' in this.dataset;
+      if (selector === '.board') return this.className.split(/\\s+/).includes('board');
+      if (selector === 'details[open]') return this.tagName === 'DETAILS' && this.open;
+      if (selector === 'input, select, textarea') return ['INPUT', 'SELECT', 'TEXTAREA'].includes(this.tagName);
+      return false;
+    }
+    closest(selector) { return this.matches(selector) ? this : null; }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    querySelectorAll(selector) {
+      const found = []; const visit = item => { for (const child of item.children) { if (child.matches(selector)) found.push(child); visit(child); } };
+      visit(this); return found;
+    }
+    set innerHTML(value) {
+      this.children = [];
+      if (value.includes('data-drawer-close')) this.appendChild(new Element('button', { 'data-drawer-close': '' }));
+    }
+  }
+  let active = null; let clickHandler; let keyHandler; const deferred = []; let stored = null;
+  const board = new Element('main', { class: 'board' });
+  const drawer = new Element('aside', { 'data-ticket-drawer': '' }); drawer.hidden = true;
+  const backdrop = new Element('div', { 'data-drawer-backdrop': '' }); backdrop.hidden = true;
+  const shell = new Element('section', { 'data-drawer-loading': '' }); drawer.appendChild(shell);
+  const openerA = new Element('button', { id: 'open-a', 'data-open-ticket': 'A' });
+  const openerB = new Element('button', { id: 'open-b', 'data-open-ticket': 'B' });
+  const roots = [board, drawer, backdrop, openerA, openerB];
+  const find = selector => roots.flatMap(root => root.matches(selector) ? [root] : root.querySelectorAll(selector))[0] || null;
+  globalThis.sessionStorage = { getItem: () => stored, setItem: (_, value) => { stored = value; } };
+  globalThis.location = { search: '?process=discovery' }; globalThis.CSS = { escape: value => value };
+  globalThis.setInterval = () => {}; globalThis.window = { scrollTo: () => {} };
+  globalThis.document = {
+    hidden: false, body: new Element('body'), scrollingElement: { scrollTop: 0 },
+    get activeElement() { return active; }, querySelector: find,
+    querySelectorAll: selector => roots.flatMap(root => root.matches(selector) ? [root] : root.querySelectorAll(selector)),
+    getElementById: id => roots.find(root => root.id === id) || null,
+    createElement: tag => new Element(tag),
+    createRange: () => ({ createContextualFragment: text => { const panel = new Element('section', { 'data-drawer-ticket': text.match(/data-drawer-ticket="([^"]+)/)[1] }); panel.appendChild(new Element('button', { 'data-drawer-close': '' })); return { firstElementChild: panel }; } }),
+    addEventListener: (event, handler) => { if (event === 'click') clickHandler = handler; if (event === 'keydown') keyHandler = handler; }
+  };
+  globalThis.fetch = (url) => {
+    if (url.startsWith('/fragment?')) return Promise.resolve({ ok: true, text: async () => '<main class="board"></main>' });
+    const request = {}; deferred.push({ url, request }); return new Promise(resolve => { request.resolve = resolve; });
+  };
+  __SCRIPT__
+  const open = opener => clickHandler({ target: opener, preventDefault: () => {} });
+  const close = target => clickHandler({ target, preventDefault: () => {} });
+  const response = ticket => ({ ok: true, text: async () => `<section class="drawer-panel" data-drawer-ticket="${ticket}"></section>` });
+  open(openerA); assert.equal(deferred.length, 1); deferred[0].request.resolve(response('A')); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  const panelA = drawer.querySelector('[data-drawer-ticket]'); assert.ok(panelA, JSON.stringify({ children: drawer.children.map(item => item.dataset), stored })); assert.equal(panelA.dataset.drawerTicket, 'A');
+  close(drawer.querySelector('[data-drawer-ticket]').querySelector('[data-drawer-close]')); await new Promise(resolve => setImmediate(resolve));
+  assert.ok(drawer.querySelector('[data-drawer-loading]')); assert.equal(drawer.querySelector('[data-drawer-ticket]'), null); assert.equal(active, openerA);
+  open(openerB); assert.equal(deferred.length, 2); deferred[1].request.resolve(response('B')); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  keyHandler({ key: 'Escape' }); await new Promise(resolve => setImmediate(resolve)); assert.equal(active, openerB); assert.ok(drawer.querySelector('[data-drawer-loading]'));
+  open(openerA); const late = deferred[2]; close(backdrop); late.request.resolve(response('stale')); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(drawer.querySelector('[data-drawer-ticket]'), null); assert.ok(drawer.querySelector('[data-drawer-loading]'));
+  open(openerA); assert.equal(deferred.length, 4);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''.replace('__SCRIPT__', script)
+    completed = subprocess.run([node, "--eval", harness], capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_ui_browser_contract_exposes_focusable_controls_and_mobile_column_width(project):
     store = TicketStore(project)
     store.create("discovery", "idea", "Keyboard and mobile", status="ready")
