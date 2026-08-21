@@ -240,6 +240,11 @@ artifact root печатается в test output и в сообщении об 
 проверки не удаляет внешний путь: manifest сохраняет `cleanup.errors` и статус
 `cleanup-safety-failed`, приоритетом остаётся сохранение evidence.
 
+Sensitive values не публикуются в manifest, stdout/stderr, screenshots,
+traces или handoff: environment keys с `SECRET`, `TOKEN`, `PASSWORD`, `KEY`
+показываются как `<redacted>`. Artifacts не коммитятся в Git, а cleanup
+ограничен текущим run root.
+
 Метаданные также сохраняются в `server.diagnostics.metadata_path`, а полные
 stdout и stderr — в `server.diagnostics.stdout_path` и
 `server.diagnostics.stderr_path`. В metadata записываются PID, PGID, command,
@@ -726,6 +731,40 @@ UI не является telemetry или billing системой: budget read-
 Benchmark сравнивает одинаковые dataset, storage, seed, warmup и iterations.
 Degradation >5% считается regression signal, improvement >=20% — optimization
 candidate; абсолютный latency SLO не установлен.
+
+### Browser capability contract (изменения DEL-F4F6C7)
+
+Baseline capability предназначена для проверки UI в реальном Chromium поверх
+изолированного local server fixture. Smoke matrix `BROWSER-SMOKE-01..07`
+покрывает board/card и drawer, focus/close/Escape, keyboard-only navigation,
+multiline input и `/fragment`, create/state action, safe rendering, mobile
+viewport и bounded auto-refresh. Состояния: `success`, `failure`,
+`capability_environment_failure`, retained/deleted-transient и
+cleanup-safety-failed; unavailable browser получает `reason` в `manifest.json`.
+
+Для non-UI проектов и тикетов без UI acceptance criteria browser suite
+optional: достаточно static/API evidence и записи `browser-not-applicable`.
+Для UI browser run нужен, когда критерии требуют DOM, focus, keyboard,
+viewport, timing или real interaction, и только при наличии runner. В текущем
+worker browser automation не подключена, поэтому нужен внешний/manual
+browser-enabled run.
+
+Evidence taxonomy: static (unit, source inspection, JS harness и HTML/string
+assertions), API/HTTP (endpoint/readiness) и browser-level (реальный runner,
+DOM/accessible tree, interaction observation и сохранённый result/artifact).
+Static/API evidence не подтверждает browser claim; claim допустим только со
+ссылкой на фактический artifact root/`manifest.json` или успешный browser-run
+result.
+
+Semantic locator contract предпочитает `get_by_role` с name, `get_by_label`,
+`get_by_text(..., exact=True)` и domain `data-*` (`data-ticket`,
+`data-drawer-ticket`). `nth-child`, positional/layout-only, class-only и
+структурный XPath не используются как primary contract.
+
+Изменения DEL-F4F6C7 формализуют applicability, commands, evidence/claim
+rules, semantic locators, artifact retention, cleanup safety и redaction.
+Baseline DEL-942D0F (optional Playwright/Chromium, per-run roots, serial
+default и explicit parallel opt-in) и smoke implementation не изменялись.
 
 ## Budget control plane
 

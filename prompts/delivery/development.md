@@ -52,3 +52,24 @@ context:
 ```
 
 `validator_result: passed` допустим только после фактического успешного запуска команды.
+
+## Browser capability handoff
+
+Выберите релевантный test class: static/API для non-UI и обычных тикетов,
+browser-level только для UI критериев про DOM, focus, keyboard, viewport,
+timing или real interaction. Не устанавливайте optional Playwright/Chromium без
+необходимости. Browser suite не обязательна для non-UI проектов; при
+неприменимости укажите `browser-not-applicable`.
+
+Если browser verification нужна, используйте marker `@pytest.mark.browser` и
+`python -m pytest -m browser tests/browser -q` после
+`pip install -e '.[dev,browser]'` и `python -m playwright install chromium`.
+В текущем worker browser-level runner недоступен: внешний/manual
+browser-enabled run укажите как unavailable, не заявляя browser claim по
+collection, static/API тестам или анализу исходников.
+
+В handoff перечислите выполненные static/API проверки отдельно от unavailable
+browser scenarios. Для browser claim приложите repository-relative template
+`.vibe/browser-artifacts/<test-id>/<run-id>/` с `manifest.json` или фактический
+test result; укажите outcome и cleanup status. Не добавляйте artifacts в Git и
+редактируйте чувствительные значения как `<redacted>`.
