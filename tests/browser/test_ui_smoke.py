@@ -194,13 +194,26 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     assert browser_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert browser_page.get_by_role("button", name="Новый тикет").is_visible()
     fragment_requests = []
+
+    def observe_fragment_request(request):
+        if (
+            request.url.split("?", 1)[0].endswith("/fragment")
+            and request.method == "GET"
+            and request.resource_type == "fetch"
+        ):
+            fragment_requests.append((request, time.monotonic()))
+            browser_page.evaluate(
+                """() => {
+                    const guard = window.__fragmentGuard;
+                    if (guard && performance.now() - guard.startedAt < guard.durationMs) {
+                        guard.requestCount += 1;
+                    }
+                }"""
+            )
+
     browser_page.on(
         "request",
-        lambda request: fragment_requests.append((request, time.monotonic()))
-        if request.url.split("?", 1)[0].endswith("/fragment")
-        and request.method == "GET"
-        and request.resource_type == "fetch"
-        else None,
+        observe_fragment_request,
     )
     # Anchor the measurement before navigation so the existing page-load timer
     # is measured from a deterministic boundary rather than from an arbitrary
@@ -226,6 +239,11 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     assert browser_page.evaluate("document.querySelector('[data-board-search]').value === 'mobile'")
     browser_page.evaluate(
         """() => {
+            window.__fragmentGuard = {
+                startedAt: performance.now(),
+                durationMs: 1300,
+                requestCount: 0,
+            };
             const search = document.querySelector('[data-board-search]');
             search.blur();
             document.body.tabIndex = -1;
@@ -235,8 +253,22 @@ def test_browser_smoke_07_mobile_viewport_and_bounded_auto_refresh(browser_page)
     assert browser_page.evaluate(
         "() => !document.activeElement?.matches('input, select, textarea')"
     )
-    # The guard interval rules out a controlled refresh before the timer can fire.
-    browser_page.wait_for_timeout(1300)
+    # The guard interval is an observable, bounded condition. An early request
+    # throws from the predicate instead of being hidden by a fixed sleep.
+    browser_page.wait_for_function(
+        """() => {
+            const guard = window.__fragmentGuard;
+            if (!guard) {
+                return false;
+            }
+            if (guard.requestCount > 0) {
+                throw new Error('GET /fragment started during the post-blur guard window');
+            }
+            return performance.now() - guard.startedAt >= guard.durationMs;
+        }""",
+        timeout=2000,
+        polling=50,
+    )
     assert fragment_requests == []
     with browser_page.expect_response(
         lambda response: response.url.split("?", 1)[0].endswith("/fragment")

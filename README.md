@@ -367,6 +367,11 @@ UI проверяется регрессионными тестами для Dis
 | `BROWSER-SMOKE-06` | escaped script-like text and bounded multiline rendering |
 | `BROWSER-SMOKE-07` | mobile overflow bound; no controlled refresh during the post-blur guard window; then an interval-driven eight-second `/fragment` fetch after form focus is removed |
 
+For `BROWSER-SMOKE-07`, the 1.3-second post-blur guard is synchronized through
+an observable page-side guard state and Playwright's bounded condition polling.
+The predicate requires both guard elapsed time and zero observed `/fragment`
+fetches; an early fetch raises an assertion before the subsequent cadence check.
+
 Static tests in `tests/test_ui.py`, API tests and JavaScript checks remain independent
 and do not constitute browser evidence. The current worker environment may lack
 Playwright or an installed Chromium binary; in that case browser-marked tests skip
