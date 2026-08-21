@@ -72,7 +72,10 @@ Committed baseline использует synthetic-only fixture (`seed=35527`, `w
 raw samples with p50/p95 recalculated from those samples. Result and profile
 manifest share a stable run ID and manifest hash; baseline descriptors carry
 relative paths, checksums, sizes and command hashes for every committed profile
-artifact.
+artifact. For the committed result, descriptor paths resolve from the canonical
+base `benchmarks/performance/artifacts/`; this baseline therefore uses
+`profile-small-seed-35527/<file>`. Standalone `profile.py` keeps paths relative
+to its `--output` directory.
 
 ## Approved dataset и storage comparison
 
@@ -99,6 +102,17 @@ BudgetLedger, Orchestrator, Scheduler, UI и HTTP. Для каждой запи�
 `profiled`, `failed` или `unavailable`, sample parameters, errors и descriptors
 отдельных pstats/text artifacts в финальном `profile-manifest.json`. Requested
 scenario валидируется и сохраняется как focus, но не отключает остальные записи.
+
+## Artifact path and integrity rules
+
+When an artifact root is supplied, `validate_result()` resolves every descriptor
+from that explicit base, never from the current working directory. Absolute
+paths, `..`, paths escaping the root, missing files, directories and symlinks
+are invalid. pstats/text files must be regular files whose `size_bytes` and
+SHA-256 match the descriptor. `profile-manifest.json` must resolve to a regular
+file, but its checksum is not compared because the manifest contains its own
+descriptor and a recursive checksum would be impossible. Standalone output-
+relative paths remain unchanged.
 
 ## SQLite attribution schema
 

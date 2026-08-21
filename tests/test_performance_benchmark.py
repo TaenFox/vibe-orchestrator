@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def test_performance_policy_documents_thresholds_and_slo_decision():
 
 def test_profile_linkage_descriptors_are_portable_and_complete():
     result = json.loads(Path("benchmarks/performance/artifacts/baseline-small-seed-35527.json").read_text(encoding="utf-8"))
-    validate_result(result)
+    validate_result(result, artifact_root=Path("benchmarks/performance/artifacts"))
     assert result["parameters"]["warmup"] >= 5
     assert result["parameters"]["iterations"] >= 30
     assert result["profiling"]["artifacts"]
@@ -66,6 +67,58 @@ def test_profile_linkage_descriptors_are_portable_and_complete():
                                    "kind", "sha256", "size_bytes", "command_hash"}
         assert not Path(descriptor["path"]).is_absolute()
         assert ".." not in Path(descriptor["path"]).parts
+
+
+def _profile_result(tmp_path, descriptor):
+    path = tmp_path / "profile" / "artifact.txt"
+    path.parent.mkdir()
+    path.write_bytes(b"profile evidence")
+    descriptor.update(path="artifact.txt", kind="text", size_bytes=path.stat().st_size,
+                      sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    return {"schema_version": "performance-result.v2", "run_id": "r", "dataset_manifest": {},
+            "cases": [], "source_checksum_before": "a", "source_checksum_after": "a",
+            "provenance": PROVENANCE, "profiling": {"run_id": "r", "manifest_hash": "a",
+            "artifacts": [descriptor]}}, path
+
+
+def test_root_aware_profile_validation_rejects_missing_and_integrity_errors(tmp_path):
+    base = {"run_id": "r", "case_id": "c", "component": "x", "manifest_hash": "a",
+            "path": "artifact.txt", "kind": "text", "sha256": "", "size_bytes": 0, "command_hash": "c"}
+    result, path = _profile_result(tmp_path, base)
+    validate_result(result, artifact_root=path.parent)
+    path.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        validate_result(result, artifact_root=path.parent)
+    path.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="size|checksum"):
+        validate_result(result, artifact_root=path.parent)
+    path.write_bytes(b"x" * result["profiling"]["artifacts"][0]["size_bytes"])
+    with pytest.raises(ValueError, match="checksum"):
+        validate_result(result, artifact_root=path.parent)
+
+
+@pytest.mark.parametrize("relative_path", ["../artifact.txt", "/tmp/artifact.txt"])
+def test_root_aware_profile_validation_rejects_unsafe_paths(tmp_path, relative_path):
+    result, path = _profile_result(tmp_path, {"run_id": "r", "case_id": "c", "component": "x",
+        "manifest_hash": "a", "path": "artifact.txt", "kind": "text", "sha256": "",
+        "size_bytes": 0, "command_hash": "c"})
+    result["profiling"]["artifacts"][0]["path"] = relative_path
+    with pytest.raises(ValueError, match="relative|root"):
+        validate_result(result, artifact_root=path.parent)
+
+
+def test_root_aware_profile_validation_rejects_directories_and_symlinks(tmp_path):
+    result, path = _profile_result(tmp_path, {"run_id": "r", "case_id": "c", "component": "x",
+        "manifest_hash": "a", "path": "artifact.txt", "kind": "text", "sha256": "",
+        "size_bytes": 0, "command_hash": "c"})
+    descriptor = result["profiling"]["artifacts"][0]
+    descriptor["path"] = "."
+    with pytest.raises(ValueError, match="regular file"):
+        validate_result(result, artifact_root=path.parent)
+    descriptor["path"] = "link.txt"
+    (path.parent / "link.txt").symlink_to(path)
+    with pytest.raises(ValueError, match="symlinks"):
+        validate_result(result, artifact_root=path.parent)
 
 
 def test_committed_profile_artifacts_have_no_absolute_worktree_paths():
